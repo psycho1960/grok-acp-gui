@@ -15,7 +15,7 @@
 
 ## 2. 目标与背景
 
-从 `formulahendry/acp-ui` v0.1.16（固定 commit `cd9c3cb464a4b321bff652101953a64c07473e31`）建立可追溯基线，保留 MIT License 和 Git 历史，将产品重命名为 Grok ACP GUI，并移除 v1 明确不需要的 Web、移动端、通用 Agent 商店和遥测能力。完成后应是一个可启动、可构建、尚未实现产品功能的 Windows Tauri/Vue 壳。
+从 `formulahendry/acp-ui` v0.1.16（固定 commit `cd9c3cb464a4b321bff652101953a64c07473e31`）建立可追溯源码基线，保留 MIT License、原作者版权和明确的上游来源记录，将产品重命名为 Grok ACP GUI，并移除 v1 明确不需要的 Web、移动端、通用 Agent 商店和遥测能力。根据 `docs/adr/ADR-0001-upstream-provenance-without-shared-ancestry.md`，固定上游 commit 不要求属于 PR HEAD 或 `origin/main` 的 Git 祖先链。完成后应是一个可启动、可构建、尚未实现产品功能的 Windows Tauri/Vue 壳。
 
 ## 3. 规范映射
 
@@ -39,10 +39,10 @@
 
 ## 6. 实现范围
 
-- Fork/clone v0.1.16，校验 HEAD 为固定 commit，并设置 `upstream`。
+- 读取/checkout v0.1.16，校验 tag 指向固定 commit，按 ADR-0001 记录来源，将已校验源码快照导入任务分支并设置 `upstream`；产品仓库不要求与上游共享 Git 祖先。
 - 保留 MIT License 和第三方版权声明。
 - 产品名、包名、Tauri identifier、窗口标题和内部命名改为 Grok ACP GUI。
-- 保留 Windows desktop、Vue/Pinia、Tauri、ACP transport 基础、文件选择和本地持久化能力。
+- 保留 Windows desktop、Vue/Pinia、Tauri、ACP SDK 依赖基线、文件选择和本地持久化能力；不在 Renderer 或 Rust 中提前实现 ACP framing/transport。
 - 删除 Web build、移动端生成目录/脚本、WebSocket remote agent、通用 Agent Registry/Store、Application Insights 和默认第三方 Agent 配置。
 - 创建技术方案约定的顶层目录和最小 composition root；不创建空的业务转发层。
 - 设置基础脚本：typecheck、lint、test、build、tauri build。
@@ -50,7 +50,7 @@
 
 ## 7. 明确不实现
 
-- 不实现 Grok 探测、ACP 会话、任务、图片或 Worktree。
+- 不实现 Grok 探测、ACP framing/transport、ACP 会话、任务、图片或 Worktree；真实 stdio Adapter 由 GAG-005 实现。
 - 不设计最终 UI 组件。
 - 不添加 SQLite Schema。
 - 不加入自动更新、签名、CI 发布或其他 Agent。
@@ -106,7 +106,7 @@
 
 ## 14. Definition of Done
 
-- 上游 commit 和 License 可追溯。
+- 上游 URL、tag、完整 commit、License 和版权声明按 ADR-0001 可追溯；不以 Git ancestry 作为验收条件。
 - Windows development build 与 production frontend build 通过。
 - 非范围代码已删除而非仅隐藏。
 - 没有产品功能的假实现、mock 或无责任 TODO。
@@ -122,4 +122,4 @@
 
 ## 16. 标准任务交付报告
 
-报告必须包含：Task ID；实际主/辅助模型与 reasoning；升级记录；上游 URL、tag、commit 和 License；删除/保留能力清单；修改文件；构建与测试命令、退出码；遥测/秘密/权限扫描结果；手工截图；未完成项和风险。
+报告必须包含：Task ID；实际主/辅助模型与 reasoning；升级记录；上游 URL、tag、commit、License 和 ADR-0001 来源策略；tag/commit 校验命令及退出码；删除/保留能力清单；修改文件；构建与测试命令、退出码；遥测/秘密/权限扫描结果；手工截图；未完成项和风险。

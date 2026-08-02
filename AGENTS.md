@@ -9,8 +9,10 @@
 1. 用户在当前任务中的明确指令。
 2. 本文件。
 3. 当前 `GAG-*.md` 任务说明书。
-4. `docs/01-PRD.md`、`docs/02-UI-UX-DESIGN.md`、`docs/03-TECHNICAL-DESIGN.md`。
+4. `docs/01-PRD.md`、`docs/02-UI-UX-DESIGN.md`、`docs/03-TECHNICAL-DESIGN.md`、`docs/04-AI-DEVELOPMENT-ROADMAP.md`。
 5. 已接受的 `docs/adr/` 决策记录。
+
+任务说明书统一位于 `docs/tasks/`；实施前必须打开当前 `GAG-*.md` 并确认 Roadmap 中的依赖和模型门禁。
 
 不得自行解决文档之间的实质冲突。发现冲突时说明涉及的 ID、影响和可选方案，并停止冲突范围内的修改。
 

@@ -1,0 +1,19 @@
+[package]
+name = "grok-acp-gui"
+version = "0.1.16"
+description = "Windows desktop shell for Grok ACP GUI"
+authors = ["Grok ACP GUI contributors"]
+edition = "2021"
+
+[lib]
+name = "grok_acp_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "~2.11.0", features = [] }
+tauri-plugin-dialog = "~2.7.0"
+tauri-plugin-store = "~2.4.0"
+serde = { version = "1", features = ["derive"] }

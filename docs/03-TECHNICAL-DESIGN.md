@@ -6,7 +6,7 @@
 
 ## 2. 技术栈与基线
 
-- 开源基线：Fork [formulahendry/acp-ui](https://github.com/formulahendry/acp-ui) 的 [v0.1.16](https://github.com/formulahendry/acp-ui/releases/tag/v0.1.16)，固定 commit `cd9c3cb464a4b321bff652101953a64c07473e31`，保留 MIT License 与上游历史；GAG-001 必须再次校验 tag 指向与许可证，变化时停止报告。
+- 开源基线：使用 [formulahendry/acp-ui](https://github.com/formulahendry/acp-ui) 的 [v0.1.16](https://github.com/formulahendry/acp-ui/releases/tag/v0.1.16) 源码快照，固定 commit `cd9c3cb464a4b321bff652101953a64c07473e31`，保留 MIT License、原作者版权和上游 URL/tag/commit 来源记录；GAG-001 必须再次校验 tag 指向与许可证，变化时停止报告。根据 [ADR-0001](adr/ADR-0001-upstream-provenance-without-shared-ancestry.md)，固定 commit 不要求属于产品仓库的 Git 祖先链。
 - 桌面：Tauri 2，Windows 10/11，WebView2。
 - 后端：Rust stable-msvc、Tokio、Serde、Rusqlite。
 - 前端：Vue 3、TypeScript、Pinia、Vite。
@@ -122,6 +122,21 @@ export interface DesktopBridge {
   subscribe(listener: (event: DesktopEvent) => void): Promise<Unsubscribe>;
 }
 ```
+
+GAG-001 在正式 Interface 落地前只暴露以下临时启动契约：
+
+```ts
+export interface BootstrapStatus {
+  productName: string;
+  version: string;
+  platform: string;
+  ready: boolean;
+}
+
+export function bootstrap(): Promise<BootstrapStatus>;
+```
+
+Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该 DTO 不承载 Runtime、ACP、项目或持久化状态，不发布事件，必须在 GAG-003 中由正式 `BootstrapSnapshot` 契约替换。
 
 命令联合类型涵盖：
 
