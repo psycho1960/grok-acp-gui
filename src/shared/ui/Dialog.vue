@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
 import IconButton from "./IconButton.vue";
+import { focusFirst, keepFocusInside } from "./focus-trap";
 
 const props = defineProps<{ modelValue: boolean; title: string; description?: string }>();
 const emit = defineEmits<{ "update:modelValue": [value: boolean] }>();
@@ -10,15 +11,10 @@ let restoreFocus: HTMLElement | null = null;
 function close(): void { emit("update:modelValue", false); }
 function trapFocus(event: KeyboardEvent): void {
   if (event.key === "Escape") { event.preventDefault(); close(); return; }
-  if (event.key !== "Tab" || !dialog.value) return;
-  const focusable = [...dialog.value.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
-  if (!focusable.length) return;
-  const first = focusable[0]; const last = focusable[focusable.length - 1];
-  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  if (dialog.value) keepFocusInside(dialog.value, event);
 }
 watch(() => props.modelValue, async (open) => {
-  if (open) { restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; await nextTick(); dialog.value?.querySelector<HTMLElement>("button, [tabindex]")?.focus(); }
+  if (open) { restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null; await nextTick(); if (dialog.value) focusFirst(dialog.value); }
   else { restoreFocus?.focus(); restoreFocus = null; }
 });
 </script>

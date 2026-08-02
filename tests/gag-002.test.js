@@ -30,11 +30,14 @@ test("GAG-002 AppShell retains the specified slots, resizing bounds, and respons
   for (const text of ["export type AppShellProps", "left: VNode", "main: VNode", "inspectorOpen: boolean", "Math.min(360, Math.max(220", "minmax(520px, 1fr)", "max-width: 1200px", "min-resolution: 1.75dppx"]) assert.match(shellSource, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
-test("GAG-002 feature styles do not hard-code the Mocha palette", async () => {
-  const features = await readdir("src/features", { recursive: true });
+test("GAG-002 lint gate rejects Mocha palette hex outside the theme source", async () => {
+  const files = [];
+  for (const root of ["src/app", "src/features", "src/shared/ui"]) {
+    for (const file of await readdir(root, { recursive: true })) files.push(`${root}/${file}`);
+  }
   const palette = /#(?:11111b|181825|1e1e2e|313244|45475a|585b70|6c7086|a6adc8|cdd6f4|cba6f7|89b4fa|a6e3a1|f9e2af|f38ba8|fab387)/i;
-  for (const file of features.filter((entry) => entry.endsWith(".vue") || entry.endsWith(".css"))) {
-    const source = await readFile(`src/features/${file}`, "utf8");
+  for (const file of files.filter((entry) => entry.endsWith(".vue") || entry.endsWith(".css") || entry.endsWith(".ts"))) {
+    const source = await readFile(file, "utf8");
     assert.doesNotMatch(source, palette, file);
   }
 });

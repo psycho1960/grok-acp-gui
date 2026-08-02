@@ -1,0 +1,37 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`GAG-002 AppShell responsive behavior > keeps the required actions reachable at 1024px 1`] = `
+{
+  "hasInspectorPanel": false,
+  "hasInspectorToggle": true,
+  "hasLeftPanel": true,
+  "hasNavigationToggle": false,
+}
+`;
+
+exports[`GAG-002 AppShell responsive behavior > keeps the required actions reachable at 1200px 1`] = `
+{
+  "hasInspectorPanel": false,
+  "hasInspectorToggle": true,
+  "hasLeftPanel": true,
+  "hasNavigationToggle": false,
+}
+`;
+
+exports[`GAG-002 AppShell responsive behavior > keeps the required actions reachable at 1440px / 200% 1`] = `
+{
+  "hasInspectorPanel": false,
+  "hasInspectorToggle": true,
+  "hasLeftPanel": false,
+  "hasNavigationToggle": true,
+}
+`;
+
+exports[`GAG-002 AppShell responsive behavior > keeps the required actions reachable at 1440px 1`] = `
+{
+  "hasInspectorPanel": true,
+  "hasInspectorToggle": true,
+  "hasLeftPanel": true,
+  "hasNavigationToggle": false,
+}
+`;
