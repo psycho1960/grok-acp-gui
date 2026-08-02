@@ -33,19 +33,48 @@ export interface BootstrapSnapshot {
 
 export interface RuntimeBootstrapStatus {
   status: "probing" | "ready" | "unavailable";
+  /** Set when status is 'unavailable'. */
   probeError?: string;
+  /** Runtime version string, if detected. */
+  version?: string;
+  /** Whether the user has authenticated with the runtime. */
+  authenticated?: boolean;
 }
 
 export interface CapabilitySnapshot {
+  /** Available models (ACP ModelInfo). */
   models: ModelInfo[];
-  modes: string[];
-  slashCommands: string[];
+  /** Session modes from ACP (model/session config options). */
+  modes: ModeInfo[];
+  /** Available slash commands (ACP AvailableCommand). */
+  slashCommands: SlashCommandInfo[];
 }
 
 export interface ModelInfo {
+  /** ACP modelId. */
+  modelId: string;
+  /** Human-readable name. */
+  name: string;
+  /** Optional description. */
+  description?: string;
+}
+
+export interface ModeInfo {
+  /** Mode identifier string. */
   id: string;
-  displayName: string;
-  reasoning: boolean;
+  /** Human-readable name. */
+  name: string;
+  /** Optional description. */
+  description?: string;
+}
+
+export interface SlashCommandInfo {
+  /** Command name (e.g. "create_plan"). */
+  name: string;
+  /** Human-readable description. */
+  description: string;
+  /** Whether the command accepts text input. */
+  acceptsInput: boolean;
 }
 
 /** @deprecated Use BootstrapSnapshot instead. */
@@ -96,13 +125,18 @@ export interface ProjectForgetPayload {
 export interface TaskCreatePayload {
   projectId: ProjectId;
   title: string;
-  /** Initial prompt text (FR-TASK-001). */
-  prompt?: string;
-  mode?: string;
+  /** Initial prompt text (FR-TASK-001). Required. */
+  prompt: string;
+  /** Attachments referenced by artifact ID. */
+  attachments?: string[];
+  /** Agent mode (e.g. "code", "architect"). */
+  mode?: "code" | "architect" | "ask" | string;
+  /** Model ID to use for this task. */
   model?: string;
-  reasoning?: string;
-  /** Workspace strategy (e.g. "worktree", "readonly"). */
-  workspaceStrategy?: string;
+  /** Reasoning effort: "low" | "medium" | "high". */
+  reasoning?: "low" | "medium" | "high";
+  /** Workspace strategy: "worktree" | "readonly" | "direct". */
+  workspaceStrategy?: "worktree" | "readonly" | "direct";
 }
 
 export interface TaskOpenPayload {
@@ -213,16 +247,17 @@ export interface DesktopEvent {
  * Session events (marked with *) require taskId/sessionId/seq.
  */
 export type TypedDesktopEvent =
+  // non-session events
   | { type: "runtime.updated"; timestamp: string; payload: RuntimeUpdatedPayload }
-  | { type: "activity.updated"; timestamp: string; payload: ActivityUpdatedPayload }
   | { type: "resource.warning"; timestamp: string; payload: ResourceWarningPayload }
   | { type: "diagnostic.notice"; timestamp: string; payload: DiagnosticNoticePayload }
-  | { type: "plan.updated"; timestamp: string; payload: PlanUpdatedPayload }
-  // session-scoped events (*)
+  // session-scoped events
   | { type: "task.snapshot"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: TaskSnapshotPayload }
   | { type: "task.state"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: TaskStatePayload }
   | { type: "message.delta"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: MessageDeltaPayload }
+  | { type: "activity.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ActivityUpdatedPayload }
   | { type: "permission.requested"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: PermissionRequestedPayload }
+  | { type: "plan.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: PlanUpdatedPayload }
   | { type: "changes.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ChangesUpdatedPayload }
   | { type: "artifact.available"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ArtifactAvailablePayload };
 
@@ -334,7 +369,7 @@ export type Unsubscribe = () => void;
 export interface DesktopBridge {
   bootstrap(): Promise<BootstrapSnapshot>;
   execute(command: DesktopCommand): Promise<DesktopResult>;
-  subscribe(listener: (event: DesktopEvent) => void): Promise<Unsubscribe>;
+  subscribe(listener: (event: TypedDesktopEvent) => void): Promise<Unsubscribe>;
 }
 
 // ---------------------------------------------------------------------------

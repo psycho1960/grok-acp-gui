@@ -39,9 +39,9 @@ impl DesktopEvent {
     /// session-scoped event type — those must use `SessionEvent::build`.
     pub fn non_session(event_type: impl Into<String>, payload: serde_json::Value) -> Self {
         let t = event_type.into();
-        debug_assert!(
+        assert!(
             !is_session_event(&t),
-            "session event '{}' must be constructed via SessionEvent::build",
+            "BUG: session event '{}' constructed via non_session(). Use SessionEvent::build().",
             t
         );
         Self {
@@ -66,7 +66,9 @@ fn is_session_event(t: &str) -> bool {
         event_types::TASK_SNAPSHOT
             | event_types::TASK_STATE
             | event_types::MESSAGE_DELTA
+            | event_types::ACTIVITY_UPDATED
             | event_types::PERMISSION_REQUESTED
+            | event_types::PLAN_UPDATED
             | event_types::CHANGES_UPDATED
             | event_types::ARTIFACT_AVAILABLE
     )

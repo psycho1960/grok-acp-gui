@@ -58,6 +58,8 @@ pub fn bootstrap_impl() -> BootstrapSnapshot {
         runtime: RuntimeBootstrapStatus {
             status: "unavailable".into(),
             probe_error: Some("Runtime module not yet wired (GAG-005)".into()),
+            version: None,
+            authenticated: None,
         },
         capabilities: CapabilitySnapshot {
             models: vec![],
@@ -84,22 +86,44 @@ pub struct RuntimeBootstrapStatus {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authenticated: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilitySnapshot {
     pub models: Vec<ModelInfo>,
-    pub modes: Vec<String>,
-    pub slash_commands: Vec<String>,
+    pub modes: Vec<ModeInfo>,
+    pub slash_commands: Vec<SlashCommandInfo>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
+    pub model_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModeInfo {
     pub id: String,
-    pub display_name: String,
-    pub reasoning: bool,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommandInfo {
+    pub name: String,
+    pub description: String,
+    pub accepts_input: bool,
 }
 
 /// Implementation of the `execute` command (called from lib.rs).

@@ -16,6 +16,7 @@ import type {
   DesktopResult,
   TaskId,
   SessionId,
+  TypedDesktopEvent,
 } from "../src/bridge/types";
 import { EventTypes, ErrorCodes } from "../src/bridge/types";
 
@@ -53,7 +54,7 @@ const PLAN_RESOLVE_FIXTURE = {
   },
 } satisfies DesktopCommand;
 
-const SESSION_EVENT_FIXTURE: DesktopEvent = {
+const SESSION_EVENT_FIXTURE: TypedDesktopEvent = {
   type: EventTypes.MESSAGE_DELTA,
   taskId: "task-1" as TaskId,
   sessionId: "sess-1" as SessionId,
@@ -62,7 +63,7 @@ const SESSION_EVENT_FIXTURE: DesktopEvent = {
   payload: { text: "hello" },
 };
 
-const NON_SESSION_EVENT_FIXTURE: DesktopEvent = {
+const NON_SESSION_EVENT_FIXTURE: TypedDesktopEvent = {
   type: EventTypes.RUNTIME_UPDATED,
   timestamp: "2026-01-01T00:00:00Z",
   payload: { status: "ready" },
@@ -221,7 +222,7 @@ describe("FakeDesktopBridge", () => {
 
   it("subscribe delivers pushed events", async () => {
     const bridge = createFakeDesktopBridge();
-    const received: DesktopEvent[] = [];
+    const received: TypedDesktopEvent[] = [];
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const unsub = await bridge.subscribe((ev) => received.push(ev));
 
@@ -235,7 +236,7 @@ describe("FakeDesktopBridge", () => {
 
   it("unsubscribe stops delivery", async () => {
     const bridge = createFakeDesktopBridge();
-    const received: DesktopEvent[] = [];
+    const received: TypedDesktopEvent[] = [];
     const unsub = await bridge.subscribe((ev) => received.push(ev));
 
     bridge.pushEvent(NON_SESSION_EVENT_FIXTURE);
@@ -248,7 +249,7 @@ describe("FakeDesktopBridge", () => {
 
   it("duplicate unsubscribe is idempotent", async () => {
     const bridge = createFakeDesktopBridge();
-    const received: DesktopEvent[] = [];
+    const received: TypedDesktopEvent[] = [];
     const unsub = await bridge.subscribe((ev) => received.push(ev));
 
     unsub();

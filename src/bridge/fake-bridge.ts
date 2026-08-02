@@ -6,14 +6,14 @@
 import type {
   DesktopBridge,
   DesktopCommand,
-  DesktopEvent,
   DesktopResult,
   BootstrapSnapshot,
   Unsubscribe,
   AppError,
+  TypedDesktopEvent,
 } from "./types";
 
-type Listener = (event: DesktopEvent) => void;
+type Listener = (event: TypedDesktopEvent) => void;
 
 export interface FakeBridgeOptions {
   /** Initial bootstrap snapshot returned by `bootstrap()`. */
@@ -29,7 +29,7 @@ export function createFakeDesktopBridge(
   options: FakeBridgeOptions = {},
 ): DesktopBridge & {
   /** Push an event to all registered listeners (for test orchestration). */
-  pushEvent(event: DesktopEvent): void;
+  pushEvent(event: TypedDesktopEvent): void;
 } {
   const listeners = new Set<Listener>();
 
@@ -69,7 +69,7 @@ export function createFakeDesktopBridge(
       };
     },
 
-    pushEvent(event: DesktopEvent): void {
+    pushEvent(event: TypedDesktopEvent): void {
       for (const listener of listeners) {
         listener(event);
       }

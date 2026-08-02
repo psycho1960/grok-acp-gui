@@ -6,7 +6,6 @@
 import type {
   DesktopBridge,
   DesktopCommand,
-  DesktopEvent,
   DesktopResult,
   BootstrapSnapshot,
   Unsubscribe,
@@ -53,13 +52,13 @@ export function createDesktopBridge(): DesktopBridge {
     },
 
     async subscribe(
-      listener: (event: DesktopEvent) => void,
+      listener: (event: import("./types").TypedDesktopEvent) => void,
     ): Promise<Unsubscribe> {
       await ensureTauri();
       const unlisten = await listenFn!(
         EVENT_CHANNEL,
         (event: { payload: unknown }) => {
-          listener(event.payload as DesktopEvent);
+          listener(event.payload as import("./types").TypedDesktopEvent);
         },
       );
       let unsubscribed = false;

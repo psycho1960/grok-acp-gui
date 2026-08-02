@@ -34,8 +34,10 @@ pub struct ProjectForgetPayload {
 pub struct TaskCreatePayload {
     pub project_id: super::types::ProjectId,
     pub title: String,
+    /// Initial prompt text (FR-TASK-001). Required.
+    pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
+    pub attachments: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -486,7 +488,8 @@ mod tests {
         let cmd = DesktopCommand::TaskCreate(TaskCreatePayload {
             project_id: super::super::types::ProjectId::new("proj-1"),
             title: "Add login".into(),
-            prompt: None,
+            prompt: "Create a login page".into(),
+            attachments: None,
             mode: Some("code".into()),
             model: None,
             reasoning: None,
