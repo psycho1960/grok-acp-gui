@@ -482,18 +482,58 @@ fn validate_non_empty_path(path: &str) -> Result<(), AppError> {
 }
 
 fn reject_base64_image(text: &str) -> Result<(), AppError> {
-    if text.len() > 22 && text[..22].to_lowercase().contains("data:image") {
-        Err(validation_err(
-            "Base64-encoded images are not allowed in Bridge payloads; use artifact IDs",
-        ))
-    } else {
-        Ok(())
+    // Scan for data:image inline base64 (case-insensitive).
+    // Uses char-based iteration to avoid UTF-8 byte-boundary panics.
+    if text.len() > 22 {
+        let prefix: String = text.chars().take(22).collect();
+        if prefix.to_lowercase().starts_with("data:image") {
+            return Err(validation_err(
+                "Base64-encoded images are not allowed in Bridge payloads; use artifact IDs",
+            ));
+        }
     }
+    // Also check later positions in case leading whitespace/text was prepended.
+    if text.to_lowercase().contains("data:image/") {
+        return Err(validation_err(
+            "Base64-encoded images are not allowed in Bridge payloads; use artifact IDs",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_image_at_start_rejected() {
+        let text = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+        assert!(reject_base64_image(text).is_err());
+    }
+
+    #[test]
+    fn base64_image_after_whitespace_rejected() {
+        let text = "  data:image/jpeg;base64,/9j/4AAQ==";
+        assert!(reject_base64_image(text).is_err());
+    }
+
+    #[test]
+    fn chinese_text_no_panic() {
+        let text =
+            "你好世界！这是一段中文文本，用于测试 UTF-8 边界安全性。data:image 不应该 panic。";
+        assert!(reject_base64_image(text).is_ok());
+    }
+
+    #[test]
+    fn plain_text_passes() {
+        assert!(reject_base64_image("Create a login page").is_ok());
+    }
+
+    #[test]
+    fn base64_in_middle_rejected() {
+        let text = "Here is an image: data:image/gif;base64,R0lGODlh... embedded in text";
+        assert!(reject_base64_image(text).is_err());
+    }
 
     #[test]
     fn round_trip_runtime_refresh() {

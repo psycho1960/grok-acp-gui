@@ -329,7 +329,7 @@ export interface PermissionOption {
   /** Human-readable label. */
   name: string;
   /** ACP PermissionOptionKind. */
-  kind: "allow_once" | "allow_always" | "deny" | string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
 }
 
 export interface PlanUpdatedPayload {
