@@ -1,0 +1,3 @@
+<script setup lang="ts">defineProps<{ text: string }>();</script>
+<template><span class="tooltip"><slot /><span class="tip" role="tooltip">{{ text }}</span></span></template>
+<style scoped>.tooltip { position:relative; display:inline-flex; }.tip { position:absolute; z-index:5; bottom:calc(100% + 6px); left:50%; width:max-content; max-width:220px; padding:4px 8px; color:var(--ctp-text); pointer-events:none; visibility:hidden; background:var(--ctp-crust); border:1px solid var(--ctp-surface1); border-radius:var(--radius-control); font-size:var(--font-small); transform:translateX(-50%); }.tooltip:hover .tip, .tooltip:focus-within .tip { visibility:visible; }</style>

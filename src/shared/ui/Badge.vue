@@ -1,0 +1,3 @@
+<script setup lang="ts">withDefaults(defineProps<{ tone?: "neutral" | "info" | "success" | "warning" | "danger" }>(), { tone: "neutral" });</script>
+<template><span class="badge" :class="`tone-${tone}`"><slot /></span></template>
+<style scoped>.badge { display:inline-flex; align-items:center; min-height:22px; padding:2px 7px; border:1px solid var(--ctp-surface1); border-radius:999px; color:var(--ctp-subtext0); font-size:var(--font-small); }.tone-info { color:var(--ctp-blue); }.tone-success { color:var(--ctp-green); }.tone-warning { color:var(--ctp-yellow); }.tone-danger { color:var(--ctp-red); }</style>
