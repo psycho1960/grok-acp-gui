@@ -1,67 +1,33 @@
+/* Colour variables are injected from tokens.ts. CSS only consumes semantic tokens. */
 :root {
-  --ctp-crust: #11111b;
-  --ctp-mantle: #181825;
-  --ctp-base: #1e1e2e;
-  --ctp-surface0: #313244;
-  --ctp-surface1: #45475a;
-  --ctp-subtext0: #a6adc8;
-  --ctp-text: #cdd6f4;
-  --ctp-mauve: #cba6f7;
-  --ctp-lavender: #b4befe;
-  --ctp-blue: #89b4fa;
-  --ctp-green: #a6e3a1;
-  --ctp-yellow: #f9e2af;
-  --ctp-red: #f38ba8;
+  --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", Consolas, monospace;
+  --font-body: 14px;
+  --line-body: 20px;
+  --font-small: 12px;
+  --line-small: 16px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-dialog: 12px;
+  --control-min-size: 32px;
+  --button-height: 36px;
+  --motion-fast: 120ms;
+  --motion-normal: 180ms;
 }
 
 :root,
-body {
-  font-family: "Segoe UI Variable", "Segoe UI", sans-serif;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#app {
-  min-width: 320px;
-  min-height: 100%;
-  margin: 0;
-}
-
-body {
-  min-height: 100vh;
-  background: var(--ctp-base);
-}
-
-button,
-input {
-  font: inherit;
-}
-
-.eyebrow {
-  margin: 0 0 3px;
-  color: var(--ctp-subtext0);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.surface-card {
-  width: min(760px, calc(100% - 48px));
-  margin: auto;
-  padding: 32px;
-  background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface0);
-  border-radius: 14px;
-  box-shadow: 0 20px 60px rgb(0 0 0 / 18%);
-}
-
-@media (max-width: 720px) {
-  .surface-card {
-    width: calc(100% - 32px);
-    padding: 24px;
-  }
-}
+body { font-family: var(--font-sans); }
+* { box-sizing: border-box; }
+html, body, #app { min-width: 320px; min-height: 100%; margin: 0; }
+body { min-height: 100vh; color: var(--ctp-text); background: var(--ctp-base); font-size: var(--font-body); line-height: var(--line-body); }
+button, input, textarea, select { font: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--ctp-mauve); outline-offset: 2px; }
+.eyebrow { margin: 0 0 3px; color: var(--ctp-subtext0); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.surface-card { background: var(--ctp-mantle); border: 1px solid var(--ctp-surface0); border-radius: var(--radius-card); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; } }

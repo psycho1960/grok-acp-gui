@@ -30,6 +30,7 @@ export default typescript.config(
       },
     },
     rules: {
+      "no-undef": "off",
       "vue/multi-word-component-names": "off",
       "vue/no-v-html": "error",
       "vue/max-attributes-per-line": "off",

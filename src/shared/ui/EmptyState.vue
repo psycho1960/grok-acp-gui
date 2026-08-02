@@ -1,0 +1,3 @@
+<script setup lang="ts">defineProps<{ title: string; detail: string }>();</script>
+<template><section class="empty-state" role="status"><span aria-hidden="true">◇</span><div><h2>{{ title }}</h2><p>{{ detail }}</p><slot /></div></section></template>
+<style scoped>.empty-state { display:flex; gap:var(--space-3); align-items:flex-start; max-width:560px; padding:var(--space-6); color:var(--ctp-text); background:var(--ctp-mantle); border:1px dashed var(--ctp-surface1); border-radius:var(--radius-card); }.empty-state > span { color:var(--ctp-blue); font-size:28px; }.empty-state h2, .empty-state p { margin:0; }.empty-state h2 { font-size:16px; }.empty-state p { margin-top:var(--space-1); color:var(--ctp-subtext0); }</style>

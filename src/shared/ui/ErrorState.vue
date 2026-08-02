@@ -1,0 +1,3 @@
+<script setup lang="ts">defineProps<{ title: string; detail: string }>();</script>
+<template><section class="error-state" role="alert"><span aria-hidden="true">!</span><div><h2>{{ title }}</h2><p>{{ detail }}</p><slot /></div></section></template>
+<style scoped>.error-state { display:flex; gap:var(--space-3); padding:var(--space-4); color:var(--ctp-text); background:var(--ctp-mantle); border:1px solid var(--ctp-red); border-radius:var(--radius-card); }.error-state > span { display:grid; width:24px; height:24px; place-items:center; color:var(--ctp-crust); background:var(--ctp-red); border-radius:50%; font-weight:700; }.error-state h2, .error-state p { margin:0; }.error-state h2 { font-size:16px; }.error-state p { color:var(--ctp-subtext0); }</style>
