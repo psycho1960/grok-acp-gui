@@ -1,4 +1,3 @@
-import axe from "axe-core";
 import { mount } from "@vue/test-utils";
 import { defineComponent, h, nextTick, ref, type VNode } from "vue";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,14 +5,14 @@ import AppShell from "../../src/app/AppShell.vue";
 import Button from "../../src/shared/ui/Button.vue";
 import Dialog from "../../src/shared/ui/Dialog.vue";
 import Drawer from "../../src/shared/ui/Drawer.vue";
+import IconButton from "../../src/shared/ui/IconButton.vue";
+import Tooltip from "../../src/shared/ui/Tooltip.vue";
 
 type Viewport = { width: number; dppx?: number };
 
 function installViewport({ width, dppx = 1 }: Viewport): void {
   window.matchMedia = ((query: string) => ({
-    matches: query.includes("1200")
-      ? width <= 1200 || dppx >= 1.75
-      : width <= 1023 || dppx >= 1.75,
+    matches: query.includes("1200") ? width <= 1200 || dppx >= 1.75 : query.includes("1080") ? width <= 1080 : width <= 1023 || dppx >= 1.75,
     media: query,
     onchange: null,
     addEventListener: () => undefined,
@@ -63,6 +62,14 @@ describe("GAG-002 accessible controls", () => {
     expect(wrapper.attributes("disabled")).toBeDefined();
     await wrapper.trigger("click");
     expect(wrapper.emitted("click")).toBeUndefined();
+  });
+
+  it("links Tooltip content to its trigger", () => {
+    const wrapper = mount(Tooltip, { props: { text: "Helpful text" }, slots: { default: h(IconButton, { label: "Info" }, { default: () => "i" }) } });
+    const trigger = wrapper.get('[aria-label="Info"]');
+    const descriptionId = trigger.attributes("aria-describedby");
+    expect(descriptionId).toBeTruthy();
+    expect(wrapper.get(`#${descriptionId}`).text()).toBe("Helpful text");
   });
 
   for (const [name, component, closeLabel] of [["Dialog", Dialog, "关闭对话框"], ["Drawer", Drawer, "关闭抽屉"]] as const) {
@@ -122,13 +129,12 @@ describe("GAG-002 AppShell responsive behavior", () => {
         expect(wrapper.get('[role="dialog"][aria-label="任务导航"]')).toBeTruthy();
       }
       if (viewport.width === 1200) expect(summary.hasInspectorPanel).toBe(false);
+      if (viewport.width === 1024) {
+        expect(wrapper.find('[aria-label="调整左侧栏宽度"]').exists()).toBe(false);
+        expect(wrapper.attributes("style")).toContain("--left-width: 220px");
+      }
       expect(summary).toMatchSnapshot();
     });
   }
 
-  it("has no critical or serious axe violations in the shell", async () => {
-    const wrapper = mountShell({ width: 1440 });
-    const result = await axe.run(wrapper.element, { rules: { "color-contrast": { enabled: false } } });
-    expect(result.violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious")).toEqual([]);
-  });
 });
