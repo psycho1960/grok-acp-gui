@@ -1,10 +1,3 @@
-import { createApp } from "vue";
-import { createPinia } from "pinia";
-import App from "./App.vue";
-import "./shared/theme/tokens.css";
+import { mountApplication } from "./app/bootstrap";
 
-const app = createApp(App);
-const pinia = createPinia();
-
-app.use(pinia);
-app.mount("#app");
+mountApplication();

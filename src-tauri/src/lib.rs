@@ -1,3 +1,5 @@
+mod app;
+
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -25,6 +27,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .setup(app::configure)
         .invoke_handler(tauri::generate_handler![bootstrap])
         .run(tauri::generate_context!())
         .expect("error while running Grok ACP GUI");

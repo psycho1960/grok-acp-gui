@@ -45,3 +45,12 @@ jobs:
 
       - name: Rust check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Rust test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Tauri build
+        run: npm run tauri build
