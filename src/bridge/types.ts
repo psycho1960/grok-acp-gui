@@ -22,16 +22,34 @@ export type CorrelationId = string & { [CorrelationIdBrand]: never };
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-export interface BootstrapStatus {
+export interface BootstrapSnapshot {
   productName: string;
   version: string;
   platform: string;
   ready: boolean;
+  runtime: RuntimeBootstrapStatus;
+  capabilities: CapabilitySnapshot;
 }
 
-// GAG-003 replaces GAG-001's BootstrapStatus with BootstrapSnapshot once
-// deep modules are wired.  For now the shape is an alias.
-export type BootstrapSnapshot = BootstrapStatus;
+export interface RuntimeBootstrapStatus {
+  status: "probing" | "ready" | "unavailable";
+  probeError?: string;
+}
+
+export interface CapabilitySnapshot {
+  models: ModelInfo[];
+  modes: string[];
+  slashCommands: string[];
+}
+
+export interface ModelInfo {
+  id: string;
+  displayName: string;
+  reasoning: boolean;
+}
+
+/** @deprecated Use BootstrapSnapshot instead. */
+export type BootstrapStatus = BootstrapSnapshot;
 
 // ---------------------------------------------------------------------------
 // DesktopCommand discriminated union
@@ -78,9 +96,13 @@ export interface ProjectForgetPayload {
 export interface TaskCreatePayload {
   projectId: ProjectId;
   title: string;
+  /** Initial prompt text (FR-TASK-001). */
+  prompt?: string;
   mode?: string;
   model?: string;
   reasoning?: string;
+  /** Workspace strategy (e.g. "worktree", "readonly"). */
+  workspaceStrategy?: string;
 }
 
 export interface TaskOpenPayload {
@@ -184,6 +206,25 @@ export interface DesktopEvent {
   timestamp: string; // ISO 8601
   payload: unknown;
 }
+
+/**
+ * Discriminated union mapping event type → typed payload.
+ * Use this for type-safe event handling in reducers / stores.
+ * Session events (marked with *) require taskId/sessionId/seq.
+ */
+export type TypedDesktopEvent =
+  | { type: "runtime.updated"; timestamp: string; payload: RuntimeUpdatedPayload }
+  | { type: "activity.updated"; timestamp: string; payload: ActivityUpdatedPayload }
+  | { type: "resource.warning"; timestamp: string; payload: ResourceWarningPayload }
+  | { type: "diagnostic.notice"; timestamp: string; payload: DiagnosticNoticePayload }
+  | { type: "plan.updated"; timestamp: string; payload: PlanUpdatedPayload }
+  // session-scoped events (*)
+  | { type: "task.snapshot"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: TaskSnapshotPayload }
+  | { type: "task.state"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: TaskStatePayload }
+  | { type: "message.delta"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: MessageDeltaPayload }
+  | { type: "permission.requested"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: PermissionRequestedPayload }
+  | { type: "changes.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ChangesUpdatedPayload }
+  | { type: "artifact.available"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ArtifactAvailablePayload };
 
 /**
  * Session-scoped event envelope with required taskId/sessionId/seq.

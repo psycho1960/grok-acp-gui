@@ -5,7 +5,7 @@ pub mod domain;
 use bridge::dispatch::{self as br_dispatch, DesktopResult};
 
 #[tauri::command]
-fn bootstrap() -> br_dispatch::BootstrapStatus {
+fn bootstrap() -> br_dispatch::BootstrapSnapshot {
     br_dispatch::bootstrap_impl()
 }
 

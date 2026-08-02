@@ -5,8 +5,6 @@
   "windows": ["main"],
   "platforms": ["windows"],
   "permissions": [
-    "core:default",
-    "dialog:default",
-    "store:default"
+    "core:default"
   ]
 }

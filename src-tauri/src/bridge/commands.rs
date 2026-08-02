@@ -35,11 +35,15 @@ pub struct TaskCreatePayload {
     pub project_id: super::types::ProjectId,
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_strategy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +246,37 @@ pub enum DesktopCommand {
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
+
+/// Returns true if `cmd_type` matches a known DesktopCommand variant.
+pub fn is_known_command(cmd_type: &str) -> bool {
+    matches!(
+        cmd_type,
+        "runtime.refresh"
+            | "runtime.login"
+            | "project.open"
+            | "project.forget"
+            | "task.create"
+            | "task.open"
+            | "task.archive"
+            | "turn.send"
+            | "turn.cancel"
+            | "session.configure"
+            | "session.resume"
+            | "permission.resolve"
+            | "plan.resolve"
+            | "artifact.import"
+            | "artifact.save"
+            | "workspace.inspect"
+            | "worktree.adopt"
+            | "review.diff"
+            | "review.checkpoint"
+            | "integration.preflight"
+            | "integration.execute"
+            | "worktree.cleanup"
+            | "recovery.restore"
+            | "recovery.delete"
+    )
+}
 
 use super::error::AppError;
 use crate::domain;
@@ -451,9 +486,11 @@ mod tests {
         let cmd = DesktopCommand::TaskCreate(TaskCreatePayload {
             project_id: super::super::types::ProjectId::new("proj-1"),
             title: "Add login".into(),
+            prompt: None,
             mode: Some("code".into()),
             model: None,
             reasoning: None,
+            workspace_strategy: None,
         });
         let json = serde_json::to_string(&cmd).unwrap();
         let back: DesktopCommand = serde_json::from_str(&json).unwrap();

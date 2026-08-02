@@ -35,10 +35,17 @@ pub struct DesktopEvent {
 }
 
 impl DesktopEvent {
-    /// Create a non-session event (no taskId / sessionId / seq).
-    pub fn new(event_type: impl Into<String>, payload: serde_json::Value) -> Self {
+    /// Create a **non-session** event.  Panics in debug if given a
+    /// session-scoped event type — those must use `SessionEvent::build`.
+    pub fn non_session(event_type: impl Into<String>, payload: serde_json::Value) -> Self {
+        let t = event_type.into();
+        debug_assert!(
+            !is_session_event(&t),
+            "session event '{}' must be constructed via SessionEvent::build",
+            t
+        );
         Self {
-            event_type: event_type.into(),
+            event_type: t,
             task_id: None,
             session_id: None,
             seq: None,
@@ -47,8 +54,22 @@ impl DesktopEvent {
         }
     }
 
-    // Note: session-scoped events must be constructed via `SessionEvent::build`
-    // to guarantee that taskId, sessionId, and seq are always present.
+    /// Create from a `SessionEvent` — the only path to session-scoped events.
+    pub fn from_session(se: SessionEvent) -> Self {
+        se.build()
+    }
+}
+
+fn is_session_event(t: &str) -> bool {
+    matches!(
+        t,
+        event_types::TASK_SNAPSHOT
+            | event_types::TASK_STATE
+            | event_types::MESSAGE_DELTA
+            | event_types::PERMISSION_REQUESTED
+            | event_types::CHANGES_UPDATED
+            | event_types::ARTIFACT_AVAILABLE
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +231,8 @@ mod tests {
 
     #[test]
     fn non_session_event_omits_optional_fields() {
-        let ev = DesktopEvent::new("runtime.updated", serde_json::json!({"status":"ready"}));
+        let ev =
+            DesktopEvent::non_session("runtime.updated", serde_json::json!({"status":"ready"}));
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"type\":\"runtime.updated\""));
         assert!(!json.contains("taskId"));

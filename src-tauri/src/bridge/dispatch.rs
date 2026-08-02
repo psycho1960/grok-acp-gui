@@ -49,29 +49,65 @@ pub const EVENT_CHANNEL: &str = "bridge:event";
 const MAX_PAYLOAD_BYTES: u64 = 1_048_576;
 
 /// Implementation of the `bootstrap` command (called from lib.rs).
-pub fn bootstrap_impl() -> BootstrapStatus {
-    BootstrapStatus {
-        product_name: "Grok ACP GUI",
-        version: env!("CARGO_PKG_VERSION"),
-        platform: std::env::consts::OS,
+pub fn bootstrap_impl() -> BootstrapSnapshot {
+    BootstrapSnapshot {
+        product_name: "Grok ACP GUI".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        platform: std::env::consts::OS.into(),
         ready: true,
+        runtime: RuntimeBootstrapStatus {
+            status: "unavailable".into(),
+            probe_error: Some("Runtime module not yet wired (GAG-005)".into()),
+        },
+        capabilities: CapabilitySnapshot {
+            models: vec![],
+            modes: vec![],
+            slash_commands: vec![],
+        },
     }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapStatus {
-    pub product_name: &'static str,
-    pub version: &'static str,
-    pub platform: &'static str,
+pub struct BootstrapSnapshot {
+    pub product_name: String,
+    pub version: String,
+    pub platform: String,
     pub ready: bool,
+    pub runtime: RuntimeBootstrapStatus,
+    pub capabilities: CapabilitySnapshot,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeBootstrapStatus {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilitySnapshot {
+    pub models: Vec<ModelInfo>,
+    pub modes: Vec<String>,
+    pub slash_commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelInfo {
+    pub id: String,
+    pub display_name: String,
+    pub reasoning: bool,
 }
 
 /// Implementation of the `execute` command (called from lib.rs).
 ///
 /// Accepts raw JSON so that unknown / malformed types produce a stable
-/// `BRIDGE_UNSUPPORTED_COMMAND` error rather than crashing at the
-/// Tauri deserialization boundary.
+/// error.  The dispatch classifies errors:
+/// - Unknown `type` → `BRIDGE_UNSUPPORTED_COMMAND`
+/// - Recognised `type` but invalid payload → `BRIDGE_INVALID_PAYLOAD`
 pub fn execute_impl(raw: serde_json::Value) -> DesktopResult {
     // Reject oversized payloads before any deserialization.
     if let Ok(serialized) = serde_json::to_string(&raw) {
@@ -83,13 +119,31 @@ pub fn execute_impl(raw: serde_json::Value) -> DesktopResult {
         }
     }
 
+    // Peek at `type` before full deser to classify the error correctly.
+    let cmd_type = raw
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if cmd_type.is_empty() {
+        return DesktopResult::err(AppError::new(
+            domain::error::codes::BRIDGE_UNSUPPORTED_COMMAND,
+            "Command missing required 'type' field",
+        ));
+    }
+
+    let is_known = super::commands::is_known_command(&cmd_type);
+
     let cmd: super::commands::DesktopCommand = match serde_json::from_value(raw) {
         Ok(cmd) => cmd,
         Err(e) => {
-            return DesktopResult::err(AppError::new(
-                domain::error::codes::BRIDGE_UNSUPPORTED_COMMAND,
-                format!("Unsupported or malformed command: {}", e),
-            ));
+            let code = if is_known {
+                domain::error::codes::BRIDGE_INVALID_PAYLOAD
+            } else {
+                domain::error::codes::BRIDGE_UNSUPPORTED_COMMAND
+            };
+            return DesktopResult::err(AppError::new(code, format!("Command error: {}", e)));
         }
     };
 

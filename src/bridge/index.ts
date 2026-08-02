@@ -5,6 +5,7 @@ export type {
   DesktopBridge,
   DesktopCommand,
   DesktopEvent,
+  TypedDesktopEvent,
   DesktopResult,
   BootstrapSnapshot,
   BootstrapStatus,

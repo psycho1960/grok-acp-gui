@@ -38,6 +38,8 @@ export function createFakeDesktopBridge(
     version: "0.0.0-test",
     platform: "win32",
     ready: true,
+    runtime: { status: "ready" },
+    capabilities: { models: [], modes: [], slashCommands: [] },
     ...options.bootstrapSnapshot,
   };
 
