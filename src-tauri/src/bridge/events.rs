@@ -91,6 +91,8 @@ pub struct SessionEvent {
 
 impl SessionEvent {
     /// Create a new session-scoped event.
+    /// # Panics
+    /// Panics if `event_type` is not a session event type.
     pub fn new(
         event_type: impl Into<String>,
         task_id: TaskId,
@@ -98,8 +100,14 @@ impl SessionEvent {
         seq: u64,
         payload: serde_json::Value,
     ) -> Self {
+        let t = event_type.into();
+        assert!(
+            is_session_event(&t),
+            "BUG: SessionEvent::new called with non-session type '{}'",
+            t
+        );
         Self {
-            event_type: event_type.into(),
+            event_type: t,
             task_id,
             session_id,
             seq,
@@ -170,8 +178,12 @@ pub struct PermissionRequestedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionOption {
-    pub id: String,
-    pub label: String,
+    /// ACP optionId — passed verbatim.
+    pub option_id: String,
+    /// Human-readable label.
+    pub name: String,
+    /// ACP PermissionOptionKind.
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

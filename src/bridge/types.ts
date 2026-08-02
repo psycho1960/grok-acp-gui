@@ -44,10 +44,27 @@ export interface RuntimeBootstrapStatus {
 export interface CapabilitySnapshot {
   /** Available models (ACP ModelInfo). */
   models: ModelInfo[];
-  /** Session modes from ACP (model/session config options). */
+  /** Session modes from ACP. */
   modes: ModeInfo[];
   /** Available slash commands (ACP AvailableCommand). */
   slashCommands: SlashCommandInfo[];
+  /** Current model state, if active. */
+  modelState?: SessionModelState;
+  /** Current mode state, if active. */
+  modeState?: SessionModeState;
+}
+
+export interface SessionModelState {
+  currentModelId: string;
+}
+
+export interface SessionModeState {
+  currentModeId: string;
+}
+
+export interface SessionConfigOption {
+  key: string;
+  value: unknown;
 }
 
 export interface ModelInfo {
@@ -307,8 +324,12 @@ export interface PermissionRequestedPayload {
 }
 
 export interface PermissionOption {
-  id: string;
-  label: string;
+  /** ACP optionId — passed verbatim. */
+  optionId: string;
+  /** Human-readable label. */
+  name: string;
+  /** ACP PermissionOptionKind. */
+  kind: "allow_once" | "allow_always" | "deny" | string;
 }
 
 export interface PlanUpdatedPayload {

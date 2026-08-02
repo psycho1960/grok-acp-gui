@@ -34,6 +34,7 @@ const TASK_CREATE_FIXTURE = {
   payload: {
     projectId: "proj-1" as TaskId,
     title: "Add login page",
+    prompt: "Create a login page with email and password fields",
     mode: "code",
   },
 } satisfies DesktopCommand;

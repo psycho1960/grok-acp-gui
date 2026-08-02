@@ -315,6 +315,9 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
         DesktopCommand::TaskCreate(p) => {
             validate_id_non_empty(&p.project_id.0)?;
             validate_text_len(&p.title, MAX_TITLE_LENGTH, "title")?;
+            validate_non_empty_text(&p.prompt, "prompt")?;
+            validate_text_len(&p.prompt, MAX_MESSAGE_LENGTH, "prompt")?;
+            reject_base64_image(&p.prompt)?;
             Ok(())
         }
 
@@ -331,6 +334,7 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
         DesktopCommand::TurnSend(p) => {
             validate_id_non_empty(&p.task_id.0)?;
             validate_text_len(&p.message, MAX_MESSAGE_LENGTH, "message")?;
+            reject_base64_image(&p.message)?;
             Ok(())
         }
 
@@ -448,6 +452,14 @@ fn validate_id_non_empty(id: &str) -> Result<(), AppError> {
     }
 }
 
+fn validate_non_empty_text(text: &str, field: &str) -> Result<(), AppError> {
+    if text.trim().is_empty() {
+        Err(validation_err(&format!("{} must not be empty", field)))
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_text_len(text: &str, max: usize, field: &str) -> Result<(), AppError> {
     if text.len() > max {
         Err(validation_err(&format!(
@@ -464,6 +476,16 @@ fn validate_non_empty_path(path: &str) -> Result<(), AppError> {
         Err(validation_err("path must not be empty"))
     } else if path.len() > MAX_PATH_LENGTH {
         Err(validation_err("path exceeds maximum length"))
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_base64_image(text: &str) -> Result<(), AppError> {
+    if text.len() > 22 && text[..22].to_lowercase().contains("data:image") {
+        Err(validation_err(
+            "Base64-encoded images are not allowed in Bridge payloads; use artifact IDs",
+        ))
     } else {
         Ok(())
     }

@@ -65,6 +65,8 @@ pub fn bootstrap_impl() -> BootstrapSnapshot {
             models: vec![],
             modes: vec![],
             slash_commands: vec![],
+            model_state: None,
+            mode_state: None,
         },
     }
 }
@@ -98,6 +100,22 @@ pub struct CapabilitySnapshot {
     pub models: Vec<ModelInfo>,
     pub modes: Vec<ModeInfo>,
     pub slash_commands: Vec<SlashCommandInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_state: Option<SessionModelState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_state: Option<SessionModeState>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModelState {
+    pub current_model_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionModeState {
+    pub current_mode_id: String,
 }
 
 #[derive(Debug, Serialize)]
