@@ -318,6 +318,17 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             validate_non_empty_text(&p.prompt, "prompt")?;
             validate_text_len(&p.prompt, MAX_MESSAGE_LENGTH, "prompt")?;
             reject_base64_image(&p.prompt)?;
+            validate_enum_opt(p.mode.as_deref(), &["code", "architect", "ask"], "mode")?;
+            validate_enum_opt(
+                p.reasoning.as_deref(),
+                &["low", "medium", "high"],
+                "reasoning",
+            )?;
+            validate_enum_opt(
+                p.workspace_strategy.as_deref(),
+                &["worktree", "readonly", "direct"],
+                "workspaceStrategy",
+            )?;
             Ok(())
         }
 
@@ -469,6 +480,20 @@ fn validate_text_len(text: &str, max: usize, field: &str) -> Result<(), AppError
     } else {
         Ok(())
     }
+}
+
+fn validate_enum_opt(value: Option<&str>, allowed: &[&str], field: &str) -> Result<(), AppError> {
+    if let Some(v) = value {
+        if !allowed.contains(&v) {
+            return Err(validation_err(&format!(
+                "{} '{}' is not one of: {}",
+                field,
+                v,
+                allowed.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_non_empty_path(path: &str) -> Result<(), AppError> {

@@ -62,11 +62,6 @@ export interface SessionModeState {
   currentModeId: string;
 }
 
-export interface SessionConfigOption {
-  key: string;
-  value: unknown;
-}
-
 export interface ModelInfo {
   /** ACP modelId. */
   modelId: string;
@@ -321,6 +316,15 @@ export interface ActivityUpdatedPayload {
 export interface PermissionRequestedPayload {
   requestId: string;
   options: PermissionOption[];
+  /** ACP ToolCallUpdate summary for the UI. */
+  toolCall: ToolCallSummary;
+}
+
+export interface ToolCallSummary {
+  toolCallId: string;
+  title?: string;
+  kind?: string;
+  locations?: string[];
 }
 
 export interface PermissionOption {
