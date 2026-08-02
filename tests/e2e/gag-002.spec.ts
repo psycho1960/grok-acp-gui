@@ -6,12 +6,13 @@ const viewports = [
   { width: 1200, height: 900, name: "1200" },
   { width: 1024, height: 680, name: "1024" },
 ] as const;
+const crossPlatformSnapshotTolerance = { maxDiffPixelRatio: 0.005 };
 
 for (const viewport of viewports) {
   test(`captures the shell at ${viewport.name}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/#shell");
-    await expect(page.locator(".app-shell")).toHaveScreenshot(`shell-${viewport.name}.png`);
+    await expect(page.locator(".app-shell")).toHaveScreenshot(`shell-${viewport.name}.png`, crossPlatformSnapshotTolerance);
   });
 }
 
