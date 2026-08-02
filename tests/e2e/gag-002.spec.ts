@@ -15,16 +15,16 @@ for (const viewport of viewports) {
   });
 }
 
-test("keeps navigation reachable at 200% device scale", async ({ browser }) => {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
-  const page = await context.newPage();
+test("keeps navigation reachable at 200% page zoom", async ({ page }) => {
   await page.goto("/#shell");
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
   await expect(page.getByRole("button", { name: "打开任务导航" })).toBeVisible();
   await expect(page.locator(".shell-left")).toHaveCount(0);
   await page.getByRole("button", { name: "打开任务导航" }).click();
   await expect(page.getByRole("dialog", { name: "任务导航" })).toBeVisible();
   await expect(page.locator(".app-shell")).toHaveScreenshot("shell-200-percent.png");
-  await context.close();
+  await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
 });
 
 test("uses a fixed 220px left rail without exposing a false resizer at 1024px", async ({ page }) => {
@@ -32,6 +32,13 @@ test("uses a fixed 220px left rail without exposing a false resizer at 1024px", 
   await page.goto("/#shell");
   await expect(page.getByRole("separator", { name: "调整左侧栏宽度" })).toHaveCount(0);
   await expect(page.locator(".shell-left")).toHaveCSS("width", "220px");
+  expect(await page.locator(".shell-main").evaluate((element) => element.clientWidth)).toBeGreaterThan(500);
+  await expect(page.getByRole("button", { name: "新建任务" })).toBeVisible();
+});
+
+test("keeps every IconButton state in the UI Kit", async ({ page }) => {
+  await page.goto("/#ui-kit");
+  await expect(page.locator('[aria-label^="图标按钮"]')).toHaveCount(7);
 });
 
 test("reports no critical or serious axe violations", async ({ page }) => {
