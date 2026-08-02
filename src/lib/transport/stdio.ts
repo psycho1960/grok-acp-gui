@@ -14,6 +14,7 @@ export class StdioTransport implements AcpTransport {
   private readonly messageListeners = new Set<(json: string) => void>();
   private readonly closeListeners = new Set<(reason?: string) => void>();
   private readTask: Promise<void> | null = null;
+  private closeTask: Promise<void> | null = null;
   private closed = false;
 
   constructor(
@@ -44,11 +45,8 @@ export class StdioTransport implements AcpTransport {
     return () => this.closeListeners.delete(callback);
   }
 
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    await Promise.allSettled([this.reader.cancel(), this.writer.close()]);
-    this.emitClose("closed by client");
+  close(): Promise<void> {
+    return this.finish("closed by client");
   }
 
   private async consumeInput(): Promise<void> {
@@ -64,16 +62,29 @@ export class StdioTransport implements AcpTransport {
       if (buffer.trim()) this.emitFrame(buffer.trim());
     } catch (error) {
       if (!this.closed) {
-        this.closed = true;
-        this.emitClose(error instanceof Error ? error.message : String(error));
+        await this.finish(
+          error instanceof Error ? error.message : String(error),
+        );
       }
       return;
     }
 
     if (!this.closed) {
-      this.closed = true;
-      this.emitClose("stdio stream ended");
+      await this.finish("stdio stream ended");
     }
+  }
+
+  private finish(reason?: string): Promise<void> {
+    if (!this.closeTask) {
+      this.closed = true;
+      this.closeTask = (async () => {
+        await Promise.allSettled([this.reader.cancel(), this.writer.close()]);
+        this.reader.releaseLock();
+        this.writer.releaseLock();
+        this.emitClose(reason);
+      })();
+    }
+    return this.closeTask;
   }
 
   private emitFrames(buffer: string): string {

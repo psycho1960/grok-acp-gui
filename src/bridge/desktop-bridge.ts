@@ -20,14 +20,3 @@ export async function bootstrap(): Promise<BootstrapStatus> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<BootstrapStatus>("bootstrap");
 }
-
-export async function selectProjectDirectory(): Promise<string | null> {
-  requireTauriHost();
-  const { open } = await import("@tauri-apps/plugin-dialog");
-  const selected = await open({
-    directory: true,
-    multiple: false,
-    title: "选择本地 Git 项目",
-  });
-  return typeof selected === "string" ? selected : null;
-}

@@ -6,7 +6,7 @@
 
 ## 2. 技术栈与基线
 
-- 开源基线：Fork [formulahendry/acp-ui](https://github.com/formulahendry/acp-ui) 的 [v0.1.16](https://github.com/formulahendry/acp-ui/releases/tag/v0.1.16)，固定 commit `cd9c3cb464a4b321bff652101953a64c07473e31`，保留 MIT License 与上游历史；GAG-001 必须再次校验 tag 指向与许可证，变化时停止报告。
+- 开源基线：使用 [formulahendry/acp-ui](https://github.com/formulahendry/acp-ui) 的 [v0.1.16](https://github.com/formulahendry/acp-ui/releases/tag/v0.1.16) 源码快照，固定 commit `cd9c3cb464a4b321bff652101953a64c07473e31`，保留 MIT License、原作者版权和上游 URL/tag/commit 来源记录；GAG-001 必须再次校验 tag 指向与许可证，变化时停止报告。根据 [ADR-0001](adr/ADR-0001-upstream-provenance-without-shared-ancestry.md)，固定 commit 不要求属于产品仓库的 Git 祖先链。
 - 桌面：Tauri 2，Windows 10/11，WebView2。
 - 后端：Rust stable-msvc、Tokio、Serde、Rusqlite。
 - 前端：Vue 3、TypeScript、Pinia、Vite。

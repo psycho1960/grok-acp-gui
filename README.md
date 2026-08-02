@@ -12,7 +12,7 @@ Grok ACP GUI 是 Windows 优先的本地桌面应用，计划通过结构化 Age
 - 许可证：上游 MIT License 保留在 [`LICENSE`](LICENSE)
 - Git remote：`upstream` 指向上游，`origin` 指向本项目仓库
 
-首次合并前仍需完成一次性历史接入决策：当前 PR 以规格种子 `origin/main` 为父提交，固定上游 commit 保存在开发环境的 `upstream`/基线备份中，但不属于当前 PR HEAD 的祖先。该项与仓库的 squash-only 合并规则冲突，未在本分支擅自改写远程历史。
+根据 [`ADR-0001`](docs/adr/ADR-0001-upstream-provenance-without-shared-ancestry.md)，本仓库以规格种子 `origin/main` 作为产品历史根，通过上游 URL、tag、完整 commit、License、版权声明和已校验源码快照记录来源；固定上游 commit 不要求属于 PR HEAD 或 `origin/main` 的 Git 祖先链。`main` 继续只接受 Squash Merge。
 
 ## 开发环境
 
@@ -43,5 +43,6 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - [`docs/03-TECHNICAL-DESIGN.md`](docs/03-TECHNICAL-DESIGN.md)：技术方案
 - [`docs/04-AI-DEVELOPMENT-ROADMAP.md`](docs/04-AI-DEVELOPMENT-ROADMAP.md)：开发路线图
 - [`docs/tasks/`](docs/tasks/)：GAG 任务说明书
+- [`docs/adr/`](docs/adr/)：已接受的架构与仓库决策
 
 后续任务会逐步替换当前 bootstrap 占位，并实现 DesktopBridge、Grok ACP runtime、任务中心、审查和 Worktree 生命周期。

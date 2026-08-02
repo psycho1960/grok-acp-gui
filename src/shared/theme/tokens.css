@@ -7,7 +7,6 @@
   --ctp-subtext0: #a6adc8;
   --ctp-text: #cdd6f4;
   --ctp-mauve: #cba6f7;
-  --ctp-focus-ring: rgb(203 166 247 / 18%);
   --ctp-lavender: #b4befe;
   --ctp-blue: #89b4fa;
   --ctp-green: #a6e3a1;
@@ -40,6 +39,14 @@ body {
 button,
 input {
   font: inherit;
+}
+
+.eyebrow {
+  margin: 0 0 3px;
+  color: var(--ctp-subtext0);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .surface-card {

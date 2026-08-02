@@ -1,17 +1,11 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import {
-  bootstrap,
-  selectProjectDirectory,
-  type BootstrapStatus,
-} from "./bridge/desktop-bridge";
+import { bootstrap, type BootstrapStatus } from "./bridge/desktop-bridge";
 import OnboardingView from "./features/onboarding/OnboardingView.vue";
 
 const isLoading = ref(true);
 const startupError = ref<string | null>(null);
-const selectionError = ref<string | null>(null);
 const bootstrapStatus = ref<BootstrapStatus | null>(null);
-const projectPath = ref("");
 
 onMounted(async () => {
   try {
@@ -22,16 +16,6 @@ onMounted(async () => {
     isLoading.value = false;
   }
 });
-
-async function chooseProjectDirectory() {
-  selectionError.value = null;
-  try {
-    const selected = await selectProjectDirectory();
-    if (selected) projectPath.value = selected;
-  } catch (error) {
-    selectionError.value = error instanceof Error ? error.message : String(error);
-  }
-}
 </script>
 
 <template>
@@ -62,13 +46,7 @@ async function chooseProjectDirectory() {
       <p class="muted">请关闭窗口后重试；详细诊断将在后续任务中接入。</p>
     </section>
 
-    <OnboardingView
-      v-else
-      :error="selectionError"
-      :project-path="projectPath"
-      @select-directory="chooseProjectDirectory"
-      @update:project-path="projectPath = $event"
-    />
+    <OnboardingView v-else />
 
     <footer class="statusbar">
       <span>ACP SDK 已保留 · 传输接入待后续任务</span>
@@ -120,14 +98,6 @@ async function chooseProjectDirectory() {
   border-radius: 10px;
   font-weight: 800;
   font-size: 20px;
-}
-
-.eyebrow {
-  margin: 0 0 3px;
-  color: var(--ctp-subtext0);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 h1,

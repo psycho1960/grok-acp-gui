@@ -4,11 +4,31 @@ import { access } from "node:fs/promises";
 import test from "node:test";
 
 const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+const readmeSource = await readFile("README.md", "utf8");
 const tauriConfig = JSON.parse(
   await readFile("src-tauri/tauri.conf.json", "utf8"),
 );
+const cargoToml = await readFile("src-tauri/Cargo.toml", "utf8");
 const licenseText = await readFile("LICENSE", "utf8");
 const bridgeSource = await readFile("src/bridge/desktop-bridge.ts", "utf8");
+const appSource = await readFile("src/App.vue", "utf8");
+const onboardingSource = await readFile(
+  "src/features/onboarding/OnboardingView.vue",
+  "utf8",
+);
+const themeSource = await readFile("src/shared/theme/tokens.css", "utf8");
+const taskSpecSource = await readFile(
+  "docs/tasks/GAG-001-project-bootstrap.md",
+  "utf8",
+);
+const technicalDesignSource = await readFile(
+  "docs/03-TECHNICAL-DESIGN.md",
+  "utf8",
+);
+const provenanceAdrSource = await readFile(
+  "docs/adr/ADR-0001-upstream-provenance-without-shared-ancestry.md",
+  "utf8",
+);
 const ciSource = await readFile(".github/workflows/ci.yml", "utf8");
 
 test("GAG-001 exposes the desktop verification scripts", () => {
@@ -34,11 +54,35 @@ test("GAG-001 metadata is Grok ACP GUI and Windows-only", async () => {
   await access(["src", "lib", "transport", "stdio.ts"].join("/"));
 });
 
-test("GAG-001 uses shared design tokens for onboarding focus", async () => {
-  const source = await readFile("src/features/onboarding/OnboardingView.vue", "utf8");
+test("GAG-001 keeps paired Tauri packages on matching minor versions", () => {
+  assert.equal(packageJson.dependencies["@tauri-apps/api"], "2.11.1");
+  assert.equal(packageJson.dependencies["@tauri-apps/plugin-dialog"], "2.7.2");
+  assert.equal(packageJson.dependencies["@tauri-apps/plugin-store"], "2.4.4");
+  assert.match(cargoToml, /tauri = \{ version = "~2\.11\.0"/);
+  assert.match(cargoToml, /tauri-plugin-dialog = "~2\.7\.0"/);
+  assert.match(cargoToml, /tauri-plugin-store = "~2\.4\.0"/);
+});
 
-  assert.match(source, /var\(--ctp-focus-ring\)/);
-  assert.doesNotMatch(source, /rgb\(203 166 247/);
+test("GAG-001 records accepted upstream provenance without ancestry", () => {
+  assert.match(provenanceAdrSource, /状态：Accepted/);
+  assert.match(readmeSource, /ADR-0001/);
+  assert.match(taskSpecSource, /不以 Git ancestry 作为验收条件/);
+  assert.match(technicalDesignSource, /不要求属于产品仓库的 Git 祖先链/);
+});
+
+test("GAG-001 exposes only the bootstrap bridge and onboarding placeholder", () => {
+  assert.doesNotMatch(bridgeSource, /selectProjectDirectory/);
+  assert.doesNotMatch(appSource, /selectProjectDirectory|projectPath/);
+  assert.match(onboardingSource, /UI-ONBOARD-001/);
+  assert.match(onboardingSource, /启动检查尚未接入/);
+  assert.doesNotMatch(onboardingSource, /选择项目目录|UI-PROJECT-001/);
+});
+
+test("GAG-001 keeps shared visual knowledge in the theme", () => {
+  assert.match(themeSource, /\.eyebrow\s*\{/);
+  assert.doesNotMatch(appSource, /\.eyebrow\s*\{/);
+  assert.doesNotMatch(onboardingSource, /\.eyebrow\s*\{/);
+  assert.doesNotMatch(onboardingSource, /\.workspace-card\s*\{/);
 });
 
 test("GAG-001 removes web transport and telemetry dependencies", () => {
