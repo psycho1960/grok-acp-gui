@@ -2,7 +2,7 @@
 
 Grok ACP GUI 是 Windows 优先的本地桌面应用，计划通过结构化 Agent Client Protocol（ACP）连接 Grok Build，为开发者提供可观察、可审批、可恢复的编码工作流。
 
-当前分支完成 GAG-001 工程基线：保留上游 ACP UI 的源版本记录、Vue/Pinia、Tauri、Windows 桌面壳、文件夹选择和本地存储插件能力；暂不持久化项目、任务、会话或密钥，也不实现 Grok 探测、ACP 会话、任务、权限、图片、Diff、Worktree 或数据库。ACP SDK 依赖保留，实际传输接入由后续任务负责。
+当前分支完成 GAG-001 工程基线：保留上游 ACP UI 的源版本记录、Vue/Pinia、Tauri、Windows 桌面壳、文件夹选择、本地存储插件能力和 newline-framed stdio transport 基础；暂不持久化项目、任务、会话或密钥，不创建或启动业务子进程，也不实现 Grok 探测、ACP 会话、任务、权限、图片、Diff、Worktree 或数据库。ACP stream wiring 由后续任务接入。
 
 ## 上游基线
 

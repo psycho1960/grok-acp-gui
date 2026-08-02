@@ -49,13 +49,13 @@ async function chooseProjectDirectory() {
       </span>
     </header>
 
-    <section v-if="isLoading" class="state-card" aria-live="polite">
+    <section v-if="isLoading" class="state-card surface-card" aria-live="polite">
       <div class="state-icon loading-icon" aria-hidden="true">···</div>
       <h2>正在启动</h2>
       <p>正在准备桌面工程壳。</p>
     </section>
 
-    <section v-else-if="startupError" class="state-card error-card" role="alert">
+    <section v-else-if="startupError" class="state-card surface-card error-card" role="alert">
       <div class="state-icon" aria-hidden="true">!</div>
       <h2>启动失败</h2>
       <p>{{ startupError }}</p>
@@ -155,14 +155,7 @@ h2 {
 }
 
 .state-card {
-  width: min(760px, calc(100% - 48px));
-  margin: auto;
-  padding: 32px;
   text-align: center;
-  background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface0);
-  border-radius: 14px;
-  box-shadow: 0 20px 60px rgb(0 0 0 / 18%);
 }
 
 .error-card {
@@ -204,11 +197,6 @@ h2 {
   .topbar,
   .statusbar {
     padding-inline: 18px;
-  }
-
-  .state-card {
-    width: calc(100% - 32px);
-    padding: 24px;
   }
 
   .statusbar {

@@ -24,13 +24,14 @@ test("GAG-001 metadata is Grok ACP GUI and Windows-only", async () => {
   assert.equal(tauriConfig.productName, "Grok ACP GUI");
   assert.equal(tauriConfig.identifier, "com.grokacpgui.desktop");
   assert.deepEqual(tauriConfig.bundle.targets, ["nsis", "msi"]);
+  assert.deepEqual(tauriConfig.bundle.icon, ["icons/icon.ico"]);
   assert.deepEqual(tauriConfig.app.windows[0].title, "Grok ACP GUI");
   await assert.rejects(
     access(["src-tauri", "capabilities", "mobile.json"].join("/")),
   );
   await assert.rejects(access("assets/screenshot.png"));
-  await assert.rejects(access(["src-tauri", "icons", "icon.ico"].join("/")));
-  await assert.rejects(access(["src", "lib", "transport", "stdio.ts"].join("/")));
+  await access(["src-tauri", "icons", "icon.ico"].join("/"));
+  await access(["src", "lib", "transport", "stdio.ts"].join("/"));
 });
 
 test("GAG-001 removes web transport and telemetry dependencies", () => {

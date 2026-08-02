@@ -18,7 +18,7 @@ function updateProjectPath(event: globalThis.Event) {
 </script>
 
 <template>
-  <section class="workspace-card" aria-labelledby="onboarding-title">
+  <section class="workspace-card surface-card" aria-labelledby="onboarding-title">
     <div class="section-heading">
       <div>
         <p class="eyebrow">UI-ONBOARD-001</p>
@@ -72,13 +72,6 @@ function updateProjectPath(event: globalThis.Event) {
 
 <style scoped>
 .workspace-card {
-  width: min(760px, calc(100% - 48px));
-  margin: auto;
-  padding: 32px;
-  background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface0);
-  border-radius: 14px;
-  box-shadow: 0 20px 60px rgb(0 0 0 / 18%);
 }
 
 .section-heading {
@@ -231,11 +224,6 @@ input:focus {
 }
 
 @media (max-width: 720px) {
-  .workspace-card {
-    width: calc(100% - 32px);
-    padding: 24px;
-  }
-
   .section-heading {
     align-items: flex-start;
     flex-direction: column;
