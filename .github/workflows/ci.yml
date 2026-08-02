@@ -1,0 +1,47 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main, 'chore/**', 'feat/**', 'fix/**']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Frontend build
+        run: npm run build
+
+      - name: Rust format
+        run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
