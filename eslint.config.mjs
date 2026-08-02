@@ -37,6 +37,24 @@ export default typescript.config(
       "vue/singleline-html-element-content-newline": "off",
       "vue/html-self-closing": "off",
       "@typescript-eslint/no-explicit-any": "error",
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@tauri-apps/*"],
+              message:
+                "Direct Tauri API imports are forbidden outside src/bridge/. Use the DesktopBridge interface instead.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ["src/bridge/**/*.ts"],
+    rules: {
+      "no-restricted-imports": "off",
     },
   },
 );

@@ -47,8 +47,28 @@ impl DesktopEvent {
         }
     }
 
-    /// Create a session-scoped event with the required fields.
-    pub fn session(
+    // Note: session-scoped events must be constructed via `SessionEvent::build`
+    // to guarantee that taskId, sessionId, and seq are always present.
+}
+
+// ---------------------------------------------------------------------------
+// SessionEvent — type-level guarantee for session-scoped events
+// ---------------------------------------------------------------------------
+
+/// A session-scoped event with **required** `taskId`, `sessionId`, and `seq`.
+/// Construct via `SessionEvent::build()`; converts to `DesktopEvent` on
+/// serialization.
+pub struct SessionEvent {
+    pub event_type: String,
+    pub task_id: TaskId,
+    pub session_id: SessionId,
+    pub seq: u64,
+    pub payload: serde_json::Value,
+}
+
+impl SessionEvent {
+    /// Create a new session-scoped event.
+    pub fn new(
         event_type: impl Into<String>,
         task_id: TaskId,
         session_id: SessionId,
@@ -57,13 +77,116 @@ impl DesktopEvent {
     ) -> Self {
         Self {
             event_type: event_type.into(),
-            task_id: Some(task_id),
-            session_id: Some(session_id),
-            seq: Some(seq),
-            timestamp: super::types::utc_now(),
+            task_id,
+            session_id,
+            seq,
             payload,
         }
     }
+
+    /// Convert to the flat `DesktopEvent` envelope for emission.
+    pub fn build(self) -> DesktopEvent {
+        DesktopEvent {
+            event_type: self.event_type,
+            task_id: Some(self.task_id),
+            session_id: Some(self.session_id),
+            seq: Some(self.seq),
+            timestamp: super::types::utc_now(),
+            payload: self.payload,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Typed event payload DTOs
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeUpdatedPayload {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSnapshotPayload {
+    pub tasks: serde_json::Value, // typed in GAG-004
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskStatePayload {
+    pub task_id: TaskId,
+    pub status: String,
+    pub detail: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageDeltaPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityUpdatedPayload {
+    pub kind: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionRequestedPayload {
+    pub request_id: String,
+    pub options: Vec<PermissionOption>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanUpdatedPayload {
+    pub status: String,
+    pub detail: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangesUpdatedPayload {
+    pub task_id: TaskId,
+    pub files: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactAvailablePayload {
+    pub task_id: TaskId,
+    pub artifact_id: String,
+    pub mime_type: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceWarningPayload {
+    pub message: String,
+    pub resource: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticNoticePayload {
+    pub level: String,
+    pub message: String,
+    pub source: String,
 }
 
 /// Well-known event type strings kept in one place for Rust/TS consistency.
@@ -97,13 +220,14 @@ mod tests {
 
     #[test]
     fn session_event_includes_all_fields() {
-        let ev = DesktopEvent::session(
+        let ev = SessionEvent::new(
             "message.delta",
             super::super::types::TaskId::new("t1"),
             super::super::types::SessionId::new("s1"),
             42,
             serde_json::json!({"text": "hello"}),
-        );
+        )
+        .build();
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"taskId\":\"t1\""));
         assert!(json.contains("\"sessionId\":\"s1\""));

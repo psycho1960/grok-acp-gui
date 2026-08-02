@@ -2,8 +2,8 @@
 // consumers that import `bootstrap` directly.  New code should use
 // `createDesktopBridge()` from `src/bridge/client.ts`.
 
-import { createDesktopBridge } from "./client";
-export { type BootstrapStatus } from "./types";
+import { createDesktopBridge } from "./client.js";
+export { type BootstrapStatus } from "./types.js";
 
 /**
  * Backward-compatible one-shot bootstrap that returns the raw

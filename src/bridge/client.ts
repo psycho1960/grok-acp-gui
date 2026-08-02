@@ -62,8 +62,12 @@ export function createDesktopBridge(): DesktopBridge {
           listener(event.payload as DesktopEvent);
         },
       );
+      let unsubscribed = false;
       return () => {
-        unlisten();
+        if (!unsubscribed) {
+          unsubscribed = true;
+          unlisten();
+        }
       };
     },
   };

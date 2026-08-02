@@ -2,7 +2,6 @@ mod app;
 pub mod bridge;
 pub mod domain;
 
-use bridge::commands::DesktopCommand;
 use bridge::dispatch::{self as br_dispatch, DesktopResult};
 
 #[tauri::command]
@@ -11,7 +10,7 @@ fn bootstrap() -> br_dispatch::BootstrapStatus {
 }
 
 #[tauri::command]
-fn execute(command: DesktopCommand) -> DesktopResult {
+fn execute(command: serde_json::Value) -> DesktopResult {
     br_dispatch::execute_impl(command)
 }
 

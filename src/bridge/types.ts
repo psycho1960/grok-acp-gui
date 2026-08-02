@@ -117,7 +117,8 @@ export interface PermissionResolvePayload {
 
 export interface PlanResolvePayload {
   requestId: string;
-  action: "approve" | "reject" | "keep_planning";
+  /** ACP option ID, passed verbatim from the permission request. */
+  optionId: string;
 }
 
 export interface ArtifactImportPayload {
@@ -182,6 +183,84 @@ export interface DesktopEvent {
   seq?: number;
   timestamp: string; // ISO 8601
   payload: unknown;
+}
+
+/**
+ * Session-scoped event envelope with required taskId/sessionId/seq.
+ * Convert to DesktopEvent via `build()` for emission.
+ */
+export interface SessionEvent {
+  type: string;
+  taskId: TaskId;
+  sessionId: SessionId;
+  seq: number;
+  payload: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Typed event payloads (mirrors Rust bridge::events payload structs)
+// ---------------------------------------------------------------------------
+
+export interface RuntimeUpdatedPayload {
+  status: string;
+}
+
+export interface TaskSnapshotPayload {
+  tasks: unknown; // typed in GAG-004
+}
+
+export interface TaskStatePayload {
+  taskId: TaskId;
+  status: string;
+  detail: unknown;
+}
+
+export interface MessageDeltaPayload {
+  text?: string;
+  toolCall?: unknown;
+}
+
+export interface ActivityUpdatedPayload {
+  kind: string;
+  detail: string;
+}
+
+export interface PermissionRequestedPayload {
+  requestId: string;
+  options: PermissionOption[];
+}
+
+export interface PermissionOption {
+  id: string;
+  label: string;
+}
+
+export interface PlanUpdatedPayload {
+  status: string;
+  detail: unknown;
+}
+
+export interface ChangesUpdatedPayload {
+  taskId: TaskId;
+  files: unknown;
+}
+
+export interface ArtifactAvailablePayload {
+  taskId: TaskId;
+  artifactId: string;
+  mimeType: string;
+  displayName: string;
+}
+
+export interface ResourceWarningPayload {
+  message: string;
+  resource: string;
+}
+
+export interface DiagnosticNoticePayload {
+  level: string;
+  message: string;
+  source: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,4 +341,5 @@ export const ErrorCodes = {
   BRIDGE_UNSUPPORTED_COMMAND: "BRIDGE_UNSUPPORTED_COMMAND",
   BRIDGE_INVALID_PAYLOAD: "BRIDGE_INVALID_PAYLOAD",
   BRIDGE_VALIDATION_FAILED: "BRIDGE_VALIDATION_FAILED",
+  BRIDGE_NOT_IMPLEMENTED: "BRIDGE_NOT_IMPLEMENTED",
 } as const;

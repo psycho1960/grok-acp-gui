@@ -37,5 +37,18 @@ export type {
   WorktreeCleanupPayload,
   RecoveryRestorePayload,
   RecoveryDeletePayload,
+  SessionEvent,
+  RuntimeUpdatedPayload,
+  TaskSnapshotPayload,
+  TaskStatePayload,
+  MessageDeltaPayload,
+  ActivityUpdatedPayload,
+  PermissionRequestedPayload,
+  PermissionOption,
+  PlanUpdatedPayload,
+  ChangesUpdatedPayload,
+  ArtifactAvailablePayload,
+  ResourceWarningPayload,
+  DiagnosticNoticePayload,
 } from "./types";
 export { EventTypes, ErrorCodes } from "./types";

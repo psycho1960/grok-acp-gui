@@ -93,15 +93,8 @@ pub struct PermissionResolvePayload {
 #[serde(rename_all = "camelCase")]
 pub struct PlanResolvePayload {
     pub request_id: String,
-    pub action: PlanAction,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanAction {
-    Approve,
-    Reject,
-    KeepPlanning,
+    /// ACP option ID, passed verbatim — must not be inferred from labels.
+    pub option_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,6 +237,199 @@ pub enum DesktopCommand {
     RecoveryRestore(RecoveryRestorePayload),
     #[serde(rename = "recovery.delete")]
     RecoveryDelete(RecoveryDeletePayload),
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+use super::error::AppError;
+use crate::domain;
+
+const MAX_TITLE_LENGTH: usize = 500;
+const MAX_MESSAGE_LENGTH: usize = 100_000;
+const MAX_PATH_LENGTH: usize = 4096;
+
+/// Validate a parsed `DesktopCommand` before dispatching it.
+/// Returns `Ok(())` or an `AppError` with `BRIDGE_VALIDATION_FAILED`.
+pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
+    match cmd {
+        DesktopCommand::RuntimeRefresh(_) => Ok(()),
+
+        DesktopCommand::RuntimeLogin(p) => {
+            if let Some(ref method) = p.method {
+                if method.is_empty() {
+                    return Err(validation_err("login method must not be empty"));
+                }
+            }
+            Ok(())
+        }
+
+        DesktopCommand::ProjectOpen(p) => {
+            validate_non_empty_path(&p.path)?;
+            Ok(())
+        }
+
+        DesktopCommand::ProjectForget(p) => {
+            validate_id_non_empty(&p.project_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::TaskCreate(p) => {
+            validate_id_non_empty(&p.project_id.0)?;
+            validate_text_len(&p.title, MAX_TITLE_LENGTH, "title")?;
+            Ok(())
+        }
+
+        DesktopCommand::TaskOpen(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::TaskArchive(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::TurnSend(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_text_len(&p.message, MAX_MESSAGE_LENGTH, "message")?;
+            Ok(())
+        }
+
+        DesktopCommand::TurnCancel(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::SessionConfigure(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::SessionResume(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::PermissionResolve(p) => {
+            validate_id_non_empty(&p.request_id)?;
+            validate_id_non_empty(&p.option_id)?;
+            Ok(())
+        }
+
+        DesktopCommand::PlanResolve(p) => {
+            validate_id_non_empty(&p.request_id)?;
+            validate_id_non_empty(&p.option_id)?;
+            Ok(())
+        }
+
+        DesktopCommand::ArtifactImport(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            if p.paths.is_empty() {
+                return Err(validation_err("artifact.import requires at least one path"));
+            }
+            for path in &p.paths {
+                validate_non_empty_path(path)?;
+            }
+            Ok(())
+        }
+
+        DesktopCommand::ArtifactSave(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            if p.artifact_ids.is_empty() {
+                return Err(validation_err(
+                    "artifact.save requires at least one artifact ID",
+                ));
+            }
+            validate_non_empty_path(&p.target_path)?;
+            Ok(())
+        }
+
+        DesktopCommand::WorkspaceInspect(p) => {
+            validate_non_empty_path(&p.path)?;
+            Ok(())
+        }
+
+        DesktopCommand::WorktreeAdopt(p) => {
+            validate_non_empty_path(&p.path)?;
+            Ok(())
+        }
+
+        DesktopCommand::ReviewDiff(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::ReviewCheckpoint(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_text_len(&p.message, MAX_MESSAGE_LENGTH, "message")?;
+            if p.paths.is_empty() {
+                return Err(validation_err(
+                    "review.checkpoint requires at least one path",
+                ));
+            }
+            Ok(())
+        }
+
+        DesktopCommand::IntegrationPreflight(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::IntegrationExecute(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::WorktreeCleanup(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::RecoveryRestore(p) => {
+            validate_id_non_empty(&p.item_id)?;
+            Ok(())
+        }
+
+        DesktopCommand::RecoveryDelete(p) => {
+            validate_id_non_empty(&p.item_id)?;
+            Ok(())
+        }
+    }
+}
+
+fn validation_err(msg: &str) -> AppError {
+    AppError::new(domain::error::codes::BRIDGE_VALIDATION_FAILED, msg)
+}
+
+fn validate_id_non_empty(id: &str) -> Result<(), AppError> {
+    if id.trim().is_empty() {
+        Err(validation_err("ID must not be empty"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_text_len(text: &str, max: usize, field: &str) -> Result<(), AppError> {
+    if text.len() > max {
+        Err(validation_err(&format!(
+            "{} exceeds maximum length of {} characters",
+            field, max
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_non_empty_path(path: &str) -> Result<(), AppError> {
+    if path.trim().is_empty() {
+        Err(validation_err("path must not be empty"))
+    } else if path.len() > MAX_PATH_LENGTH {
+        Err(validation_err("path exceeds maximum length"))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

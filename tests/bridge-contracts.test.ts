@@ -45,6 +45,14 @@ const PERMISSION_RESOLVE_FIXTURE = {
   },
 } satisfies DesktopCommand;
 
+const PLAN_RESOLVE_FIXTURE = {
+  type: "plan.resolve",
+  payload: {
+    requestId: "req-99",
+    optionId: "plan-approve",
+  },
+} satisfies DesktopCommand;
+
 const SESSION_EVENT_FIXTURE: DesktopEvent = {
   type: EventTypes.MESSAGE_DELTA,
   taskId: "task-1" as TaskId,
@@ -77,6 +85,13 @@ describe("DesktopCommand round-trip", () => {
     expect(cmd.payload.projectId).toBe("proj-1");
     expect(cmd.payload.title).toBe("Add login page");
     expect(cmd.payload.mode).toBe("code");
+  });
+
+  it("parses plan.resolve with optionId", () => {
+    const cmd = PLAN_RESOLVE_FIXTURE;
+    expect(cmd.type).toBe("plan.resolve");
+    expect(cmd.payload.requestId).toBe("req-99");
+    expect(cmd.payload.optionId).toBe("plan-approve");
   });
 
   it("parses permission.resolve", () => {
