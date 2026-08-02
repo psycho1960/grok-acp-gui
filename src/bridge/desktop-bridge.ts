@@ -1,22 +1,16 @@
-export interface BootstrapStatus {
-  productName: string;
-  version: string;
-  platform: string;
-  ready: boolean;
-}
+// GAG-003: This file is retained for backward-compatibility with GAG-001/002
+// consumers that import `bootstrap` directly.  New code should use
+// `createDesktopBridge()` from `src/bridge/client.ts`.
 
-function requireTauriHost(): void {
-  if (typeof window === "undefined") {
-    throw new Error("Grok ACP GUI requires the Windows Tauri host.");
-  }
-  const host = window as unknown as Record<string, unknown>;
-  if (!("__TAURI_INTERNALS__" in host || "__TAURI__" in host)) {
-    throw new Error("Grok ACP GUI must run inside the Windows Tauri host.");
-  }
-}
+import { createDesktopBridge } from "./client";
+export { type BootstrapStatus } from "./types";
 
-export async function bootstrap(): Promise<BootstrapStatus> {
-  requireTauriHost();
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<BootstrapStatus>("bootstrap");
+/**
+ * Backward-compatible one-shot bootstrap that returns the raw
+ * BootstrapStatus.  Feature code should prefer `createDesktopBridge()`
+ * and call `.bootstrap()` on the returned bridge.
+ */
+export async function bootstrap(): Promise<import("./types").BootstrapStatus> {
+  const bridge = createDesktopBridge();
+  return bridge.bootstrap();
 }

@@ -1,26 +1,18 @@
 mod app;
+pub mod bridge;
+pub mod domain;
 
-use serde::Serialize;
+use bridge::commands::DesktopCommand;
+use bridge::dispatch::{self as br_dispatch, DesktopResult};
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BootstrapStatus {
-    product_name: &'static str,
-    version: &'static str,
-    platform: &'static str,
-    ready: bool,
+#[tauri::command]
+fn bootstrap() -> br_dispatch::BootstrapStatus {
+    br_dispatch::bootstrap_impl()
 }
 
-/// Minimal renderer bootstrap seam. Runtime probing and ACP session setup
-/// belong to later tasks and are intentionally not started here.
 #[tauri::command]
-fn bootstrap() -> BootstrapStatus {
-    BootstrapStatus {
-        product_name: "Grok ACP GUI",
-        version: env!("CARGO_PKG_VERSION"),
-        platform: std::env::consts::OS,
-        ready: true,
-    }
+fn execute(command: DesktopCommand) -> DesktopResult {
+    br_dispatch::execute_impl(command)
 }
 
 pub fn run() {
@@ -28,7 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(app::configure)
-        .invoke_handler(tauri::generate_handler![bootstrap])
+        .invoke_handler(tauri::generate_handler![bootstrap, execute])
         .run(tauri::generate_context!())
         .expect("error while running Grok ACP GUI");
 }

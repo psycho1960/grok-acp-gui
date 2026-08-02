@@ -183,3 +183,17 @@ npm run tauri build
 - 明确未完成项：
 - 建议下一个任务：
 
+## Agent skills
+
+### Issue tracker
+
+Issues live on GitHub at `psycho1960/grok-acp-gui`. Skills use the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the five canonical triage labels as-is: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: one `CONTEXT.md` at root + `docs/adr/` for architectural decisions. See `docs/agents/domain.md`.
+
