@@ -153,7 +153,7 @@ input {
 
 input:focus {
   border-color: var(--ctp-mauve);
-  box-shadow: 0 0 0 3px rgb(203 166 247 / 18%);
+  box-shadow: 0 0 0 3px var(--ctp-focus-ring);
 }
 
 .primary-button {

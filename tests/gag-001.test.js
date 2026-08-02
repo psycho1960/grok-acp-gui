@@ -34,6 +34,13 @@ test("GAG-001 metadata is Grok ACP GUI and Windows-only", async () => {
   await access(["src", "lib", "transport", "stdio.ts"].join("/"));
 });
 
+test("GAG-001 uses shared design tokens for onboarding focus", async () => {
+  const source = await readFile("src/features/onboarding/OnboardingView.vue", "utf8");
+
+  assert.match(source, /var\(--ctp-focus-ring\)/);
+  assert.doesNotMatch(source, /rgb\(203 166 247/);
+});
+
 test("GAG-001 removes web transport and telemetry dependencies", () => {
   assert.equal(
     Object.keys(packageJson.dependencies).some((name) =>
