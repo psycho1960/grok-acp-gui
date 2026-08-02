@@ -123,6 +123,21 @@ export interface DesktopBridge {
 }
 ```
 
+GAG-001 在正式 Interface 落地前只暴露以下临时启动契约：
+
+```ts
+export interface BootstrapStatus {
+  productName: string;
+  version: string;
+  platform: string;
+  ready: boolean;
+}
+
+export function bootstrap(): Promise<BootstrapStatus>;
+```
+
+Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该 DTO 不承载 Runtime、ACP、项目或持久化状态，不发布事件，必须在 GAG-003 中由正式 `BootstrapSnapshot` 契约替换。
+
 命令联合类型涵盖：
 
 - `runtime.refresh`、`runtime.login`

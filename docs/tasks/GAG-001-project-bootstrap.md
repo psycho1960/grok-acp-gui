@@ -42,7 +42,7 @@
 - 读取/checkout v0.1.16，校验 tag 指向固定 commit，按 ADR-0001 记录来源，将已校验源码快照导入任务分支并设置 `upstream`；产品仓库不要求与上游共享 Git 祖先。
 - 保留 MIT License 和第三方版权声明。
 - 产品名、包名、Tauri identifier、窗口标题和内部命名改为 Grok ACP GUI。
-- 保留 Windows desktop、Vue/Pinia、Tauri、ACP transport 基础、文件选择和本地持久化能力。
+- 保留 Windows desktop、Vue/Pinia、Tauri、ACP SDK 依赖基线、文件选择和本地持久化能力；不在 Renderer 或 Rust 中提前实现 ACP framing/transport。
 - 删除 Web build、移动端生成目录/脚本、WebSocket remote agent、通用 Agent Registry/Store、Application Insights 和默认第三方 Agent 配置。
 - 创建技术方案约定的顶层目录和最小 composition root；不创建空的业务转发层。
 - 设置基础脚本：typecheck、lint、test、build、tauri build。
@@ -50,7 +50,7 @@
 
 ## 7. 明确不实现
 
-- 不实现 Grok 探测、ACP 会话、任务、图片或 Worktree。
+- 不实现 Grok 探测、ACP framing/transport、ACP 会话、任务、图片或 Worktree；真实 stdio Adapter 由 GAG-005 实现。
 - 不设计最终 UI 组件。
 - 不添加 SQLite Schema。
 - 不加入自动更新、签名、CI 发布或其他 Agent。

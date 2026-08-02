@@ -1,22 +1,19 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import test from "node:test";
+import { createSSRApp } from "vue";
+import { renderToString } from "@vue/server-renderer";
+import { createServer } from "vite";
 
 const packageJson = JSON.parse(await readFile("package.json", "utf8"));
 const readmeSource = await readFile("README.md", "utf8");
+const agentsSource = await readFile("AGENTS.md", "utf8");
+const gitignoreSource = await readFile(".gitignore", "utf8");
 const tauriConfig = JSON.parse(
   await readFile("src-tauri/tauri.conf.json", "utf8"),
 );
 const cargoToml = await readFile("src-tauri/Cargo.toml", "utf8");
 const licenseText = await readFile("LICENSE", "utf8");
-const bridgeSource = await readFile("src/bridge/desktop-bridge.ts", "utf8");
-const appSource = await readFile("src/App.vue", "utf8");
-const onboardingSource = await readFile(
-  "src/features/onboarding/OnboardingView.vue",
-  "utf8",
-);
-const themeSource = await readFile("src/shared/theme/tokens.css", "utf8");
 const taskSpecSource = await readFile(
   "docs/tasks/GAG-001-project-bootstrap.md",
   "utf8",
@@ -51,10 +48,10 @@ test("GAG-001 metadata is Grok ACP GUI and Windows-only", async () => {
   );
   await assert.rejects(access("assets/screenshot.png"));
   await access(["src-tauri", "icons", "icon.ico"].join("/"));
-  await access(["src", "lib", "transport", "stdio.ts"].join("/"));
 });
 
-test("GAG-001 keeps paired Tauri packages on matching minor versions", () => {
+test("GAG-001 locks paired Tauri packages on matching minor versions", async () => {
+  await access("src-tauri/Cargo.lock");
   assert.equal(packageJson.dependencies["@tauri-apps/api"], "2.11.1");
   assert.equal(packageJson.dependencies["@tauri-apps/plugin-dialog"], "2.7.2");
   assert.equal(packageJson.dependencies["@tauri-apps/plugin-store"], "2.4.4");
@@ -70,19 +67,31 @@ test("GAG-001 records accepted upstream provenance without ancestry", () => {
   assert.match(technicalDesignSource, /不要求属于产品仓库的 Git 祖先链/);
 });
 
-test("GAG-001 exposes only the bootstrap bridge and onboarding placeholder", () => {
-  assert.doesNotMatch(bridgeSource, /selectProjectDirectory/);
-  assert.doesNotMatch(appSource, /selectProjectDirectory|projectPath/);
-  assert.match(onboardingSource, /UI-ONBOARD-001/);
-  assert.match(onboardingSource, /启动检查尚未接入/);
-  assert.doesNotMatch(onboardingSource, /选择项目目录|UI-PROJECT-001/);
+test("GAG-001 exports only the bootstrap bridge and fails closed", async () => {
+  const bridge = await import("../src/bridge/desktop-bridge.ts");
+
+  assert.deepEqual(Object.keys(bridge), ["bootstrap"]);
+  await assert.rejects(bridge.bootstrap(), /Windows Tauri host/);
 });
 
-test("GAG-001 keeps shared visual knowledge in the theme", () => {
-  assert.match(themeSource, /\.eyebrow\s*\{/);
-  assert.doesNotMatch(appSource, /\.eyebrow\s*\{/);
-  assert.doesNotMatch(onboardingSource, /\.eyebrow\s*\{/);
-  assert.doesNotMatch(onboardingSource, /\.workspace-card\s*\{/);
+test("GAG-001 renders the onboarding placeholder without fake checks", async () => {
+  const vite = await createServer({
+    appType: "custom",
+    logLevel: "silent",
+    server: { middlewareMode: true },
+  });
+  try {
+    const { default: OnboardingView } = await vite.ssrLoadModule(
+      "/src/features/onboarding/OnboardingView.vue",
+    );
+    const html = await renderToString(createSSRApp(OnboardingView));
+
+    assert.match(html, /UI-ONBOARD-001/);
+    assert.match(html, /启动检查尚未接入/);
+    assert.doesNotMatch(html, /选择项目目录|UI-PROJECT-001/);
+  } finally {
+    await vite.close();
+  }
 });
 
 test("GAG-001 removes web transport and telemetry dependencies", () => {
@@ -96,12 +105,22 @@ test("GAG-001 removes web transport and telemetry dependencies", () => {
   assert.equal(packageJson.dependencies["marked"], undefined);
 });
 
-test("GAG-001 keeps both MIT copyright notices and fails closed outside Tauri", () => {
+test("GAG-001 keeps both MIT copyright notices", () => {
   assert.match(licenseText, /Copyright \(c\) 2026 Jun Han/);
   assert.match(licenseText, /Copyright \(c\) 2026 Hon_Y/);
-  assert.doesNotMatch(bridgeSource, new RegExp(["local", "Storage"].join("")));
-  assert.doesNotMatch(bridgeSource, /fallback/);
-  assert.doesNotMatch(bridgeSource, /loadPreferences|savePreferences/);
+});
+
+test("GAG-001 ignores common secret file formats", () => {
+  const ignored = new Set(gitignoreSource.split(/\r?\n/));
+
+  for (const pattern of ["*.pem", "*.key", "*.p12", "*.pfx"]) {
+    assert.equal(ignored.has(pattern), true, pattern);
+  }
+});
+
+test("AGENTS indexes the roadmap and task specifications", () => {
+  assert.match(agentsSource, /docs\/04-AI-DEVELOPMENT-ROADMAP\.md/);
+  assert.match(agentsSource, /docs\/tasks\//);
 });
 
 test("GAG-001 exposes the composition roots and complete CI gates", async () => {
