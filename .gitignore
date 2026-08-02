@@ -1,0 +1,86 @@
+# ============================================================
+# Grok ACP GUI 根 .gitignore
+# 适用范围：Tauri 2 + Vue 3 + Rust stable-msvc + Node/npm
+# ============================================================
+
+# ----- Node / Vite -----
+node_modules/
+dist/
+dist-ssr/
+.vite/
+.cache/
+.parcel-cache/
+.npm/
+.eslintcache
+.stylelintcache
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ----- TypeScript -----
+*.tsbuildinfo
+
+# ----- 环境与本地秘密（绝不入库） -----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+.local/
+coverage/
+
+# ----- Rust / Cargo -----
+src-tauri/target/
+src-tauri/Cargo.lock.bak
+**/*.rs.bk
+
+# ----- Tauri -----
+src-tauri/gen/
+src-tauri/target/
+src-tauri/WixTools/
+*.app
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+*.msi
+*.exe
+*.nsis
+
+# ----- IDE -----
+.idea/
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ----- 数据库与本地持久化 -----
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+*.db
+data/
+runtime/
+
+# ----- Worktree、恢复包与 Agent 产物 -----
+worktrees/
+recovery/
+artifacts/cache/
+sessions/
+*.tar
+*.tar.gz
+
+# ----- 日志 / 诊断 -----
+logs/
+*.log
+trace/
