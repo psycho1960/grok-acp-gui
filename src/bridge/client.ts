@@ -58,7 +58,18 @@ export function createDesktopBridge(): DesktopBridge {
       const unlisten = await listenFn!(
         EVENT_CHANNEL,
         (event: { payload: unknown }) => {
-          listener(event.payload as import("./types").TypedDesktopEvent);
+          const raw = event.payload;
+          if (
+            typeof raw === "object" &&
+            raw !== null &&
+            "type" in raw &&
+            typeof (raw as Record<string, unknown>).type === "string" &&
+            "timestamp" in raw &&
+            "payload" in raw
+          ) {
+            listener(raw as import("./types").TypedDesktopEvent);
+          }
+          // Drop malformed events silently — the Renderer must not trust IPC.
         },
       );
       let unsubscribed = false;

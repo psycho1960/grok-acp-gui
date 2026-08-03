@@ -141,8 +141,8 @@ export interface TaskCreatePayload {
   prompt: string;
   /** Attachments referenced by artifact ID. */
   attachments?: string[];
-  /** Agent mode (e.g. "code", "architect"). */
-  mode?: "code" | "architect" | "ask" | string;
+  /** Agent mode string (ACP SessionModeId — dynamic). */
+  mode?: string;
   /** Model ID to use for this task. */
   model?: string;
   /** Reasoning effort: "low" | "medium" | "high". */
@@ -371,6 +371,49 @@ export interface DiagnosticNoticePayload {
 export type DesktopResult<T = unknown> =
   | { success: "true"; data: T }
   | { success: "false"; error: AppError };
+
+/** Typed result DTOs mapped to each command category. */
+export interface RuntimeStatusResult {
+  status: string;
+  version?: string;
+}
+
+export interface ProjectOpenResult {
+  projectId: ProjectId;
+}
+
+export interface TaskCreateResult {
+  taskId: TaskId;
+}
+
+export interface TaskOpenResult {
+  taskId: TaskId;
+  title: string;
+  status: string;
+}
+
+export interface TurnSendResult {
+  seq: number;
+}
+
+export interface WorkspaceInspectResult {
+  repoRoot: string;
+  branch: string;
+  dirty: boolean;
+}
+
+export interface ReviewDiffResult {
+  files: FileDiffSummary[];
+}
+
+export interface FileDiffSummary {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed";
+}
+
+export interface AcknowledgedResult {
+  acknowledged: string;
+}
 
 // ---------------------------------------------------------------------------
 // AppError

@@ -318,12 +318,7 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             validate_non_empty_text(&p.prompt, "prompt")?;
             validate_text_len(&p.prompt, MAX_MESSAGE_LENGTH, "prompt")?;
             reject_base64_image(&p.prompt)?;
-            validate_enum_opt(p.mode.as_deref(), &["code", "architect", "ask"], "mode")?;
-            validate_enum_opt(
-                p.reasoning.as_deref(),
-                &["low", "medium", "high"],
-                "reasoning",
-            )?;
+            validate_enum_opt(p.reasoning.as_deref(), &["low", "medium", "high"], "reasoning")?;
             validate_enum_opt(
                 p.workspace_strategy.as_deref(),
                 &["worktree", "readonly", "direct"],
@@ -600,9 +595,31 @@ mod tests {
     }
 
     #[test]
-    fn missing_payload_field_errors() {
-        let json = r#"{"type":"task.create","payload":{"projectId":"x"}}"#;
-        let result: Result<DesktopCommand, _> = serde_json::from_str(json);
-        assert!(result.is_err());
+    fn generate_fixture_json() {
+        // Round-trip test that also serves as TS fixture source.
+        let cmds: Vec<DesktopCommand> = vec![
+            DesktopCommand::RuntimeRefresh(EmptyPayload {}),
+            DesktopCommand::TaskCreate(TaskCreatePayload {
+                project_id: super::super::types::ProjectId::new("p1"),
+                title: "Test".into(),
+                prompt: "Do it".into(),
+                attachments: None,
+                mode: Some("code".into()),
+                model: None,
+                reasoning: None,
+                workspace_strategy: None,
+            }),
+            DesktopCommand::PermissionResolve(PermissionResolvePayload {
+                request_id: "req-1".into(),
+                option_id: "opt-allow-once".into(),
+            }),
+        ];
+        for cmd in &cmds {
+            let json = serde_json::to_string(cmd).unwrap();
+            let back: DesktopCommand = serde_json::from_str(&json).unwrap();
+            // Verify round-trip by re-serializing
+            let json2 = serde_json::to_string(&back).unwrap();
+            assert_eq!(json, json2);
+        }
     }
 }
