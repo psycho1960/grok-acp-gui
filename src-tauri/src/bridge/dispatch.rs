@@ -50,33 +50,85 @@ pub const EVENT_CHANNEL: &str = "bridge:event";
 const MAX_PAYLOAD_BYTES: u64 = 1_048_576;
 
 /// Implementation of the `bootstrap` command (called from lib.rs).
-pub fn bootstrap_impl(repo: &dyn Repository) -> BootstrapSnapshot {
-    // Load domain entities from persistence.
-    let domain_snap = repo.bootstrap_snapshot().unwrap_or_else(|e| {
-        eprintln!("bootstrap: failed to load snapshot: {}", e);
-        domain::types::BootstrapSnapshot {
-            product_name: "Grok ACP GUI".into(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            platform: std::env::consts::OS.into(),
-            projects: vec![],
-            active_tasks: vec![],
-            bindings: vec![],
-            worktrees: vec![],
-            recovery_items: vec![],
-            settings: vec![],
-            recovery_performed: false,
-            tasks_interrupted: 0,
-        }
-    });
+pub fn bootstrap_impl(repo: &dyn Repository, db_init_error: Option<&str>) -> BootstrapSnapshot {
+    let product_name = "Grok ACP GUI".to_string();
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let platform = std::env::consts::OS.to_string();
 
+    // If the database couldn't even open, surface that immediately.
+    if let Some(err) = db_init_error {
+        return BootstrapSnapshot {
+            product_name,
+            version,
+            platform,
+            ready: false,
+            db_error: Some(err.to_string()),
+            ..empty_bootstrap()
+        };
+    }
+
+    // Load domain entities from persistence.
+    match repo.bootstrap_snapshot() {
+        Ok(domain_snap) => BootstrapSnapshot {
+            product_name: domain_snap.product_name,
+            version: domain_snap.version,
+            platform: domain_snap.platform,
+            ready: true,
+            db_error: None,
+            runtime: RuntimeBootstrapStatus {
+                status: "unavailable".into(),
+                probe_error: Some("Runtime module not yet wired (GAG-005)".into()),
+                version: None,
+                authenticated: None,
+            },
+            capabilities: CapabilitySnapshot {
+                models: vec![],
+                modes: vec![],
+                slash_commands: vec![],
+                model_state: None,
+                mode_state: None,
+            },
+            // Domain entities from persistence
+            projects: domain_snap.projects,
+            active_tasks: domain_snap.active_tasks,
+            bindings: domain_snap.bindings,
+            worktrees: domain_snap.worktrees,
+            recovery_items: domain_snap.recovery_items,
+            settings: domain_snap.settings,
+            recovery_performed: domain_snap.recovery_performed,
+            tasks_interrupted: domain_snap.tasks_interrupted,
+        },
+        Err(e) => {
+            eprintln!(
+                "bootstrap: database query failed ({}): {}",
+                e.code, e.message
+            );
+            BootstrapSnapshot {
+                product_name,
+                version,
+                platform,
+                ready: false,
+                db_error: Some(format!(
+                    "Cannot read application data ({}). {}",
+                    e.code, e.message
+                )),
+                ..empty_bootstrap()
+            }
+        }
+    }
+}
+
+/// Returns a BootstrapSnapshot with all optional fields empty/default.
+fn empty_bootstrap() -> BootstrapSnapshot {
     BootstrapSnapshot {
-        product_name: domain_snap.product_name,
-        version: domain_snap.version,
-        platform: domain_snap.platform,
-        ready: true,
+        product_name: String::new(),
+        version: String::new(),
+        platform: String::new(),
+        ready: false,
+        db_error: None,
         runtime: RuntimeBootstrapStatus {
             status: "unavailable".into(),
-            probe_error: Some("Runtime module not yet wired (GAG-005)".into()),
+            probe_error: None,
             version: None,
             authenticated: None,
         },
@@ -87,15 +139,14 @@ pub fn bootstrap_impl(repo: &dyn Repository) -> BootstrapSnapshot {
             model_state: None,
             mode_state: None,
         },
-        // Domain entities from persistence
-        projects: domain_snap.projects,
-        active_tasks: domain_snap.active_tasks,
-        bindings: domain_snap.bindings,
-        worktrees: domain_snap.worktrees,
-        recovery_items: domain_snap.recovery_items,
-        settings: domain_snap.settings,
-        recovery_performed: domain_snap.recovery_performed,
-        tasks_interrupted: domain_snap.tasks_interrupted,
+        projects: vec![],
+        active_tasks: vec![],
+        bindings: vec![],
+        worktrees: vec![],
+        recovery_items: vec![],
+        settings: vec![],
+        recovery_performed: false,
+        tasks_interrupted: 0,
     }
 }
 
@@ -106,6 +157,10 @@ pub struct BootstrapSnapshot {
     pub version: String,
     pub platform: String,
     pub ready: bool,
+    /// Non-empty when the database is unavailable or corrupt.
+    /// The Renderer should show `UI-ERROR-001` and disable data-dependent features.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_error: Option<String>,
     pub runtime: RuntimeBootstrapStatus,
     pub capabilities: CapabilitySnapshot,
     // Domain entities (GAG-004)

@@ -54,8 +54,8 @@ impl SqliteRepository {
         })
     }
 
-    /// Open an in-memory database (for testing).
-    #[cfg(test)]
+    /// Open an in-memory database (used as fallback when the on-disk
+    /// database cannot be opened or for testing).
     pub fn open_in_memory() -> Result<Self, DomainError> {
         let mut conn = Connection::open_in_memory()
             .map_err(|e| db_error("Failed to open in-memory DB", &e))?;

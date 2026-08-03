@@ -1,24 +1,49 @@
 //! SQLite Migration runner.
 //!
-//! Reads numbered `.sql` files from `src-tauri/migrations/`, applies them
-//! in order inside transactions, and records the schema version + checksum
-//! in the `_schema_version` table.
+//! Migrations are embedded at compile time so they work in installed
+//! packages (MSI/NSIS) where the source directory does not exist.
+//! Each migration carries its SQL content and a SHA-256 checksum;
+//! the runner applies them in order inside transactions.
 //!
 //! # Invariants
 //! - Any migration failure rolls back the entire batch.
-//! - Already-applied migrations are skipped.
+//! - Already-applied migrations are skipped (checksum verified).
 //! - A schema version newer than any known migration returns `DB_MIGRATION_FAILED`.
 //! - Merged migration files MUST NOT be modified.
 
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use std::path::Path;
 
-/// The embedded directory containing migration SQL files.
-const MIGRATIONS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+// ---------------------------------------------------------------------------
+// Embedded migrations
+// ---------------------------------------------------------------------------
 
-/// Apply all pending migrations to `conn`. Runs inside a single transaction
-/// so any failure rolls back the entire batch.
+/// A single migration, bundled at compile time.
+struct EmbeddedMigration {
+    version: i64,
+    sql: &'static str,
+    checksum: String,
+}
+
+/// All known migrations, in version order. Called once per migration run.
+fn embedded_migrations() -> Vec<EmbeddedMigration> {
+    let sql_0001 = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/migrations/0001_initial.sql"
+    ));
+    vec![EmbeddedMigration {
+        version: 1,
+        sql: sql_0001,
+        checksum: compute_checksum(sql_0001),
+    }]
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/// Apply all pending (embedded) migrations to `conn`. Runs inside a
+/// single transaction so any failure rolls back the entire batch.
 ///
 /// Returns the number of migrations applied (0 if already up-to-date).
 pub fn run_migrations(conn: &Connection) -> Result<u32, MigrationError> {
@@ -41,8 +66,7 @@ pub fn run_migrations(conn: &Connection) -> Result<u32, MigrationError> {
         )
         .map_err(|e| MigrationError::QueryFailed(e.to_string()))?;
 
-    // Discover migration files.
-    let migrations = discover_migrations()?;
+    let migrations = embedded_migrations();
     if migrations.is_empty() {
         return Ok(0);
     }
@@ -66,7 +90,7 @@ pub fn run_migrations(conn: &Connection) -> Result<u32, MigrationError> {
         }
 
         // Apply this migration.
-        conn.execute_batch(&mig.sql)
+        conn.execute_batch(mig.sql)
             .map_err(|e| MigrationError::ApplyFailed {
                 version: mig.version,
                 message: e.to_string(),
@@ -76,7 +100,7 @@ pub fn run_migrations(conn: &Connection) -> Result<u32, MigrationError> {
         let now = crate::domain::types::utc_now();
         conn.execute(
             "INSERT OR REPLACE INTO _schema_version (version, applied_at, checksum) VALUES (?1, ?2, ?3)",
-            rusqlite::params![mig.version, now, mig.checksum],
+            rusqlite::params![mig.version, now, &mig.checksum],
         )
         .map_err(|e| MigrationError::QueryFailed(e.to_string()))?;
 
@@ -98,54 +122,8 @@ pub fn run_migrations_transactional(conn: &mut Connection) -> Result<u32, Migrat
 }
 
 // ---------------------------------------------------------------------------
-// Migration discovery
+// Helpers
 // ---------------------------------------------------------------------------
-
-struct MigrationFile {
-    version: i64,
-    sql: String,
-    checksum: String,
-}
-
-fn discover_migrations() -> Result<Vec<MigrationFile>, MigrationError> {
-    let dir = Path::new(MIGRATIONS_DIR);
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut files: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| MigrationError::IoFailed(e.to_string()))?
-        .filter_map(|entry| entry.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".sql"))
-        .collect();
-
-    // Sort by filename for deterministic ordering.
-    files.sort_by_key(|e| e.file_name());
-
-    let mut migrations = Vec::new();
-
-    for file in files {
-        let name = file.file_name().to_string_lossy().to_string();
-        // Parse version number: "0001_initial.sql" → 1
-        let version: i64 = name
-            .split('_')
-            .next()
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| MigrationError::BadFilename(name.clone()))?;
-
-        let sql = std::fs::read_to_string(file.path())
-            .map_err(|e| MigrationError::IoFailed(e.to_string()))?;
-
-        let checksum = compute_checksum(&sql);
-        migrations.push(MigrationFile {
-            version,
-            sql,
-            checksum,
-        });
-    }
-
-    Ok(migrations)
-}
 
 fn compute_checksum(sql: &str) -> String {
     let mut hasher = Sha256::new();
@@ -153,7 +131,7 @@ fn compute_checksum(sql: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn verify_checksum(conn: &Connection, mig: &MigrationFile) -> Result<(), MigrationError> {
+fn verify_checksum(conn: &Connection, mig: &EmbeddedMigration) -> Result<(), MigrationError> {
     let stored: String = conn
         .query_row(
             "SELECT checksum FROM _schema_version WHERE version = ?1",
@@ -285,5 +263,14 @@ mod tests {
         let cs2 = compute_checksum(sql);
         assert_eq!(cs1, cs2);
         assert!(!cs1.is_empty());
+    }
+
+    #[test]
+    fn embedded_migrations_bundle_v1() {
+        let migs = embedded_migrations();
+        assert!(!migs.is_empty());
+        assert_eq!(migs[0].version, 1);
+        assert!(!migs[0].sql.is_empty());
+        assert!(!migs[0].checksum.is_empty());
     }
 }

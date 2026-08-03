@@ -13,14 +13,14 @@ use bridge::dispatch::{self as br_dispatch, DesktopResult};
 use std::sync::Arc;
 use tauri::Manager;
 
-/// Shared application state accessible by Tauri commands.
 pub struct AppState {
-    pub repo: Arc<dyn crate::modules::persistence::Repository>,
+    pub repo: Arc<dyn Repository>,
+    pub db_init_error: Option<String>,
 }
 
 #[tauri::command]
 fn bootstrap(state: tauri::State<'_, AppState>) -> br_dispatch::BootstrapSnapshot {
-    br_dispatch::bootstrap_impl(state.repo.as_ref())
+    br_dispatch::bootstrap_impl(state.repo.as_ref(), state.db_init_error.as_deref())
 }
 
 #[tauri::command]
@@ -34,30 +34,45 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
             app::configure(app)?;
-            // Initialize the SQLite repository for the app.
-            // Database path is derived from the app data directory.
             let app_handle = app.handle();
             let data_dir = app_handle
                 .path()
                 .app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
-            std::fs::create_dir_all(&data_dir).ok();
-            let db_path = data_dir.join("grok_acp_gui.db");
-
-            let repo = adapters::sqlite::SqliteRepository::open(&db_path)
-                .expect("Failed to initialize database");
-
-            // Perform startup recovery.
-            let interrupted = repo
-                .recover_interrupted_tasks("Application exited unexpectedly")
-                .unwrap_or(0);
-            if interrupted > 0 {
-                eprintln!("Recovered {} interrupted task(s)", interrupted);
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                eprintln!("WARNING: could not create data directory {:?}: {}", data_dir, e);
             }
-
-            app.manage(AppState {
-                repo: Arc::new(repo),
-            });
+            let db_path = data_dir.join("grok_acp_gui.db");
+            let mut db_init_error: Option<String> = None;
+            let repo: Arc<dyn Repository> = match adapters::sqlite::SqliteRepository::open(&db_path) {
+                Ok(r) => {
+                    match r.recover_interrupted_tasks("Application exited unexpectedly") {
+                        Ok(interrupted) if interrupted > 0 => {
+                            eprintln!("Recovered {} interrupted task(s)", interrupted);
+                        }
+                        Err(e) => {
+                            eprintln!("WARNING: startup recovery failed ({}): {}", e.code, e.message);
+                        }
+                        _ => {}
+                    }
+                    Arc::new(r)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "FATAL: database initialisation failed ({}): {}. Falling back to in-memory store.",
+                        e.code, e.message
+                    );
+                    db_init_error = Some(format!(
+                        "Database unavailable ({}). Restart the application. If the problem persists, delete {} and restart.",
+                        e.message, db_path.display()
+                    ));
+                    Arc::new(
+                        adapters::sqlite::SqliteRepository::open_in_memory()
+                            .expect("in-memory fallback must succeed"),
+                    )
+                }
+            };
+            app.manage(AppState { repo, db_init_error });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![bootstrap, execute])
