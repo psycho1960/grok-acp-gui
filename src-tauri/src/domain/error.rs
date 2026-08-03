@@ -37,4 +37,86 @@ pub mod codes {
     pub const BRIDGE_INVALID_PAYLOAD: &str = "BRIDGE_INVALID_PAYLOAD";
     pub const BRIDGE_VALIDATION_FAILED: &str = "BRIDGE_VALIDATION_FAILED";
     pub const BRIDGE_NOT_IMPLEMENTED: &str = "BRIDGE_NOT_IMPLEMENTED";
+
+    // Domain-level errors (GAG-004+)
+    pub const DOMAIN_ILLEGAL_TRANSITION: &str = "DOMAIN_ILLEGAL_TRANSITION";
+    pub const DOMAIN_TASK_NOT_FOUND: &str = "DOMAIN_TASK_NOT_FOUND";
+    pub const DOMAIN_WORKTREE_NOT_FOUND: &str = "DOMAIN_WORKTREE_NOT_FOUND";
+}
+
+// ---------------------------------------------------------------------------
+// DomainError — pure-domain error, never leaks SQL or paths to bridge
+// ---------------------------------------------------------------------------
+
+/// A domain-level error that explains *what* went wrong without exposing
+/// database internals, absolute paths, or raw SQL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+impl DomainError {
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    pub fn retryable(mut self) -> Self {
+        self.retryable = true;
+        self
+    }
+
+    /// Illegal state machine transition.
+    pub fn illegal_transition(entity: &str, current: &str, attempted: &str) -> Self {
+        Self::new(
+            codes::DOMAIN_ILLEGAL_TRANSITION,
+            format!(
+                "{} cannot transition from '{}' via '{}'",
+                entity, current, attempted
+            ),
+        )
+    }
+
+    /// Entity not found in the database.
+    pub fn not_found(entity: &str, id: &str) -> Self {
+        let code = match entity {
+            "Task" => codes::DOMAIN_TASK_NOT_FOUND,
+            "Worktree" => codes::DOMAIN_WORKTREE_NOT_FOUND,
+            _ => codes::PROJECT_NOT_FOUND,
+        };
+        Self::new(code, format!("{} with id '{}' not found", entity, id))
+    }
+}
+
+impl std::fmt::Display for DomainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for DomainError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn domain_error_display() {
+        let err = DomainError::illegal_transition("Task", "merged", "start");
+        let s = err.to_string();
+        assert!(s.contains("DOMAIN_ILLEGAL_TRANSITION"));
+        assert!(s.contains("merged"));
+    }
+
+    #[test]
+    fn domain_error_not_found() {
+        let err = DomainError::not_found("Task", "task-1");
+        assert_eq!(err.code, codes::DOMAIN_TASK_NOT_FOUND);
+        assert!(err.message.contains("task-1"));
+    }
 }
