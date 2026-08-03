@@ -1,0 +1,11 @@
+{
+  "name": "fake-acp-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fake ACP agent for GAG-005 integration tests — simulates Grok agent stdio",
+  "type": "module",
+  "main": "agent.mjs",
+  "scripts": {
+    "start": "node agent.mjs"
+  }
+}

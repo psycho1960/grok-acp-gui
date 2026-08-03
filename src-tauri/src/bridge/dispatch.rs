@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter};
 use super::error::AppError;
 use super::events::DesktopEvent;
 use crate::domain;
+use crate::modules::agent_runtime::{AgentEvent, RuntimeConfig, TimestampedEvent};
 use crate::modules::persistence::Repository;
 
 /// Wrapper that the `execute` Tauri command returns.
@@ -242,7 +243,11 @@ pub struct SlashCommandInfo {
 /// error.  The dispatch classifies errors:
 /// - Unknown `type` -> `BRIDGE_UNSUPPORTED_COMMAND`
 /// - Recognised `type` but invalid payload -> `BRIDGE_INVALID_PAYLOAD`
-pub fn execute_impl(repo: &dyn Repository, raw: serde_json::Value) -> DesktopResult {
+pub async fn execute_impl(
+    repo: &dyn Repository,
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    raw: serde_json::Value,
+) -> DesktopResult {
     // Reject oversized payloads before any deserialization.
     if let Ok(serialized) = serde_json::to_string(&raw) {
         if serialized.len() as u64 > MAX_PAYLOAD_BYTES {
@@ -286,14 +291,18 @@ pub fn execute_impl(repo: &dyn Repository, raw: serde_json::Value) -> DesktopRes
         return DesktopResult::err(err);
     }
 
-    dispatch(repo, cmd)
+    dispatch(repo, runtime, cmd).await
 }
 
 use super::commands::DesktopCommand;
 
-fn dispatch(repo: &dyn Repository, cmd: DesktopCommand) -> DesktopResult {
+async fn dispatch(
+    repo: &dyn Repository,
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    cmd: DesktopCommand,
+) -> DesktopResult {
     match &cmd {
-        DesktopCommand::RuntimeRefresh(_) => not_implemented("runtime.refresh"),
+        DesktopCommand::RuntimeRefresh(_) => runtime_refresh(runtime).await,
         DesktopCommand::RuntimeLogin(_) => not_implemented("runtime.login"),
 
         DesktopCommand::ProjectOpen(_) => not_implemented("project.open"),
@@ -328,6 +337,15 @@ fn dispatch(repo: &dyn Repository, cmd: DesktopCommand) -> DesktopResult {
         DesktopCommand::RecoveryRestore(_) => not_implemented("recovery.restore"),
         DesktopCommand::RecoveryDelete(_) => not_implemented("recovery.delete"),
     }
+}
+
+/// Wire `runtime.refresh` to the AgentRuntime probe.
+async fn runtime_refresh(
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+) -> DesktopResult {
+    let config = RuntimeConfig::default();
+    let result = runtime.probe(&config).await;
+    DesktopResult::ok(serde_json::to_value(&result).unwrap_or(serde_json::Value::Null))
 }
 
 /// Wire `task.create` to the persistence layer.
@@ -390,6 +408,200 @@ pub fn emit(app: &AppHandle, event: DesktopEvent) {
     let _ = app.emit(EVENT_CHANNEL, &event);
 }
 
+/// Map an internal `AgentEvent` (from the runtime module) to a
+/// `DesktopEvent` (for the bridge channel).  Returns `None` for events
+/// that have no bridge representation (e.g. internal diagnostics).
+///
+/// This is the ONLY transformation point between runtime events and
+/// Renderer-visible events.  The Renderer never sees raw ACP messages.
+pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
+    let session_id = event.meta.session_id.clone();
+    let seq = event.meta.sequence;
+
+    match event.event {
+        AgentEvent::SessionReady(p) => {
+            // Emit a runtime.updated event (non-session) with the
+            // session-ready info.  The Renderer uses this to update
+            // the runtime status indicator.
+            Some(DesktopEvent::non_session(
+                super::events::event_types::RUNTIME_UPDATED,
+                serde_json::to_value(&p).unwrap_or(serde_json::Value::Null),
+            ))
+        }
+
+        AgentEvent::AssistantDelta(p) => {
+            let payload = serde_json::to_value(&p).unwrap_or(serde_json::Value::Null);
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::MESSAGE_DELTA,
+                    // task_id is not known at the runtime layer; the
+                    // session layer (GAG-006) will map session_id → task_id.
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    payload,
+                )
+                .build(),
+            )
+        }
+
+        AgentEvent::AssistantCompleted(p) => {
+            // AssistantCompleted also maps to message.delta with the
+            // full text; the Renderer uses it to finalise the message.
+            let payload = serde_json::json!({
+                "fullText": p.full_text,
+                "completed": true,
+            });
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::MESSAGE_DELTA,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    payload,
+                )
+                .build(),
+            )
+        }
+
+        AgentEvent::ToolStarted(p) | AgentEvent::ToolUpdated(p) => {
+            let payload = super::events::ActivityUpdatedPayload {
+                kind: "tool".into(),
+                detail: p.title.unwrap_or_default(),
+            };
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::ACTIVITY_UPDATED,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+                )
+                .build(),
+            )
+        }
+
+        AgentEvent::ToolCompleted(p) => {
+            let payload = super::events::ActivityUpdatedPayload {
+                kind: format!("tool:{}", p.outcome),
+                detail: p.summary.unwrap_or_default(),
+            };
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::ACTIVITY_UPDATED,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+                )
+                .build(),
+            )
+        }
+
+        AgentEvent::PermissionRequested(p) => {
+            let payload = super::events::PermissionRequestedPayload {
+                request_id: p.request_id,
+                options: p
+                    .options
+                    .into_iter()
+                    .map(|opt| super::events::PermissionOption {
+                        option_id: opt.option_id,
+                        name: opt.name,
+                        kind: super::events::PermissionOptionKind::AllowOnce, // placeholder
+                    })
+                    .collect(),
+                tool_call: super::events::ToolCallSummary {
+                    tool_call_id: p.tool_call.tool_call_id,
+                    title: p.tool_call.title,
+                    kind: p.tool_call.kind,
+                    locations: None,
+                },
+            };
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::PERMISSION_REQUESTED,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+                )
+                .build(),
+            )
+        }
+
+        AgentEvent::PlanProposed(p) => {
+            let payload = super::events::PlanUpdatedPayload {
+                status: "proposed".into(),
+                detail: serde_json::json!({
+                    "request_id": p.request_id,
+                    "summary": p.summary,
+                    "options": p.options,
+                }),
+            };
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::PLAN_UPDATED,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+                )
+                .build(),
+            )
+        }
+
+        AgentEvent::ArtifactAnnounced(p) => {
+            let payload = super::events::ArtifactAvailablePayload {
+                task_id: super::types::TaskId::new(""),
+                artifact_id: p.artifact_id,
+                mime_type: p.mime_type,
+                display_name: p.display_name,
+            };
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::ARTIFACT_AVAILABLE,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+                )
+                .build(),
+            )
+        }
+
+        AgentEvent::RequestFailed(p) => {
+            let payload = super::events::DiagnosticNoticePayload {
+                level: "error".into(),
+                message: format!("[{}] {}", p.code, p.message),
+                source: "agent_runtime".into(),
+            };
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::DIAGNOSTIC_NOTICE,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+                )
+                .build(),
+            )
+        }
+
+        AgentEvent::ProcessExited(p) => {
+            // Emit a runtime.updated event with the exit info.
+            let payload = serde_json::json!({
+                "status": "exited",
+                "reason": p.reason,
+                "code": p.code,
+            });
+            Some(DesktopEvent::non_session(
+                super::events::event_types::RUNTIME_UPDATED,
+                payload,
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,12 +622,16 @@ mod tests {
         assert!(json.contains("\"error\""));
     }
 
-    #[test]
-    fn unknown_command_returns_unsupported() {
+    #[tokio::test]
+    async fn unknown_command_returns_unsupported() {
         let raw = serde_json::json!({"type": "no.such.command", "payload": {}});
         let repo =
             crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
-        let result = execute_impl(&repo, raw);
+        // Use a fake runtime for the test.
+        let config = RuntimeConfig::default();
+        let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
+        let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
+        let result = execute_impl(&repo, runtime.as_ref(), raw).await;
         match result {
             DesktopResult::Err { error } => {
                 assert_eq!(error.code, domain::error::codes::BRIDGE_UNSUPPORTED_COMMAND);
@@ -424,13 +640,16 @@ mod tests {
         }
     }
 
-    #[test]
-    fn oversized_payload_rejected() {
+    #[tokio::test]
+    async fn oversized_payload_rejected() {
         let big: String = "x".repeat(2_000_000);
         let raw = serde_json::json!({"type": "runtime.refresh", "payload": {}, "big": big});
         let repo =
             crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
-        let result = execute_impl(&repo, raw);
+        let config = RuntimeConfig::default();
+        let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
+        let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
+        let result = execute_impl(&repo, runtime.as_ref(), raw).await;
         match result {
             DesktopResult::Err { error } => {
                 assert_eq!(error.code, domain::error::codes::BRIDGE_INVALID_PAYLOAD);
@@ -439,8 +658,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn task_create_persists() {
+    #[tokio::test]
+    async fn task_create_persists() {
         let repo =
             crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
 
@@ -464,7 +683,12 @@ mod tests {
                 "prompt": "Do something"
             }
         });
-        let result = execute_impl(&repo, raw);
+
+        let config = RuntimeConfig::default();
+        let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
+        let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
+
+        let result = execute_impl(&repo, runtime.as_ref(), raw).await;
         match result {
             DesktopResult::Ok { data } => {
                 let task = &data["task"];
@@ -474,6 +698,29 @@ mod tests {
             }
             DesktopResult::Err { error } => {
                 panic!("unexpected error: {:?}", error);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_refresh_returns_probe_result() {
+        let repo =
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
+        let raw = serde_json::json!({"type": "runtime.refresh", "payload": {}});
+
+        let config = RuntimeConfig::default();
+        let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
+        let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
+
+        let result = execute_impl(&repo, runtime.as_ref(), raw).await;
+        match result {
+            DesktopResult::Ok { data } => {
+                // The probe will fail (no grok installed in test env),
+                // but the result should still be a valid probe result.
+                assert!(data.get("available").is_some() || data.get("status").is_some());
+            }
+            DesktopResult::Err { error } => {
+                panic!("runtime.refresh should not error: {:?}", error);
             }
         }
     }

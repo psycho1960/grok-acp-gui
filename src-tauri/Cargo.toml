@@ -21,3 +21,14 @@ serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
+# GAG-005: async process management for Grok ACP runtime.
+# Tokio is already pulled in transitively by Tauri; we declare it
+# directly with the features needed for child-process stdio, timers,
+# and synchronisation primitives.
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt"] }
+# async_trait for the AgentRuntime trait object (GAG-005).
+async-trait = "0.1"
+
+[dev-dependencies]
+# Used by integration tests that spawn the real tokio runtime.
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread", "test-util"] }

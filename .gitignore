@@ -13,6 +13,9 @@ pnpm-debug.log*
 # TypeScript / local environment
 *.tsbuildinfo
 .env
+
+# Local tool state (agent memories, caches)
+.workbuddy/
 .env.*
 !.env.example
 *.pem
