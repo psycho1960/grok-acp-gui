@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter};
 use super::error::AppError;
 use super::events::DesktopEvent;
 use crate::domain;
+use crate::modules::persistence::Repository;
 
 /// Wrapper that the `execute` Tauri command returns.
 ///
@@ -49,15 +50,85 @@ pub const EVENT_CHANNEL: &str = "bridge:event";
 const MAX_PAYLOAD_BYTES: u64 = 1_048_576;
 
 /// Implementation of the `bootstrap` command (called from lib.rs).
-pub fn bootstrap_impl() -> BootstrapSnapshot {
+pub fn bootstrap_impl(repo: &dyn Repository, db_init_error: Option<&str>) -> BootstrapSnapshot {
+    let product_name = "Grok ACP GUI".to_string();
+    let version = env!("CARGO_PKG_VERSION").to_string();
+    let platform = std::env::consts::OS.to_string();
+
+    // If the database couldn't even open, surface that immediately.
+    if let Some(err) = db_init_error {
+        return BootstrapSnapshot {
+            product_name,
+            version,
+            platform,
+            ready: false,
+            db_error: Some(err.to_string()),
+            ..empty_bootstrap()
+        };
+    }
+
+    // Load domain entities from persistence.
+    match repo.bootstrap_snapshot() {
+        Ok(domain_snap) => BootstrapSnapshot {
+            product_name: domain_snap.product_name,
+            version: domain_snap.version,
+            platform: domain_snap.platform,
+            ready: true,
+            db_error: None,
+            runtime: RuntimeBootstrapStatus {
+                status: "unavailable".into(),
+                probe_error: Some("Runtime module not yet wired (GAG-005)".into()),
+                version: None,
+                authenticated: None,
+            },
+            capabilities: CapabilitySnapshot {
+                models: vec![],
+                modes: vec![],
+                slash_commands: vec![],
+                model_state: None,
+                mode_state: None,
+            },
+            // Domain entities from persistence
+            projects: domain_snap.projects,
+            active_tasks: domain_snap.active_tasks,
+            bindings: domain_snap.bindings,
+            worktrees: domain_snap.worktrees,
+            recovery_items: domain_snap.recovery_items,
+            settings: domain_snap.settings,
+            recovery_performed: domain_snap.recovery_performed,
+            tasks_interrupted: domain_snap.tasks_interrupted,
+        },
+        Err(e) => {
+            eprintln!(
+                "bootstrap: database query failed ({}): {}",
+                e.code, e.message
+            );
+            BootstrapSnapshot {
+                product_name,
+                version,
+                platform,
+                ready: false,
+                db_error: Some(format!(
+                    "Cannot read application data ({}). {}",
+                    e.code, e.message
+                )),
+                ..empty_bootstrap()
+            }
+        }
+    }
+}
+
+/// Returns a BootstrapSnapshot with all optional fields empty/default.
+fn empty_bootstrap() -> BootstrapSnapshot {
     BootstrapSnapshot {
-        product_name: "Grok ACP GUI".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        platform: std::env::consts::OS.into(),
-        ready: true,
+        product_name: String::new(),
+        version: String::new(),
+        platform: String::new(),
+        ready: false,
+        db_error: None,
         runtime: RuntimeBootstrapStatus {
             status: "unavailable".into(),
-            probe_error: Some("Runtime module not yet wired (GAG-005)".into()),
+            probe_error: None,
             version: None,
             authenticated: None,
         },
@@ -68,6 +139,14 @@ pub fn bootstrap_impl() -> BootstrapSnapshot {
             model_state: None,
             mode_state: None,
         },
+        projects: vec![],
+        active_tasks: vec![],
+        bindings: vec![],
+        worktrees: vec![],
+        recovery_items: vec![],
+        settings: vec![],
+        recovery_performed: false,
+        tasks_interrupted: 0,
     }
 }
 
@@ -78,8 +157,21 @@ pub struct BootstrapSnapshot {
     pub version: String,
     pub platform: String,
     pub ready: bool,
+    /// Non-empty when the database is unavailable or corrupt.
+    /// The Renderer should show `UI-ERROR-001` and disable data-dependent features.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub db_error: Option<String>,
     pub runtime: RuntimeBootstrapStatus,
     pub capabilities: CapabilitySnapshot,
+    // Domain entities (GAG-004)
+    pub projects: Vec<domain::types::Project>,
+    pub active_tasks: Vec<domain::types::Task>,
+    pub bindings: Vec<domain::types::SessionBinding>,
+    pub worktrees: Vec<domain::types::WorktreeRecord>,
+    pub recovery_items: Vec<domain::types::RecoveryItem>,
+    pub settings: Vec<domain::types::Settings>,
+    pub recovery_performed: bool,
+    pub tasks_interrupted: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,9 +240,9 @@ pub struct SlashCommandInfo {
 ///
 /// Accepts raw JSON so that unknown / malformed types produce a stable
 /// error.  The dispatch classifies errors:
-/// - Unknown `type` → `BRIDGE_UNSUPPORTED_COMMAND`
-/// - Recognised `type` but invalid payload → `BRIDGE_INVALID_PAYLOAD`
-pub fn execute_impl(raw: serde_json::Value) -> DesktopResult {
+/// - Unknown `type` -> `BRIDGE_UNSUPPORTED_COMMAND`
+/// - Recognised `type` but invalid payload -> `BRIDGE_INVALID_PAYLOAD`
+pub fn execute_impl(repo: &dyn Repository, raw: serde_json::Value) -> DesktopResult {
     // Reject oversized payloads before any deserialization.
     if let Ok(serialized) = serde_json::to_string(&raw) {
         if serialized.len() as u64 > MAX_PAYLOAD_BYTES {
@@ -194,12 +286,12 @@ pub fn execute_impl(raw: serde_json::Value) -> DesktopResult {
         return DesktopResult::err(err);
     }
 
-    dispatch(cmd)
+    dispatch(repo, cmd)
 }
 
 use super::commands::DesktopCommand;
 
-fn dispatch(cmd: DesktopCommand) -> DesktopResult {
+fn dispatch(repo: &dyn Repository, cmd: DesktopCommand) -> DesktopResult {
     match &cmd {
         DesktopCommand::RuntimeRefresh(_) => not_implemented("runtime.refresh"),
         DesktopCommand::RuntimeLogin(_) => not_implemented("runtime.login"),
@@ -207,7 +299,7 @@ fn dispatch(cmd: DesktopCommand) -> DesktopResult {
         DesktopCommand::ProjectOpen(_) => not_implemented("project.open"),
         DesktopCommand::ProjectForget(_) => not_implemented("project.forget"),
 
-        DesktopCommand::TaskCreate(_) => not_implemented("task.create"),
+        DesktopCommand::TaskCreate(payload) => task_create(repo, payload),
         DesktopCommand::TaskOpen(_) => not_implemented("task.open"),
         DesktopCommand::TaskArchive(_) => not_implemented("task.archive"),
 
@@ -238,9 +330,48 @@ fn dispatch(cmd: DesktopCommand) -> DesktopResult {
     }
 }
 
-/// Not-implemented response — every command returns a BRIDGE_NOT_IMPLEMENTED
-/// error until its module is wired in a later GAG task.  This prevents the
-/// Renderer from misinterpreting a success response for an unimplemented path.
+/// Wire `task.create` to the persistence layer.
+fn task_create(
+    repo: &dyn Repository,
+    payload: &super::commands::TaskCreatePayload,
+) -> DesktopResult {
+    use crate::domain::types::{utc_now, Task, TaskId, TaskStatus, WorkspaceKind};
+    use uuid::Uuid;
+
+    let now = utc_now();
+    let task = Task {
+        id: TaskId::new(format!("task-{}", Uuid::new_v4())),
+        project_id: payload.project_id.clone(),
+        title: payload.title.clone(),
+        status: TaskStatus::Preparing,
+        workspace_kind: WorkspaceKind::Worktree,
+        mode: payload.mode.clone(),
+        model: payload.model.clone(),
+        reasoning: payload.reasoning.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+        interrupt_reason: None,
+    };
+
+    match repo.create_task(&task) {
+        Ok(()) => {}
+        Err(e) => return DesktopResult::err(AppError::new(e.code, e.message)),
+    }
+
+    DesktopResult::ok(serde_json::json!({
+        "task": {
+            "id": task.id.0,
+            "projectId": task.project_id.0,
+            "title": task.title,
+            "status": "preparing",
+            "createdAt": task.created_at,
+        }
+    }))
+}
+
+/// Not-implemented response — every unimplemented command returns a
+/// BRIDGE_NOT_IMPLEMENTED error.  This prevents the Renderer from
+/// misinterpreting a success response for an unimplemented path.
 fn not_implemented(command_name: &str) -> DesktopResult {
     DesktopResult::err(
         AppError::new(
@@ -280,21 +411,11 @@ mod tests {
     }
 
     #[test]
-    fn all_commands_return_not_implemented() {
-        let cmd = DesktopCommand::RuntimeRefresh(super::super::commands::EmptyPayload {});
-        let result = dispatch(cmd);
-        match result {
-            DesktopResult::Err { error } => {
-                assert_eq!(error.code, domain::error::codes::BRIDGE_NOT_IMPLEMENTED);
-            }
-            _ => panic!("expected Err"),
-        }
-    }
-
-    #[test]
     fn unknown_command_returns_unsupported() {
         let raw = serde_json::json!({"type": "no.such.command", "payload": {}});
-        let result = execute_impl(raw);
+        let repo =
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
+        let result = execute_impl(&repo, raw);
         match result {
             DesktopResult::Err { error } => {
                 assert_eq!(error.code, domain::error::codes::BRIDGE_UNSUPPORTED_COMMAND);
@@ -307,12 +428,53 @@ mod tests {
     fn oversized_payload_rejected() {
         let big: String = "x".repeat(2_000_000);
         let raw = serde_json::json!({"type": "runtime.refresh", "payload": {}, "big": big});
-        let result = execute_impl(raw);
+        let repo =
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
+        let result = execute_impl(&repo, raw);
         match result {
             DesktopResult::Err { error } => {
                 assert_eq!(error.code, domain::error::codes::BRIDGE_INVALID_PAYLOAD);
             }
             _ => panic!("expected Err"),
+        }
+    }
+
+    #[test]
+    fn task_create_persists() {
+        let repo =
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
+
+        // Create a project first (FK constraint).
+        use crate::domain::types::{utc_now, Project, ProjectId};
+        let project = Project {
+            id: ProjectId::new("proj-1"),
+            path: "/test/project".into(),
+            display_path: "/test/project".into(),
+            repo_root: Some("/test/project".into()),
+            trusted_at: Some(utc_now()),
+            last_opened_at: utc_now(),
+        };
+        repo.create_project(&project).unwrap();
+
+        let raw = serde_json::json!({
+            "type": "task.create",
+            "payload": {
+                "projectId": "proj-1",
+                "title": "Test task",
+                "prompt": "Do something"
+            }
+        });
+        let result = execute_impl(&repo, raw);
+        match result {
+            DesktopResult::Ok { data } => {
+                let task = &data["task"];
+                assert_eq!(task["title"], "Test task");
+                assert_eq!(task["status"], "preparing");
+                assert!(!task["id"].as_str().unwrap().is_empty());
+            }
+            DesktopResult::Err { error } => {
+                panic!("unexpected error: {:?}", error);
+            }
         }
     }
 }

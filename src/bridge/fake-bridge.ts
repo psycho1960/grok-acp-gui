@@ -40,6 +40,14 @@ export function createFakeDesktopBridge(
     ready: true,
     runtime: { status: "ready" },
     capabilities: { models: [], modes: [], slashCommands: [] },
+    projects: [],
+    activeTasks: [],
+    bindings: [],
+    worktrees: [],
+    recoveryItems: [],
+    settings: [],
+    recoveryPerformed: false,
+    tasksInterrupted: 0,
     ...options.bootstrapSnapshot,
   };
 
