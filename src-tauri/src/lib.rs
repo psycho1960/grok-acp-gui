@@ -49,13 +49,31 @@ pub fn run() {
                     match r.recover_interrupted_tasks("Application exited unexpectedly") {
                         Ok(interrupted) if interrupted > 0 => {
                             eprintln!("Recovered {} interrupted task(s)", interrupted);
+                            Arc::new(r)
                         }
+                        Ok(_) => Arc::new(r),
                         Err(e) => {
-                            eprintln!("WARNING: startup recovery failed ({}): {}", e.code, e.message);
+                            // P1: startup recovery failure means the database
+                            // cannot be trusted — interrupted tasks may still
+                            // appear as `running`. Surface this to the UI
+                            // (ready=false / dbError) and fall back to an
+                            // in-memory store so the process stays alive but
+                            // refuses to render data-dependent UI. The already
+                            // opened `r` is dropped (its connection closes).
+                            eprintln!(
+                                "FATAL: startup recovery failed ({}): {}. Database cannot be trusted; falling back to in-memory store.",
+                                e.code, e.message
+                            );
+                            db_init_error = Some(format!(
+                                "Startup recovery failed ({}). {}. Restart the application. If the problem persists, delete {} and restart.",
+                                e.code, e.message, db_path.display()
+                            ));
+                            Arc::new(
+                                adapters::sqlite::SqliteRepository::open_in_memory()
+                                    .expect("in-memory fallback must succeed"),
+                            )
                         }
-                        _ => {}
                     }
-                    Arc::new(r)
                 }
                 Err(e) => {
                     eprintln!(

@@ -300,6 +300,29 @@ fn db_error(context: &str, e: &rusqlite::Error) -> DomainError {
     DomainError::new(code, format!("{}: {}", context, e))
 }
 
+/// Collect a `query_map` row iterator into a `Vec<T>`, surfacing the first
+/// row-mapping error as `DB_QUERY_FAILED` instead of silently dropping it.
+///
+/// The previous `rows.filter_map(|r| r.ok()).collect()` pattern hid
+/// corrupted rows (e.g. `InvalidColumnType` on a BLOB stored in a TEXT
+/// column) by treating them as "record does not exist". That masqueraded
+/// database corruption as data deletion and caused `bootstrap_snapshot()`
+/// to return `Ok` with missing entities. This helper restores fail-loud
+/// behaviour: any row that cannot be decoded aborts the read.
+fn collect_rows<T, I>(iter: I, context: &str) -> RepoResult<Vec<T>>
+where
+    I: Iterator<Item = Result<T, rusqlite::Error>>,
+{
+    let mut out = Vec::new();
+    for item in iter {
+        match item {
+            Ok(v) => out.push(v),
+            Err(e) => return Err(db_error(context, &e)),
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Repository implementation
 // ---------------------------------------------------------------------------
@@ -319,7 +342,7 @@ impl Repository for SqliteRepository {
             let rows = stmt
                 .query_map([], row_to_project)
                 .map_err(|e| db_error("bootstrap: projects map", &e))?;
-            rows.filter_map(|r| r.ok()).collect::<Vec<_>>()
+            collect_rows(rows, "bootstrap: projects row")?
         };
 
         let active_tasks = {
@@ -331,7 +354,7 @@ impl Repository for SqliteRepository {
             let rows = stmt
                 .query_map([], row_to_task)
                 .map_err(|e| db_error("bootstrap: tasks map", &e))?;
-            rows.filter_map(|r| r.ok()).collect::<Vec<_>>()
+            collect_rows(rows, "bootstrap: tasks row")?
         };
 
         let bindings = {
@@ -341,7 +364,7 @@ impl Repository for SqliteRepository {
             let rows = stmt
                 .query_map([], row_to_binding)
                 .map_err(|e| db_error("bootstrap: bindings map", &e))?;
-            rows.filter_map(|r| r.ok()).collect::<Vec<_>>()
+            collect_rows(rows, "bootstrap: bindings row")?
         };
 
         let worktrees = {
@@ -353,7 +376,7 @@ impl Repository for SqliteRepository {
             let rows = stmt
                 .query_map([], row_to_worktree)
                 .map_err(|e| db_error("bootstrap: worktrees map", &e))?;
-            rows.filter_map(|r| r.ok()).collect::<Vec<_>>()
+            collect_rows(rows, "bootstrap: worktrees row")?
         };
 
         let recovery_items = {
@@ -365,7 +388,7 @@ impl Repository for SqliteRepository {
             let rows = stmt
                 .query_map([], row_to_recovery)
                 .map_err(|e| db_error("bootstrap: recovery map", &e))?;
-            rows.filter_map(|r| r.ok()).collect::<Vec<_>>()
+            collect_rows(rows, "bootstrap: recovery row")?
         };
 
         let settings = {
@@ -375,7 +398,7 @@ impl Repository for SqliteRepository {
             let rows = stmt
                 .query_map([], row_to_setting)
                 .map_err(|e| db_error("bootstrap: settings map", &e))?;
-            rows.filter_map(|r| r.ok()).collect::<Vec<_>>()
+            collect_rows(rows, "bootstrap: settings row")?
         };
 
         // Recovery performed elsewhere (explicit call to recover_interrupted_tasks).
@@ -433,7 +456,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map([], row_to_project)
             .map_err(|e| db_error("list_projects", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_projects row")
     }
 
     fn update_project(&self, project: &Project) -> RepoResult<()> {
@@ -506,7 +529,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map(params![project_id], row_to_task)
             .map_err(|e| db_error("list_tasks_by_project", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_tasks_by_project row")
     }
 
     fn list_active_tasks(&self) -> RepoResult<Vec<Task>> {
@@ -519,7 +542,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map([], row_to_task)
             .map_err(|e| db_error("list_active_tasks", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_active_tasks row")
     }
 
     fn update_task(&self, task: &Task) -> RepoResult<()> {
@@ -627,7 +650,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map([], row_to_binding)
             .map_err(|e| db_error("list_active_bindings", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_active_bindings row")
     }
 
     // ==================================================================
@@ -675,7 +698,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map(params![task_id], row_to_worktree)
             .map_err(|e| db_error("list_worktrees_by_task", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_worktrees_by_task row")
     }
 
     fn update_worktree(&self, wt: &WorktreeRecord) -> RepoResult<()> {
@@ -716,7 +739,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map([], row_to_worktree)
             .map_err(|e| db_error("list_active_worktrees", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_active_worktrees row")
     }
 
     // ==================================================================
@@ -762,7 +785,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map(params![task_id], row_to_attachment)
             .map_err(|e| db_error("list_attachments_by_task", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_attachments_by_task row")
     }
 
     // ==================================================================
@@ -806,7 +829,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map([], row_to_recovery)
             .map_err(|e| db_error("list_recovery_items", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_recovery_items row")
     }
 
     fn update_recovery_item(&self, item: &RecoveryItem) -> RepoResult<()> {
@@ -871,7 +894,7 @@ impl Repository for SqliteRepository {
         let rows = stmt
             .query_map([], row_to_setting)
             .map_err(|e| db_error("list_settings", &e))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        collect_rows(rows, "list_settings row")
     }
 
     // ==================================================================
@@ -1077,5 +1100,106 @@ mod tests {
 
         let result = repo.delete_project("p1");
         assert!(result.is_err(), "ON DELETE RESTRICT should block");
+    }
+
+    // -------------------------------------------------------------------------
+    // GAG-004 P1 regression tests — startup recovery & row corruption
+    // -------------------------------------------------------------------------
+
+    /// P1: when `recover_interrupted_tasks` fails (e.g. SQLite trigger or
+    /// lock prevents the UPDATE), the bootstrap snapshot returned by the
+    /// bridge MUST NOT be `ready`. Otherwise the UI would render ShellView
+    /// with tasks still showing `Running` despite no live process.
+    #[test]
+    fn bootstrap_impl_not_ready_when_recovery_fails() {
+        let repo = make_test_repo();
+        let p = make_project("p1", "/test");
+        repo.create_project(&p).unwrap();
+        let t = make_task("t1", "p1", TaskStatus::Running);
+        repo.create_task(&t).unwrap();
+
+        // Install a trigger that aborts any UPDATE transitioning a task's
+        // status to 'interrupted' — simulating a locked / read-only DB.
+        {
+            let conn = repo.conn.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER block_recovery
+                 BEFORE UPDATE OF status ON tasks
+                 WHEN NEW.status = 'interrupted'
+                 BEGIN
+                   SELECT RAISE(ABORT, 'recovery blocked by trigger');
+                 END;",
+            )
+            .expect("trigger installed");
+        }
+
+        // Recovery fails because the trigger aborts the UPDATE.
+        let recovery_result = repo.recover_interrupted_tasks("app exited");
+        assert!(
+            recovery_result.is_err(),
+            "recover_interrupted_tasks must fail when trigger blocks UPDATE"
+        );
+
+        // The task remains Running in the DB — we cannot fix SQLite-level
+        // failures, so the bridge must surface a non-ready bootstrap instead.
+        let task_after = repo.get_task("t1").unwrap();
+        assert_eq!(
+            task_after.status,
+            TaskStatus::Running,
+            "task stays Running when recovery UPDATE was blocked"
+        );
+
+        // The startup wiring (lib.rs) sets `db_init_error` when recovery
+        // fails; `bootstrap_impl` honours that and returns ready=false.
+        // Here we pass that flag directly to verify the bridge behaviour.
+        let snap = crate::bridge::dispatch::bootstrap_impl(
+            &repo,
+            Some("Startup recovery failed (DB_QUERY_FAILED)."),
+        );
+        assert!(
+            !snap.ready,
+            "bootstrap must NOT be ready when recovery failed"
+        );
+        assert!(
+            snap.db_error.is_some(),
+            "dbError must be surfaced to the UI so ShellView is not rendered"
+        );
+    }
+
+    /// P1: a row with a BLOB stored in a TEXT column (corrupted data) must
+    /// make `bootstrap_snapshot()` return `DB_QUERY_FAILED` instead of
+    /// silently dropping the row and returning `Ok` with `projects: []`.
+    /// Before the fix, `filter_map(|r| r.ok())` swallowed the
+    /// `InvalidColumnType` and masqueraded corruption as data deletion.
+    #[test]
+    fn bootstrap_snapshot_fails_on_corrupted_blob_row() {
+        let repo = make_test_repo();
+        let p = make_project("p1", "/test");
+        repo.create_project(&p).unwrap();
+
+        // Corrupt `display_path` by writing a BLOB into the TEXT column.
+        // SQLite allows dynamic-typed storage; rusqlite's `get::<_, String>`
+        // then fails with `InvalidColumnType`.
+        {
+            let conn = repo.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE projects SET display_path = X'80' WHERE id = 'p1'",
+                [],
+            )
+            .expect("corruption UPDATE applied");
+        }
+
+        let result = repo.bootstrap_snapshot();
+        assert!(
+            result.is_err(),
+            "bootstrap_snapshot must fail when a row cannot be decoded"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::domain::error::codes::DB_QUERY_FAILED,
+            "error code must be DB_QUERY_FAILED, got: {}",
+            err.code
+        );
     }
 }

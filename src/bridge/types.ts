@@ -27,8 +27,23 @@ export interface BootstrapSnapshot {
   version: string;
   platform: string;
   ready: boolean;
+  /**
+   * Set when the database is unavailable or corrupt. The Renderer must
+   * show `UI-ERROR-001` and NOT render `ShellView`.
+   * Mirrors Rust `BootstrapSnapshot::db_error`.
+   */
+  dbError?: string;
   runtime: RuntimeBootstrapStatus;
   capabilities: CapabilitySnapshot;
+  // Domain entities (GAG-004) — may be empty when `ready=false`.
+  projects?: Project[];
+  activeTasks?: Task[];
+  bindings?: SessionBinding[];
+  worktrees?: WorktreeRecord[];
+  recoveryItems?: RecoveryItem[];
+  settings?: Settings[];
+  recoveryPerformed?: boolean;
+  tasksInterrupted?: number;
 }
 
 export interface RuntimeBootstrapStatus {
@@ -91,6 +106,101 @@ export interface SlashCommandInfo {
 
 /** @deprecated Use BootstrapSnapshot instead. */
 export type BootstrapStatus = BootstrapSnapshot;
+
+// ---------------------------------------------------------------------------
+// Domain entities (mirrors Rust `domain::types` — GAG-004)
+// ---------------------------------------------------------------------------
+
+export type TaskStatus =
+  | "preparing"
+  | "running"
+  | "waiting_permission"
+  | "integrating"
+  | "merged"
+  | "archived"
+  | "interrupted";
+
+export type WorkspaceKind = "worktree" | "readonly" | "direct";
+
+export type WorktreeOwnership = "managed" | "external";
+
+export type WorktreeState =
+  | "ready"
+  | "dirty"
+  | "integrating"
+  | "deleted"
+  | "unknown";
+
+export type SessionState =
+  | "active"
+  | "idle"
+  | "disconnected"
+  | "closed";
+
+export type RecoveryState =
+  | "available"
+  | "expired"
+  | "restoring"
+  | "restored"
+  | "deleted";
+
+export interface Project {
+  id: ProjectId;
+  path: string;
+  displayPath: string;
+  repoRoot?: string;
+  trustedAt?: string;
+  lastOpenedAt: string;
+}
+
+export interface Task {
+  id: TaskId;
+  projectId: ProjectId;
+  title: string;
+  status: TaskStatus;
+  workspaceKind: WorkspaceKind;
+  mode?: string;
+  model?: string;
+  reasoning?: string;
+  createdAt: string;
+  updatedAt: string;
+  interruptReason?: string;
+}
+
+export interface SessionBinding {
+  taskId: TaskId;
+  sessionId: SessionId;
+  cwd?: string;
+  lastSeq: number;
+  state: SessionState;
+}
+
+export interface WorktreeRecord {
+  id: string;
+  taskId: TaskId;
+  repoRoot: string;
+  path: string;
+  displayPath: string;
+  branch: string;
+  baseBranch: string;
+  baseCommit: string;
+  ownership: WorktreeOwnership;
+  state: WorktreeState;
+}
+
+export interface RecoveryItem {
+  id: string;
+  taskId: TaskId;
+  directory: string;
+  manifestPath: string;
+  expiresAt: string;
+  state: RecoveryState;
+}
+
+export interface Settings {
+  key: string;
+  jsonValue: unknown;
+}
 
 // ---------------------------------------------------------------------------
 // DesktopCommand discriminated union
