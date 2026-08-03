@@ -4,7 +4,8 @@
 //! # Security invariants
 //! - The command and arguments are passed as a **vector**, never as a
 //!   shell string.  No `sh -c` is used.
-//! - Only environment variables on the allowlist are inherited.
+//! - Known-sensitive environment variables are blocked via `ENV_BLOCKLIST`;
+//!   all other parent environment is inherited (blocklist, not allowlist).
 //! - stderr is read on a separate task and stored in a bounded
 //!   `StderrBuffer`; it never enters the protocol decoder.
 //! - stdout is decoded by `FrameDecoder`; non-JSON content is a
@@ -28,25 +29,29 @@ use crate::bridge::types::SessionId;
 use crate::modules::agent_runtime::config::{RuntimeConfig, WorkspaceContext};
 use crate::modules::agent_runtime::diagnostics::{DiagLog, StderrBuffer};
 
-/// Environment variables that are explicitly allowed to be inherited
-/// by the child process.  Everything else is stripped.
-const ENV_ALLOWLIST: &[&str] = &[
-    "PATH",
-    "USERPROFILE",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "HOME",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-    "LANG",
-    "LC_ALL",
-    "TERM",
-    // Windows requires SYSTEMROOT for crypto and core API calls.
-    "SYSTEMROOT",
-    // XAI_API_KEY is intentionally NOT in the allowlist here — the
-    // adapter adds it explicitly only when it is present in the parent
-    // environment, so it is never accidentally introduced.
+/// Environment variables that are explicitly BLOCKED from the child process.
+/// All other parent environment variables are inherited.
+///
+/// Design note: a blocklist (denylist) is safer than an allowlist because
+/// we cannot predict every variable a modern CLI (like Grok) needs for
+/// network, crypto, locale, and platform-specific initialization.
+/// Blocking *known-sensitive* keys strikes the right balance between
+/// security and reliability.
+const ENV_BLOCKLIST: &[&str] = &[
+    // Secrets and credentials
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AZURE_CLIENT_SECRET",
+    "DOCKER_PASSWORD",
+    "GITHUB_TOKEN",
+    "NPM_TOKEN",
+    // XAI_API_KEY is intentionally blocked — the adapter adds it
+    // explicitly only when present in the parent environment.
+    "XAI_API_KEY",
+    // Other sensitive vars
+    "ACTIONS_RUNTIME_TOKEN",
+    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
 ];
 
 /// The arguments passed to `grok` to start ACP stdio mode.
@@ -74,7 +79,6 @@ impl GrokAcpAdapter {
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .env_clear()
             .envs(filter_env())
             .output()
             .await
@@ -209,8 +213,7 @@ impl AcpTransport for GrokAcpAdapter {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // Apply env allowlist — strip everything, then add back only safe vars.
-        cmd.env_clear();
+        // Apply env blocklist — pass all parent env EXCEPT known-sensitive keys.
         for (k, v) in filter_env() {
             cmd.env(k, v);
         }
@@ -417,10 +420,37 @@ fn spawn_process_monitor(mut child: Child) -> JoinHandle<ProcessExit> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Filter the parent environment to only allowlisted variables.
+/// Filter the parent environment: inherit everything EXCEPT blocklisted variables.
+/// Returns the filtered set of (key, value) pairs safe for the child process.
 fn filter_env() -> Vec<(String, String)> {
     let mut result = Vec::new();
-    for &key in ENV_ALLOWLIST {
+    for (key, val) in std::env::vars() {
+        if !ENV_BLOCKLIST.contains(&key.as_str()) {
+            result.push((key, val));
+        }
+    }
+    result
+}
+
+// Keep old function name as alias for backward compat in tests
+#[allow(dead_code)]
+fn filter_env_allowlist() -> Vec<(String, String)> {
+    let allowlist = &[
+        "PATH",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "HOME",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "SYSTEMROOT",
+    ];
+    let mut result = Vec::new();
+    for &key in allowlist {
         if let Ok(val) = std::env::var(key) {
             result.push((key.into(), val));
         }
@@ -513,24 +543,41 @@ mod tests {
     }
 
     #[test]
-    fn env_allowlist_excludes_secrets() {
-        // Ensure XAI_API_KEY is not in the allowlist (it's added explicitly).
-        assert!(!ENV_ALLOWLIST.contains(&"XAI_API_KEY"));
-        // Ensure common sensitive vars are NOT allowed.
-        assert!(!ENV_ALLOWLIST.contains(&"AUTHORIZATION"));
-        assert!(!ENV_ALLOWLIST.contains(&"AWS_SECRET_ACCESS_KEY"));
+    fn env_blocklist_includes_secrets() {
+        // Sensitive vars MUST be in the blocklist to prevent leaking.
+        assert!(ENV_BLOCKLIST.contains(&"XAI_API_KEY"));
+        assert!(ENV_BLOCKLIST.contains(&"AWS_SECRET_ACCESS_KEY"));
+        assert!(ENV_BLOCKLIST.contains(&"AWS_ACCESS_KEY_ID"));
+        assert!(ENV_BLOCKLIST.contains(&"GITHUB_TOKEN"));
     }
 
     #[test]
-    fn env_allowlist_includes_systemroot() {
-        // Windows requires SYSTEMROOT for crypto and core APIs.
-        assert!(ENV_ALLOWLIST.contains(&"SYSTEMROOT"));
+    fn env_blocklist_does_not_block_systemroot() {
+        // SYSTEMROOT must NOT be in the blocklist — it's needed on Windows.
+        assert!(!ENV_BLOCKLIST.contains(&"SYSTEMROOT"));
+        assert!(!ENV_BLOCKLIST.contains(&"PATH"));
+        assert!(!ENV_BLOCKLIST.contains(&"USERPROFILE"));
+        assert!(!ENV_BLOCKLIST.contains(&"HOME"));
     }
 
     #[test]
     fn filter_env_never_panics() {
         // filter_env reads from std::env — just ensure it doesn't panic.
         let _ = filter_env();
+    }
+
+    #[test]
+    fn filter_env_excludes_blocklisted() {
+        // Verify that blocklisted vars are excluded from filter_env output.
+        let filtered = filter_env();
+        let keys: Vec<&str> = filtered.iter().map(|(k, _)| k.as_str()).collect();
+        for &blocked in ENV_BLOCKLIST {
+            assert!(
+                !keys.contains(&blocked),
+                "blocklisted var '{}' should NOT appear in filter_env output",
+                blocked
+            );
+        }
     }
 
     #[test]

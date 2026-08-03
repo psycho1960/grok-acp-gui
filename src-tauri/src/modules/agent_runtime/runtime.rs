@@ -114,7 +114,7 @@ impl<T: AcpTransport + 'static> AgentRuntimeImpl<T> {
     /// Spawn the central event forwarder that distributes events
     /// from session reader tasks to all subscribers.
     fn spawn_forwarder(self: Arc<Self>, rx: mpsc::Receiver<SessionInternalEvent>) {
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut rx = rx;
             while let Some(internal) = rx.recv().await {
                 let mut subs = self.event_subscribers.lock().await;
@@ -620,8 +620,11 @@ async fn perform_handshake(
     let init_params = serde_json::json!({
         "protocolVersion": 1,
         "clientCapabilities": {
-            "fs": {},
-            "terminal": {}
+            "fs": {
+                "readTextFile": true,
+                "writeTextFile": true
+            },
+            "terminal": true
         }
     });
     let init_request = encode_request(1, "initialize", &init_params);
