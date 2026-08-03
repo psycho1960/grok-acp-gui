@@ -5,6 +5,6 @@ export default defineConfig({
   plugins: [vue()],
   test: {
     environment: "happy-dom",
-    include: ["tests/ui/**/*.spec.ts"],
+    include: ["tests/ui/**/*.spec.ts", "tests/bridge-contracts.test.ts"],
   },
 });

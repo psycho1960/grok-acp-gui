@@ -1122,6 +1122,7 @@ name = "grok-acp-gui"
 version = "0.1.16"
 dependencies = [
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
