@@ -318,7 +318,11 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             validate_non_empty_text(&p.prompt, "prompt")?;
             validate_text_len(&p.prompt, MAX_MESSAGE_LENGTH, "prompt")?;
             reject_base64_image(&p.prompt)?;
-            validate_enum_opt(p.reasoning.as_deref(), &["low", "medium", "high"], "reasoning")?;
+            validate_enum_opt(
+                p.reasoning.as_deref(),
+                &["low", "medium", "high"],
+                "reasoning",
+            )?;
             validate_enum_opt(
                 p.workspace_strategy.as_deref(),
                 &["worktree", "readonly", "direct"],
