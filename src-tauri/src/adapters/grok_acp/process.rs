@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
@@ -54,35 +55,54 @@ const GROK_AGENT_ARGS: &[&str] = &["--no-auto-update", "agent", "stdio"];
 /// Production grok ACP adapter.
 pub struct GrokAcpAdapter {
     config: RuntimeConfig,
-    resolved_path: Option<PathBuf>,
+    /// Interior-mutable cache of the resolved executable path.
+    /// Set by `probe()`, read by `spawn()` and `resolved_path()`.
+    resolved_path: Mutex<Option<PathBuf>>,
 }
 
 impl GrokAcpAdapter {
     pub fn new(config: RuntimeConfig) -> Self {
         Self {
             config,
-            resolved_path: None,
+            resolved_path: Mutex::new(None),
         }
     }
 
-    /// Probe for the grok executable: search default locations and PATH,
-    /// then run `grok --version` to check the version.
-    ///
-    /// Returns the resolved path and parsed version on success.
-    pub async fn probe(&mut self) -> Result<(PathBuf, String), TransportError> {
-        let candidate = self.find_executable()?;
-        let version = self.detect_version(&candidate).await?;
-        self.check_version(&version)?;
-        self.resolved_path = Some(candidate.clone());
-        Ok((candidate, version))
+    /// Run `grok --version` and parse the output.
+    async fn detect_version(&self, exe: &Path) -> Result<String, TransportError> {
+        let output = tokio::process::Command::new(exe)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_clear()
+            .envs(filter_env())
+            .output()
+            .await
+            .map_err(|e| TransportError::ProbeError {
+                message: format!("failed to execute --version: {}", e),
+            })?;
+
+        if !output.status.success() {
+            return Err(TransportError::ProbeError {
+                message: format!("--version exited with status {}", output.status),
+            });
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_version(&stdout).ok_or_else(|| TransportError::ProbeError {
+            message: format!("could not parse version from: {}", stdout.trim()),
+        })
     }
 
-    /// Search for the grok executable in priority order.
-    fn find_executable(&self) -> Result<PathBuf, TransportError> {
+    /// Search for the grok executable using the given config's path.
+    fn find_executable_with_config(
+        &self,
+        config: &RuntimeConfig,
+    ) -> Result<PathBuf, TransportError> {
         let mut searched = Vec::new();
 
         // 1. Explicit config path.
-        if let Some(ref p) = self.config.executable_path {
+        if let Some(ref p) = config.executable_path {
             if p.is_file() {
                 return Ok(p.clone());
             }
@@ -91,7 +111,6 @@ impl GrokAcpAdapter {
 
         // 2. Default search paths.
         for p in crate::modules::agent_runtime::default_search_paths() {
-            // Skip the bare "grok" / "grok.exe" — handled by which() below.
             if p.file_name().is_some() && p.parent().is_none() {
                 continue;
             }
@@ -123,58 +142,60 @@ impl GrokAcpAdapter {
 
         Err(TransportError::NotFound { searched })
     }
-
-    /// Run `grok --version` and parse the output.
-    async fn detect_version(&self, exe: &Path) -> Result<String, TransportError> {
-        let output = tokio::process::Command::new(exe)
-            .arg("--version")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_clear()
-            .envs(filter_env())
-            .output()
-            .await
-            .map_err(|e| TransportError::ProbeError {
-                message: format!("failed to execute --version: {}", e),
-            })?;
-
-        if !output.status.success() {
-            return Err(TransportError::ProbeError {
-                message: format!("--version exited with status {}", output.status),
-            });
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_version(&stdout).ok_or_else(|| TransportError::ProbeError {
-            message: format!("could not parse version from: {}", stdout.trim()),
-        })
-    }
-
-    fn check_version(&self, found: &str) -> Result<(), TransportError> {
-        if version_gte(found, &self.config.min_version) {
-            Ok(())
-        } else {
-            Err(TransportError::VersionTooLow {
-                found: found.into(),
-                required: self.config.min_version.clone(),
-            })
-        }
-    }
 }
 
 #[async_trait]
 impl AcpTransport for GrokAcpAdapter {
+    async fn probe(&self, config: &RuntimeConfig) -> Result<(PathBuf, String), TransportError> {
+        // Use the config passed to probe() if it has an explicit path,
+        // otherwise fall back to the adapter's own config.
+        let search_config = if config.executable_path.is_some() {
+            config
+        } else {
+            &self.config
+        };
+
+        // Search for the executable.
+        let candidate = if let Some(ref p) = search_config.executable_path {
+            if p.is_file() {
+                Ok(p.clone())
+            } else {
+                Err(TransportError::NotFound {
+                    searched: vec![p.clone()],
+                })
+            }
+        } else {
+            // Use the adapter's find_executable which searches defaults + PATH.
+            self.find_executable_with_config(search_config)
+        }?;
+
+        // Detect version.
+        let version = self.detect_version(&candidate).await?;
+
+        // Check version against the requirement.
+        if !version_gte(&version, &search_config.min_version) {
+            return Err(TransportError::VersionTooLow {
+                found: version,
+                required: search_config.min_version.clone(),
+            });
+        }
+
+        // Cache the resolved path.
+        *self.resolved_path.lock().unwrap() = Some(candidate.clone());
+
+        Ok((candidate, version))
+    }
+
     async fn spawn(
         &self,
         _session_id: SessionId,
         workspace: WorkspaceContext,
     ) -> Result<TransportHandle, TransportError> {
-        let exe = self
-            .resolved_path
-            .clone()
-            .ok_or_else(|| TransportError::ProbeError {
+        let exe = self.resolved_path.lock().unwrap().clone().ok_or_else(|| {
+            TransportError::ProbeError {
                 message: "spawn() called before successful probe()".into(),
-            })?;
+            }
+        })?;
 
         // Build the command with argument vector — NO shell, NO string concat.
         let mut cmd = Command::new(&exe);
@@ -259,8 +280,8 @@ impl AcpTransport for GrokAcpAdapter {
         })
     }
 
-    fn resolved_path(&self) -> Option<&PathBuf> {
-        self.resolved_path.as_ref()
+    fn resolved_path(&self) -> Option<PathBuf> {
+        self.resolved_path.lock().unwrap().clone()
     }
 }
 

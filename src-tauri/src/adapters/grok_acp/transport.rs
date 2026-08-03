@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 use super::codec::AcpMessage;
 use crate::bridge::types::SessionId;
-use crate::modules::agent_runtime::config::WorkspaceContext;
+use crate::modules::agent_runtime::config::{RuntimeConfig, WorkspaceContext};
 use crate::modules::agent_runtime::diagnostics::StderrBuffer;
 
 /// Outcome of spawning an ACP transport.
@@ -43,7 +43,18 @@ pub struct ProcessExit {
 /// and provide channels for bidirectional JSON-RPC communication.
 #[async_trait]
 pub trait AcpTransport: Send + Sync {
+    /// Probe for the agent executable: search default locations and
+    /// PATH, check the version, and cache the resolved path.
+    ///
+    /// Returns `(resolved_path, version_string)` on success.
+    /// Must be called (and succeed) before `spawn()`.
+    async fn probe(&self, config: &RuntimeConfig) -> Result<(PathBuf, String), TransportError>;
+
     /// Spawn the transport for the given session.
+    ///
+    /// **Precondition**: `probe()` must have been called successfully
+    /// at least once.  `spawn()` will return `TransportError::ProbeError`
+    /// if the executable path has not been resolved.
     ///
     /// The caller is responsible for the handshake (sending `initialize`
     /// and waiting for the response) after this returns successfully.
@@ -53,9 +64,10 @@ pub trait AcpTransport: Send + Sync {
         workspace: WorkspaceContext,
     ) -> Result<TransportHandle, TransportError>;
 
-    /// Returns the resolved executable path (for diagnostics / the
-    /// `RuntimeHandle`).  Only meaningful after a successful `spawn`.
-    fn resolved_path(&self) -> Option<&PathBuf>;
+    /// Returns the resolved executable path, if `probe()` has been
+    /// called successfully.  Returns an owned `PathBuf` because
+    /// implementations use interior mutability.
+    fn resolved_path(&self) -> Option<PathBuf>;
 }
 
 /// Errors from the transport layer.

@@ -167,13 +167,21 @@ impl<T: AcpTransport + 'static> AgentRuntimeImpl<T> {
 #[async_trait]
 impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
     async fn probe(&self, config: &RuntimeConfig) -> RuntimeProbeResult {
-        // The probe is handled by the concrete adapter (GrokAcpAdapter::probe).
-        // The trait method exists for interface completeness; the bridge
-        // calls the adapter directly when it needs a real probe.
-        let _ = config;
-        RuntimeProbeResult::probe_error(
-            "probe() is handled by the concrete adapter; use the bridge dispatch",
-        )
+        // Delegate to the transport's probe method.
+        match self.transport.probe(config).await {
+            Ok((path, version)) => RuntimeProbeResult::ready(path, version, true),
+            Err(super::super::super::adapters::grok_acp::TransportError::NotFound { .. }) => {
+                RuntimeProbeResult::not_found()
+            }
+            Err(super::super::super::adapters::grok_acp::TransportError::VersionTooLow {
+                found,
+                required,
+            }) => RuntimeProbeResult::version_too_low(found, &required),
+            Err(super::super::super::adapters::grok_acp::TransportError::NotAuthenticated) => {
+                RuntimeProbeResult::not_authenticated()
+            }
+            Err(e) => RuntimeProbeResult::probe_error(e.to_string()),
+        }
     }
 
     async fn start(
@@ -210,6 +218,28 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         // Transition to probing.
         self.try_transition(&session_id, RuntimeTransition::BeginProbe)
             .await?;
+
+        // Ensure the transport has been probed.  If probe() hasn't been
+        // called yet (resolved_path is None), call it now.
+        if self.transport.resolved_path().is_none() {
+            self.transport
+                .probe(config)
+                .await
+                .map_err(|e| DomainError::new(codes::RUNTIME_PROBE_FAILED, e.to_string()))?;
+        }
+
+        // Now that probe has resolved the executable path, update the
+        // session slot's executable_path for the RuntimeHandle.
+        {
+            let mut sessions = self.sessions.lock().await;
+            if let Some(slot) = sessions.get_mut(&session_id) {
+                slot.executable_path = self
+                    .transport
+                    .resolved_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+            }
+        }
 
         // Spawn the transport.
         let TransportHandle {

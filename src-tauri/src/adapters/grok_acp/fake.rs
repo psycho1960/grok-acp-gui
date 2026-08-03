@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 use super::codec::{AcpMessage, FrameDecoder};
 use super::transport::{AcpTransport, ProcessExit, TransportError, TransportHandle};
 use crate::bridge::types::SessionId;
-use crate::modules::agent_runtime::config::WorkspaceContext;
+use crate::modules::agent_runtime::config::{RuntimeConfig, WorkspaceContext};
 use crate::modules::agent_runtime::diagnostics::{DiagLog, StderrBuffer};
 
 /// Which test scenario the fake agent should run.
@@ -51,7 +51,7 @@ impl FakeScenario {
 pub struct FakeAcpTransport {
     scenario: FakeScenario,
     agent_script: PathBuf,
-    resolved_path: Option<PathBuf>,
+    resolved_path: std::sync::Mutex<Option<PathBuf>>,
 }
 
 impl FakeAcpTransport {
@@ -61,13 +61,22 @@ impl FakeAcpTransport {
         Self {
             scenario,
             agent_script,
-            resolved_path: None,
+            resolved_path: std::sync::Mutex::new(None),
         }
     }
 }
 
 #[async_trait]
 impl AcpTransport for FakeAcpTransport {
+    async fn probe(&self, _config: &RuntimeConfig) -> Result<(PathBuf, String), TransportError> {
+        // The fake transport doesn't need a real grok binary.
+        // Find node and report it as the "executable".
+        let node = which_node().await?;
+        let version = String::from("0.2.118-fake");
+        *self.resolved_path.lock().unwrap() = Some(PathBuf::from(&node));
+        Ok((PathBuf::from(node), version))
+    }
+
     async fn spawn(
         &self,
         _session_id: SessionId,
@@ -163,8 +172,8 @@ impl AcpTransport for FakeAcpTransport {
         })
     }
 
-    fn resolved_path(&self) -> Option<&PathBuf> {
-        self.resolved_path.as_ref()
+    fn resolved_path(&self) -> Option<PathBuf> {
+        self.resolved_path.lock().unwrap().clone()
     }
 }
 
