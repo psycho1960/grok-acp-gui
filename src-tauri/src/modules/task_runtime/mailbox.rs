@@ -181,15 +181,17 @@ impl MailboxWorker {
         }
 
         // 6. Publish to bridge (after persistence).
-        let bridge_event = crate::bridge::events::SessionEvent::new(
-            stored.event_type.clone(),
-            self.task_id.clone(),
-            session_id,
-            seq,
-            stored.payload.clone(),
-        )
-        .build();
-        let _ = self.event_broadcaster.send(bridge_event);
+        if let Some(bridge_type) = map_agent_kind_to_bridge_type(&stored.event_type) {
+            let bridge_event = crate::bridge::events::SessionEvent::new(
+                bridge_type,
+                self.task_id.clone(),
+                session_id,
+                seq,
+                stored.payload.clone(),
+            )
+            .build();
+            let _ = self.event_broadcaster.send(bridge_event);
+        }
 
         Ok(())
     }
@@ -216,6 +218,27 @@ fn has_side_effects_kind(kind: &str) -> bool {
         kind,
         "tool_started" | "tool_completed" | "permission_requested" | "plan_proposed"
     )
+}
+
+/// Map an agent_runtime event kind string to a bridge event type string.
+/// Returns None for event kinds that should not be published as session events
+/// (e.g. handshake/internal events).
+fn map_agent_kind_to_bridge_type(kind: &str) -> Option<String> {
+    use crate::bridge::events::event_types;
+    match kind {
+        "assistant_delta" | "assistant_completed" => Some(event_types::MESSAGE_DELTA.into()),
+        "tool_started" | "tool_updated" | "tool_completed" => {
+            Some(event_types::ACTIVITY_UPDATED.into())
+        }
+        "permission_requested" => Some(event_types::PERMISSION_REQUESTED.into()),
+        "plan_proposed" => Some(event_types::PLAN_UPDATED.into()),
+        "artifact_announced" => Some(event_types::ARTIFACT_AVAILABLE.into()),
+        "request_failed" => Some(event_types::DIAGNOSTIC_NOTICE.into()),
+        // Session lifecycle events are emitted as non-session events
+        // by the bridge event forwarder, not here.
+        "session_ready" | "process_exited" => None,
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

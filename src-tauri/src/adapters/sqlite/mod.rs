@@ -203,8 +203,8 @@ fn row_to_task_summary(row: &rusqlite::Row) -> rusqlite::Result<TaskSummary> {
 
 /// Query row for recovery candidates — reads from tasks table.
 fn row_to_recovery_candidate(row: &rusqlite::Row) -> rusqlite::Result<RecoveryCandidate> {
-    let has_session: i64 = row.get::<_, i64>(7)?;
-    let attempt_count: i64 = row.get::<_, i64>(8)?;
+    let has_session: i64 = row.get::<_, i64>(5)?;
+    let attempt_count: i64 = row.get::<_, i64>(7)?;
     Ok(RecoveryCandidate {
         task_id: TaskId::new(row.get::<_, String>(0)?),
         title: row.get(1)?,

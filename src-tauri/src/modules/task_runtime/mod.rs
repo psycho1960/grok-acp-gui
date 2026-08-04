@@ -41,8 +41,10 @@ pub trait TaskRuntime: Send + Sync {
         max_concurrent_tasks: u32,
     ) -> Result<(Vec<RecoveryCandidate>, ConcurrencyLimits), DomainError>;
 
-    /// Enqueue a task for execution. If below the concurrency limit, starts
-    /// immediately; otherwise the task is queued in preparing state.
+    /// Enqueue a task for execution. If below the concurrency limit, creates
+    /// a session binding and transitions the task to Running immediately.
+    /// Returns `CONCURRENCY_LIMIT_EXCEEDED` when the limit is reached — the
+    /// caller should keep the task in Preparing state and retry later.
     async fn enqueue_task(&self, task_id: TaskId, session_id: SessionId)
         -> Result<(), DomainError>;
 

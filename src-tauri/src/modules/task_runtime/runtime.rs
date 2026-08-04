@@ -46,6 +46,9 @@ pub struct TaskRuntimeImpl<A: AgentRuntime> {
     max_concurrent: u32,
     /// Per-session mailboxes, keyed by session_id.
     mailboxes: Mutex<HashMap<SessionId, SessionMailbox>>,
+    /// Per-session semaphore permits. The permit is released back to the
+    /// semaphore when the entry is removed (e.g. on session cancel/completion).
+    permits: Mutex<HashMap<SessionId, tokio::sync::OwnedSemaphorePermit>>,
     /// Bridge event broadcaster (Renderer subscribes to this).
     event_broadcaster: tokio::sync::broadcast::Sender<crate::bridge::events::DesktopEvent>,
 }
@@ -69,6 +72,7 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             max_concurrent,
             mailboxes: Mutex::new(HashMap::new()),
+            permits: Mutex::new(HashMap::new()),
             event_broadcaster: event_tx,
         }
     }
@@ -99,6 +103,14 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
     ) -> tokio::sync::broadcast::Receiver<crate::bridge::events::DesktopEvent> {
         self.event_broadcaster.subscribe()
     }
+
+    /// Release the semaphore permit for a session, if one is held.
+    /// Idempotent — calling when no permit exists is a no-op.
+    async fn release_session_permit(&self, session_id: &SessionId) {
+        let mut permits = self.permits.lock().await;
+        permits.remove(session_id);
+        // Permit is returned to the semaphore on drop.
+    }
 }
 
 #[async_trait]
@@ -123,18 +135,28 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         task_id: TaskId,
         session_id: SessionId,
     ) -> Result<(), DomainError> {
-        // Check concurrency: if we have a permit available, start immediately.
-        // Otherwise, the task stays in Preparing state and is queued.
-        let permit = self.semaphore.clone().try_acquire_owned();
+        // Check concurrency: try to acquire a permit.
+        let permit = match self.semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                // No permit available — task stays in Preparing (queued).
+                // Return a specific error so the caller can distinguish
+                // "queued" from "running".
+                return Err(DomainError::new(
+                    crate::domain::error::codes::CONCURRENCY_LIMIT_EXCEEDED,
+                    format!(
+                        "concurrency limit reached ({}/{} running); task {} queued",
+                        self.max_concurrent, self.max_concurrent, task_id
+                    ),
+                ));
+            }
+        };
 
-        if permit.is_err() {
-            // No permit available — task stays in Preparing (queued).
-            // The task center will show it as queued.
-            return Ok(());
+        // Store the permit so it is released when this session ends.
+        {
+            let mut permits = self.permits.lock().await;
+            permits.insert(session_id.clone(), permit);
         }
-
-        // We have a permit. Create the session binding and start.
-        let permit = permit.unwrap();
 
         let binding = crate::domain::types::SessionBinding {
             task_id: task_id.clone(),
@@ -151,17 +173,6 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
 
         // Transition task to Running.
         self.repo.update_task_status(&task_id.0, "running", None)?;
-
-        // The permit is consumed by the running task. We store it in a way
-        // that it's released when the session ends. For now, we "forget" it
-        // and the session shutdown will release it.
-        //
-        // In production, the permit would be held by the session task.
-        // For this implementation, we let the permit be forgotten (dropped)
-        // when this function returns, meaning the semaphore tracks sessions
-        // conservatively. A full implementation would track permit release
-        // via the session shutdown path.
-        std::mem::forget(permit);
 
         Ok(())
     }
@@ -231,6 +242,19 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         })?;
 
         let session_id = binding.session_id.clone();
+
+        // Release the semaphore permit so another task can start.
+        self.release_session_permit(&session_id).await;
+
+        // Update task status back to idle so it can be re-enqueued.
+        self.repo
+            .update_task_status(&task_id.0, "idle", Some("cancelled by user"))?;
+
+        // Update binding state.
+        let mut binding = binding;
+        binding.state = SessionState::Idle;
+        self.repo.update_binding(&binding)?;
+
         let mailbox = self.get_or_create_mailbox(&task_id, &session_id).await;
 
         // Dispatch cancel to the session mailbox.
