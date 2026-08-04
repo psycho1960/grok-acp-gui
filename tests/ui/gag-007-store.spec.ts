@@ -347,6 +347,51 @@ describe("GAG-007 task-center store", () => {
     expect(store.allTasks.length).toBe(5);
   });
 
+  it("detail.task tracks live task.state without re-open", async () => {
+    const bridge = createFakeDesktopBridge({
+      bootstrapSnapshot: createTaskCenterSeedSnapshot(),
+      onExecute(command) {
+        if (command.type === "task.open") {
+          return {
+            success: "true",
+            data: {
+              taskId: command.payload.taskId,
+              title: "实现 Task Center UI",
+              status: "running",
+            },
+          };
+        }
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    });
+    const store = useTaskCenterStore();
+    await store.attach(bridge);
+    await store.openDetail("task-run-1" as TaskId);
+    expect(store.detail?.task.status).toBe("running");
+    expect(store.detail?.openTitle).toBe("实现 Task Center UI");
+
+    store.handleBridgeEvent({
+      kind: "task.state",
+      event: {
+        type: "task.state",
+        taskId: "task-run-1" as TaskId,
+        sessionId: "s" as SessionId,
+        seq: 40,
+        timestamp: new Date().toISOString(),
+        payload: {
+          taskId: "task-run-1" as TaskId,
+          status: "interrupted",
+          detail: null,
+        },
+      },
+    });
+
+    // Live map drives detail.task; open overlay may still show prior openStatus.
+    expect(store.detail?.task.status).toBe("interrupted");
+    expect(store.detail?.task.id).toBe("task-run-1");
+    expect(store.detail?.openTitle).toBe("实现 Task Center UI");
+  });
+
   it("openDetail finally does not clear loading for a newer request", async () => {
     let resolveFirst: ((v: unknown) => void) | null = null;
     const bridge = createFakeDesktopBridge({

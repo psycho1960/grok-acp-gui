@@ -171,6 +171,31 @@ describe("GAG-007 TaskCenterView", () => {
     wrapper.unmount();
   });
 
+  it("hash without group clears previous group filter to all", async () => {
+    window.location.hash = "#task-center?group=failed_interrupted";
+    const bridge = createBridge();
+    const wrapper = mount(TaskCenterView, {
+      props: { bridge, syncHash: true },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+    const store = useTaskCenterStore();
+    expect(store.filters.group).toBe("failed_interrupted");
+    expect(wrapper.findAll("[data-task-id]").map((n) => n.attributes("data-task-id"))).toEqual([
+      "task-int-1",
+    ]);
+
+    window.location.hash = "#task-center";
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await nextTick();
+    await flushPromises();
+    expect(store.filters.group).toBe("all");
+    expect(wrapper.findAll("[data-task-id]").length).toBeGreaterThan(1);
+    wrapper.unmount();
+    window.location.hash = "";
+  });
+
   it("shows stale banner with list retained and retry", async () => {
     const bridge = createBridge();
     const wrapper = mount(TaskCenterView, {

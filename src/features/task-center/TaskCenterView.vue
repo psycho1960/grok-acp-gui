@@ -169,9 +169,8 @@ function applyRouteFromHash(): void {
   if (props.syncHash === false) return;
   const route = parseTaskCenterHash(window.location.hash);
   if (!route.active) return;
-  if (route.group) {
-    store.setFilters({ group: route.group });
-  }
+  // Bare #task-center (no group query) must clear a previous group filter to "all".
+  store.setFilters({ group: route.group ?? "all" });
   if (route.taskId) {
     if (store.selectedTaskId !== route.taskId) {
       void store.openDetail(route.taskId as TaskId);

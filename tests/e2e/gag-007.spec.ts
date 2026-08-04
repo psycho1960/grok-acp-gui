@@ -87,4 +87,32 @@ test.describe("GAG-007 Task Center fixture", () => {
     await expect(page.locator("[data-task-id]")).toHaveCount(1);
     await expect(page.locator('[data-task-id="task-int-1"]')).toBeVisible();
   });
+
+  test("navigating to bare #task-center clears group filter", async ({ page }) => {
+    await page.goto("/#task-center?group=failed_interrupted");
+    await expect(page.locator("[data-task-id]")).toHaveCount(1);
+    await page.evaluate(() => {
+      window.location.hash = "#task-center";
+    });
+    await expect(page.locator("[data-task-id]").first()).toBeVisible();
+    await expect.poll(async () => page.locator("[data-task-id]").count()).toBeGreaterThan(1);
+  });
+
+  test("open detail reflects live task.state without re-open", async ({ page }) => {
+    await page.goto("/#task-center/task-run-1");
+    await expect(page.getByTestId("task-detail")).toBeVisible();
+    await expect(page.locator('[data-task-id="task-run-1"]')).toHaveAttribute(
+      "data-status",
+      "running",
+    );
+    await page.evaluate(() => {
+      (window as FixtureWindow).__taskCenterPushState?.("task-run-1", "interrupted", 80);
+    });
+    await expect(page.locator('[data-task-id="task-run-1"]')).toHaveAttribute(
+      "data-status",
+      "interrupted",
+    );
+    // Drawer should show interrupted affordances (recover) after live update.
+    await expect(page.getByTestId("detail-recover")).toBeVisible();
+  });
 });

@@ -41,7 +41,15 @@ export const useTaskCenterStore = defineStore("task-center", () => {
   const refreshedAt = ref<string | null>(null);
   const filters = ref<TaskCenterFilters>({ ...DEFAULT_FILTERS });
   const selectedTaskId = ref<TaskId | null>(null);
-  const detail = ref<TaskDetailViewModel | null>(null);
+  /**
+   * Overlays from task.open only (title/status strings, compatibility errors).
+   * Live task body is always read from tasksById via `detail` computed.
+   */
+  const detailOverlays = ref<{
+    openTitle?: string;
+    openStatus?: string;
+    compatibilityError?: string;
+  } | null>(null);
   const detailLoading = ref(false);
   const cancelPendingId = ref<TaskId | null>(null);
   const liveMessage = ref("");
@@ -65,6 +73,19 @@ export const useTaskCenterStore = defineStore("task-center", () => {
   const selectedTask = computed(() => {
     if (!selectedTaskId.value) return null;
     return tasksById.value.get(selectedTaskId.value) ?? null;
+  });
+
+  /** Live detail: task always from store map so task.state/activity refresh the drawer. */
+  const detail = computed<TaskDetailViewModel | null>(() => {
+    if (!selectedTaskId.value) return null;
+    const task = tasksById.value.get(selectedTaskId.value);
+    if (!task) return null;
+    return {
+      task,
+      openTitle: detailOverlays.value?.openTitle,
+      openStatus: detailOverlays.value?.openStatus,
+      compatibilityError: detailOverlays.value?.compatibilityError,
+    };
   });
 
   const projectOptions = computed(() =>
@@ -324,7 +345,7 @@ export const useTaskCenterStore = defineStore("task-center", () => {
   function selectTask(taskId: TaskId | null): void {
     selectedTaskId.value = taskId;
     if (!taskId) {
-      detail.value = null;
+      detailOverlays.value = null;
     }
   }
 
@@ -333,12 +354,13 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     selectedTaskId.value = taskId;
     const task = tasksById.value.get(taskId);
     if (!task) {
-      detail.value = null;
+      detailOverlays.value = null;
       if (requestId === detailRequestId) detailLoading.value = false;
       return;
     }
     detailLoading.value = true;
-    detail.value = { task };
+    // Clear prior overlays; live task is visible via `detail` computed immediately.
+    detailOverlays.value = {};
     if (!facade) {
       if (requestId === detailRequestId) detailLoading.value = false;
       return;
@@ -349,20 +371,17 @@ export const useTaskCenterStore = defineStore("task-center", () => {
         return;
       }
       if (result.success === "false") {
-        detail.value = {
-          task,
+        detailOverlays.value = {
           compatibilityError: result.error.message,
         };
       } else {
         const data = result.data as TaskOpenResult;
         if (!data || typeof data !== "object" || !("taskId" in data)) {
-          detail.value = {
-            task,
+          detailOverlays.value = {
             compatibilityError: "任务详情响应缺少必要字段",
           };
         } else {
-          detail.value = {
-            task,
+          detailOverlays.value = {
             openTitle: typeof data.title === "string" ? data.title : undefined,
             openStatus: typeof data.status === "string" ? data.status : undefined,
           };
@@ -372,8 +391,7 @@ export const useTaskCenterStore = defineStore("task-center", () => {
       if (disposed || requestId !== detailRequestId || selectedTaskId.value !== taskId) {
         return;
       }
-      detail.value = {
-        task,
+      detailOverlays.value = {
         compatibilityError:
           error instanceof Error ? error.message : String(error),
       };
@@ -388,7 +406,7 @@ export const useTaskCenterStore = defineStore("task-center", () => {
   function closeDetail(): void {
     detailRequestId += 1;
     selectedTaskId.value = null;
-    detail.value = null;
+    detailOverlays.value = null;
     detailLoading.value = false;
   }
 
