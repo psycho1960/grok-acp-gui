@@ -356,7 +356,17 @@ mod tests {
     fn snapshot_event_limit_is_reasonable() {
         // These are compile-time constants; the test verifies they are set
         // to reasonable values.
-        const { assert!(SNAPSHOT_EVENT_LIMIT > 0, "SNAPSHOT_EVENT_LIMIT must be positive") };
-        const { assert!(SNAPSHOT_EVENT_LIMIT <= 500, "SNAPSHOT_EVENT_LIMIT must be <= 500") };
+        const {
+            assert!(
+                SNAPSHOT_EVENT_LIMIT > 0,
+                "SNAPSHOT_EVENT_LIMIT must be positive"
+            )
+        };
+        const {
+            assert!(
+                SNAPSHOT_EVENT_LIMIT <= 500,
+                "SNAPSHOT_EVENT_LIMIT must be <= 500"
+            )
+        };
     }
 }
