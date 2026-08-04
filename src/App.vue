@@ -6,6 +6,8 @@ import ShellView from "./app/ShellView.vue";
 import UiKitFixture from "./app/UiKitFixture.vue";
 import TaskCenterFixture from "./features/task-center/TaskCenterFixture.vue";
 import { parseTaskCenterHash } from "./features/task-center/hash-route";
+import ConversationFixture from "./features/conversation/ConversationFixture.vue";
+import { parseConversationHash } from "./features/conversation/hash-route";
 
 const isLoading = ref(true);
 const startupError = ref<string | null>(null);
@@ -22,6 +24,7 @@ const developmentRoute = computed(() => routeHash.value);
 
 const showUiKit = computed(() => developmentRoute.value === "#ui-kit");
 const showShellPreview = computed(() => developmentRoute.value === "#shell");
+const conversationRoute = computed(() => parseConversationHash(routeHash.value));
 
 // UI-ERROR-001: when the database is unavailable or corrupt the backend
 // returns `ready:false` with `dbError`. Prefer this over fixture.
@@ -48,11 +51,32 @@ const showTaskCenterFixture = computed(() => {
   return bootstrapThrew.value || bootstrapStatus.value == null;
 });
 
+const showConversationFixture = computed(() => {
+  if (!conversationRoute.value.active) return false;
+  if (dbUnavailable.value) return false;
+  if (bootstrapStatus.value?.ready) return false;
+  return bootstrapThrew.value || bootstrapStatus.value == null;
+});
+
 onMounted(async () => {
   window.addEventListener("hashchange", syncHash);
 
   if (showUiKit.value || showShellPreview.value) {
     isLoading.value = false;
+    return;
+  }
+
+  // Conversation hash: try bootstrap; fixture only if invoke throws (no host).
+  if (conversationRoute.value.active) {
+    try {
+      bootstrapStatus.value = await bootstrap();
+      bootstrapThrew.value = false;
+    } catch {
+      bootstrapStatus.value = null;
+      bootstrapThrew.value = true;
+    } finally {
+      isLoading.value = false;
+    }
     return;
   }
 
@@ -98,6 +122,7 @@ onUnmounted(() => {
   <main v-else-if="dbUnavailable" class="startup">
     <ErrorState title="数据库不可用" :detail="dbErrorDetail" data-err="UI-ERROR-001" />
   </main>
+  <ConversationFixture v-else-if="showConversationFixture" />
   <TaskCenterFixture v-else-if="showTaskCenterFixture" />
   <ShellView v-else :data-version="bootstrapStatus?.version" />
 </template>

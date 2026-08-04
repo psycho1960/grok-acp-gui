@@ -7,7 +7,7 @@ import EmptyState from "../shared/ui/EmptyState.vue";
 import StatusIcon from "../shared/ui/StatusIcon.vue";
 import { createDesktopBridge } from "../bridge/client";
 import { createFakeDesktopBridge } from "../bridge/fake-bridge";
-import type { DesktopBridge } from "../bridge/types";
+import type { DesktopBridge, TaskId } from "../bridge/types";
 import TaskCenterView from "../features/task-center/TaskCenterView.vue";
 import { createTaskCenterSeedSnapshot } from "../features/task-center/seed";
 import {
@@ -15,12 +15,24 @@ import {
   parseTaskCenterHash,
 } from "../features/task-center/hash-route";
 import { TASK_GROUP_LABELS, type TaskGroupId } from "../features/task-center/types";
+import ConversationView from "../features/conversation/ConversationView.vue";
+import {
+  applyConversationHash,
+  parseConversationHash,
+} from "../features/conversation/hash-route";
+import {
+  createConversationSeedSnapshot,
+  createSeedTimeline,
+} from "../features/conversation/seed";
 
 defineProps<{ dataVersion?: string }>();
 
 const inspectorOpen = ref(true);
 const routeHash = ref(typeof window !== "undefined" ? window.location.hash : "");
+const conversationRoute = computed(() => parseConversationHash(routeHash.value));
+const showConversation = computed(() => conversationRoute.value.active);
 const showTaskCenter = computed(() => {
+  if (showConversation.value) return false;
   const route = parseTaskCenterHash(routeHash.value);
   // Default shell main area shows Task Center when hash is task-center or empty after bootstrap.
   return route.active || routeHash.value === "" || routeHash.value === "#";
@@ -37,8 +49,17 @@ function resolveBridge(): DesktopBridge {
   } catch {
     // fall through
   }
+  const taskSeed = createTaskCenterSeedSnapshot();
+  const convSeed = createConversationSeedSnapshot();
   return createFakeDesktopBridge({
-    bootstrapSnapshot: createTaskCenterSeedSnapshot(),
+    bootstrapSnapshot: {
+      ...taskSeed,
+      activeTasks: [
+        ...(taskSeed.activeTasks ?? []),
+        ...(convSeed.activeTasks ?? []),
+      ],
+      bindings: [...(taskSeed.bindings ?? []), ...(convSeed.bindings ?? [])],
+    },
   });
 }
 
@@ -59,6 +80,10 @@ onBeforeUnmount(() => {
 /** Encode group in hash so focus survives mount races (no CustomEvent). */
 function goTaskCenter(group?: TaskGroupId): void {
   applyTaskCenterHash(null, group ?? null);
+}
+
+function goConversation(taskId?: string): void {
+  applyConversationHash(taskId ?? "task-conv-1");
 }
 
 const left = computed(() =>
@@ -88,11 +113,31 @@ const left = computed(() =>
           label,
         ),
       ),
+      h(
+        "button",
+        {
+          class: "nav-item",
+          type: "button",
+          "data-testid": "nav-conversation",
+          onClick: () => goConversation(),
+        },
+        "对话时间线",
+      ),
     ],
   ),
 );
 
 const main = computed(() => {
+  if (showConversation.value) {
+    const taskId = (conversationRoute.value.taskId ?? "task-conv-1") as TaskId;
+    const snap = createSeedTimeline(taskId);
+    return h(ConversationView, {
+      bridge: bridge.value,
+      taskId,
+      snapshot: snap,
+      focusSeq: conversationRoute.value.eventSeq,
+    });
+  }
   if (showTaskCenter.value) {
     return h(TaskCenterView, {
       bridge: bridge.value,
