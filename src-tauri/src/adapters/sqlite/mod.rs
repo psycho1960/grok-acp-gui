@@ -13,9 +13,11 @@ pub mod migration;
 
 use crate::domain::error::DomainError;
 use crate::domain::types::{
-    utc_now, AttachmentId, AttachmentRecord, BootstrapSnapshot, Project, ProjectId, RecoveryId,
-    RecoveryItem, RecoveryState, SessionBinding, SessionId, SessionState, Settings, Task, TaskId,
-    TaskStatus, WorkspaceKind, WorktreeId, WorktreeOwnership, WorktreeRecord, WorktreeState,
+    utc_now, AttachmentId, AttachmentRecord, BootstrapSnapshot, ConcurrencyLimits, CorrelationId,
+    Project, ProjectId, RecoveryAction, RecoveryCandidate, RecoveryDecision, RecoveryId,
+    RecoveryItem, RecoveryState, SessionBinding, SessionId, SessionSnapshot, SessionState,
+    Settings, StoredEvent, Task, TaskId, TaskStatus, TaskSummary, TimelineCursor, WorkspaceKind,
+    WorktreeId, WorktreeOwnership, WorktreeRecord, WorktreeState,
 };
 use crate::modules::persistence::{RepoResult, Repository};
 use rusqlite::{params, Connection};
@@ -103,6 +105,8 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         interrupt_reason: row.get(10)?,
+        interrupted_at: row.get(11)?,
+        attempt_count: row.get::<_, i64>(12)? as u32,
     })
 }
 
@@ -113,6 +117,7 @@ fn row_to_binding(row: &rusqlite::Row) -> rusqlite::Result<SessionBinding> {
         cwd: row.get(2)?,
         last_seq: row.get(3)?,
         state: parse_session_state(&row.get::<_, String>(4)?),
+        attempt_number: row.get::<_, i64>(5)? as u32,
     })
 }
 
@@ -162,6 +167,53 @@ fn row_to_setting(row: &rusqlite::Row) -> rusqlite::Result<Settings> {
     Ok(Settings {
         key: row.get(0)?,
         json_value,
+    })
+}
+
+// --- GAG-006 row mappers ---
+
+fn row_to_stored_event(row: &rusqlite::Row) -> rusqlite::Result<StoredEvent> {
+    let payload_str: String = row.get(5)?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+    Ok(StoredEvent {
+        dedup_key: row.get(0)?,
+        session_id: SessionId::new(row.get::<_, String>(1)?),
+        task_id: TaskId::new(row.get::<_, String>(2)?),
+        sequence: row.get::<_, i64>(3)? as u64,
+        event_type: row.get(4)?,
+        payload,
+        correlation_id: row.get::<_, Option<String>>(6)?.map(CorrelationId::new),
+        persisted_at: row.get(7)?,
+        has_side_effects: row.get::<_, i64>(8)? != 0,
+    })
+}
+
+fn row_to_task_summary(row: &rusqlite::Row) -> rusqlite::Result<TaskSummary> {
+    Ok(TaskSummary {
+        id: TaskId::new(row.get::<_, String>(0)?),
+        project_id: ProjectId::new(row.get::<_, String>(1)?),
+        title: row.get(2)?,
+        status: parse_task_status(&row.get::<_, String>(3)?),
+        updated_at: row.get(4)?,
+        queue_position: None,    // computed by TaskRuntime
+        has_live_session: false, // computed by TaskRuntime
+    })
+}
+
+/// Query row for recovery candidates — reads from tasks table.
+fn row_to_recovery_candidate(row: &rusqlite::Row) -> rusqlite::Result<RecoveryCandidate> {
+    let has_session: i64 = row.get::<_, i64>(7)?;
+    let attempt_count: i64 = row.get::<_, i64>(8)?;
+    Ok(RecoveryCandidate {
+        task_id: TaskId::new(row.get::<_, String>(0)?),
+        title: row.get(1)?,
+        previous_status: parse_task_status(&row.get::<_, String>(2)?),
+        interrupted_at: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        interrupt_reason: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+        has_session: has_session != 0,
+        events_available: false, // computed by TaskRuntime
+        attempt_count: attempt_count as u32,
     })
 }
 
@@ -348,7 +400,7 @@ impl Repository for SqliteRepository {
         let active_tasks = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason FROM tasks WHERE status NOT IN ('merged', 'archived') ORDER BY updated_at DESC",
+                    "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason, interrupted_at, attempt_count FROM tasks WHERE status NOT IN ('merged', 'archived') ORDER BY updated_at DESC",
                 )
                 .map_err(|e| db_error("bootstrap: tasks query", &e))?;
             let rows = stmt
@@ -359,7 +411,7 @@ impl Repository for SqliteRepository {
 
         let bindings = {
             let mut stmt = conn
-                .prepare("SELECT task_id, session_id, cwd, last_seq, state FROM session_bindings")
+                .prepare("SELECT task_id, session_id, cwd, last_seq, state, attempt_number FROM session_bindings")
                 .map_err(|e| db_error("bootstrap: bindings query", &e))?;
             let rows = stmt
                 .query_map([], row_to_binding)
@@ -414,6 +466,8 @@ impl Repository for SqliteRepository {
             settings,
             recovery_performed: false,
             tasks_interrupted: 0,
+            recovery_candidates: vec![],
+            concurrency: None,
         })
     }
 
@@ -490,7 +544,7 @@ impl Repository for SqliteRepository {
     fn create_task(&self, task: &Task) -> RepoResult<()> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO tasks (id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO tasks (id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason, interrupted_at, attempt_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 task.id.0,
                 task.project_id.0,
@@ -503,6 +557,8 @@ impl Repository for SqliteRepository {
                 task.created_at,
                 task.updated_at,
                 task.interrupt_reason,
+                task.interrupted_at,
+                task.attempt_count as i64,
             ],
         )
         .map_err(|e| db_error("create_task", &e))?;
@@ -512,7 +568,7 @@ impl Repository for SqliteRepository {
     fn get_task(&self, id: &str) -> RepoResult<Task> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason FROM tasks WHERE id = ?1",
+            "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason, interrupted_at, attempt_count FROM tasks WHERE id = ?1",
             params![id],
             row_to_task,
         )
@@ -523,7 +579,7 @@ impl Repository for SqliteRepository {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason FROM tasks WHERE project_id = ?1 ORDER BY updated_at DESC",
+                "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason, interrupted_at, attempt_count FROM tasks WHERE project_id = ?1 ORDER BY updated_at DESC",
             )
             .map_err(|e| db_error("list_tasks_by_project", &e))?;
         let rows = stmt
@@ -536,7 +592,7 @@ impl Repository for SqliteRepository {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason FROM tasks WHERE status NOT IN ('merged', 'archived') ORDER BY updated_at DESC",
+                "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason, interrupted_at, attempt_count FROM tasks WHERE status NOT IN ('merged', 'archived') ORDER BY updated_at DESC",
             )
             .map_err(|e| db_error("list_active_tasks", &e))?;
         let rows = stmt
@@ -548,7 +604,7 @@ impl Repository for SqliteRepository {
     fn update_task(&self, task: &Task) -> RepoResult<()> {
         let conn = self.lock()?;
         conn.execute(
-            "UPDATE tasks SET project_id = ?1, title = ?2, status = ?3, workspace_kind = ?4, mode = ?5, model = ?6, reasoning = ?7, updated_at = ?8, interrupt_reason = ?9 WHERE id = ?10",
+            "UPDATE tasks SET project_id = ?1, title = ?2, status = ?3, workspace_kind = ?4, mode = ?5, model = ?6, reasoning = ?7, updated_at = ?8, interrupt_reason = ?9, interrupted_at = ?10, attempt_count = ?11 WHERE id = ?12",
             params![
                 task.project_id.0,
                 task.title,
@@ -559,6 +615,8 @@ impl Repository for SqliteRepository {
                 task.reasoning,
                 task.updated_at,
                 task.interrupt_reason,
+                task.interrupted_at,
+                task.attempt_count as i64,
                 task.id.0,
             ],
         )
@@ -584,13 +642,14 @@ impl Repository for SqliteRepository {
     fn create_binding(&self, binding: &SessionBinding) -> RepoResult<()> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO session_bindings (task_id, session_id, cwd, last_seq, state) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO session_bindings (task_id, session_id, cwd, last_seq, state, attempt_number) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 binding.task_id.0,
                 binding.session_id.0,
                 binding.cwd,
                 binding.last_seq,
                 session_state_to_str(binding.state),
+                binding.attempt_number as i64,
             ],
         )
         .map_err(|e| db_error("create_binding", &e))?;
@@ -600,7 +659,7 @@ impl Repository for SqliteRepository {
     fn get_binding_by_task(&self, task_id: &str) -> RepoResult<Option<SessionBinding>> {
         let conn = self.lock()?;
         let result = conn.query_row(
-            "SELECT task_id, session_id, cwd, last_seq, state FROM session_bindings WHERE task_id = ?1",
+            "SELECT task_id, session_id, cwd, last_seq, state, attempt_number FROM session_bindings WHERE task_id = ?1",
             params![task_id],
             row_to_binding,
         );
@@ -614,7 +673,7 @@ impl Repository for SqliteRepository {
     fn get_binding_by_session(&self, session_id: &str) -> RepoResult<Option<SessionBinding>> {
         let conn = self.lock()?;
         let result = conn.query_row(
-            "SELECT task_id, session_id, cwd, last_seq, state FROM session_bindings WHERE session_id = ?1",
+            "SELECT task_id, session_id, cwd, last_seq, state, attempt_number FROM session_bindings WHERE session_id = ?1",
             params![session_id],
             row_to_binding,
         );
@@ -628,11 +687,12 @@ impl Repository for SqliteRepository {
     fn update_binding(&self, binding: &SessionBinding) -> RepoResult<()> {
         let conn = self.lock()?;
         conn.execute(
-            "UPDATE session_bindings SET cwd = ?1, last_seq = ?2, state = ?3 WHERE task_id = ?4",
+            "UPDATE session_bindings SET cwd = ?1, last_seq = ?2, state = ?3, attempt_number = ?4 WHERE task_id = ?5",
             params![
                 binding.cwd,
                 binding.last_seq,
                 session_state_to_str(binding.state),
+                binding.attempt_number as i64,
                 binding.task_id.0,
             ],
         )
@@ -644,7 +704,7 @@ impl Repository for SqliteRepository {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT task_id, session_id, cwd, last_seq, state FROM session_bindings WHERE state != 'closed'",
+                "SELECT task_id, session_id, cwd, last_seq, state, attempt_number FROM session_bindings WHERE state != 'closed'",
             )
             .map_err(|e| db_error("list_active_bindings", &e))?;
         let rows = stmt
@@ -898,8 +958,273 @@ impl Repository for SqliteRepository {
     }
 
     // ==================================================================
-    // Startup Recovery
+    // GAG-006: Session Events
     // ==================================================================
+
+    fn append_event(&self, event: &StoredEvent) -> RepoResult<bool> {
+        let conn = self.lock()?;
+        let payload_str = serde_json::to_string(&event.payload)
+            .map_err(|e| DomainError::new("DB_QUERY_FAILED", format!("JSON serialize: {}", e)))?;
+        let result = conn.execute(
+            "INSERT OR IGNORE INTO session_events (dedup_key, session_id, task_id, sequence, event_type, payload, correlation_id, persisted_at, has_side_effects, attempt_number) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                event.dedup_key,
+                event.session_id.0,
+                event.task_id.0,
+                event.sequence as i64,
+                event.event_type,
+                payload_str,
+                event.correlation_id.as_ref().map(|c| c.0.as_str()),
+                event.persisted_at,
+                event.has_side_effects as i64,
+                // attempt_number is not on StoredEvent — we read it from the binding
+                1i64,
+            ],
+        );
+        match result {
+            Ok(1) => Ok(true),  // inserted
+            Ok(_) => Ok(false), // dedup_key existed — idempotent
+            Err(e) => Err(db_error("append_event", &e)),
+        }
+    }
+
+    fn get_events_after(
+        &self,
+        session_id: &str,
+        after_seq: u64,
+        limit: u32,
+    ) -> RepoResult<Vec<StoredEvent>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT dedup_key, session_id, task_id, sequence, event_type, payload, correlation_id, persisted_at, has_side_effects FROM session_events WHERE session_id = ?1 AND sequence > ?2 ORDER BY sequence ASC LIMIT ?3",
+            )
+            .map_err(|e| db_error("get_events_after", &e))?;
+        let rows = stmt
+            .query_map(
+                params![session_id, after_seq as i64, limit as i64],
+                row_to_stored_event,
+            )
+            .map_err(|e| db_error("get_events_after: map", &e))?;
+        collect_rows(rows, "get_events_after: row")
+    }
+
+    fn get_events_for_attempt(
+        &self,
+        session_id: &str,
+        attempt_number: u32,
+    ) -> RepoResult<Vec<StoredEvent>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT dedup_key, session_id, task_id, sequence, event_type, payload, correlation_id, persisted_at, has_side_effects FROM session_events WHERE session_id = ?1 AND attempt_number = ?2 ORDER BY sequence ASC",
+            )
+            .map_err(|e| db_error("get_events_for_attempt", &e))?;
+        let rows = stmt
+            .query_map(
+                params![session_id, attempt_number as i64],
+                row_to_stored_event,
+            )
+            .map_err(|e| db_error("get_events_for_attempt: map", &e))?;
+        collect_rows(rows, "get_events_for_attempt: row")
+    }
+
+    fn get_max_sequence(&self, session_id: &str) -> RepoResult<Option<u64>> {
+        let conn = self.lock()?;
+        let result = conn.query_row(
+            "SELECT MAX(sequence) FROM session_events WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, Option<i64>>(0),
+        );
+        match result {
+            Ok(Some(seq)) => Ok(Some(seq as u64)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(db_error("get_max_sequence", &e)),
+        }
+    }
+
+    fn get_session_snapshot(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        event_limit: u32,
+    ) -> RepoResult<SessionSnapshot> {
+        let conn = self.lock()?;
+
+        // Get the binding for this task.
+        let binding = conn
+            .query_row(
+                "SELECT task_id, session_id, cwd, last_seq, state, attempt_number FROM session_bindings WHERE task_id = ?1 AND session_id = ?2",
+                params![task_id, session_id],
+                row_to_binding,
+            )
+            .map_err(|e| db_error("get_session_snapshot: binding", &e))?;
+
+        // Get recent events for this session.
+        let mut stmt = conn
+            .prepare(
+                "SELECT dedup_key, session_id, task_id, sequence, event_type, payload, correlation_id, persisted_at, has_side_effects FROM session_events WHERE session_id = ?1 ORDER BY sequence DESC LIMIT ?2",
+            )
+            .map_err(|e| db_error("get_session_snapshot: events", &e))?;
+        let rows = stmt
+            .query_map(params![session_id, event_limit as i64], row_to_stored_event)
+            .map_err(|e| db_error("get_session_snapshot: map", &e))?;
+        let mut events: Vec<StoredEvent> = collect_rows(rows, "get_session_snapshot: row")?;
+        // Reverse to get chronological order (query returned DESC).
+        events.reverse();
+
+        let max_seq = events
+            .last()
+            .map(|e| e.sequence)
+            .unwrap_or(binding.last_seq);
+        let last_event_at = events
+            .last()
+            .map(|e| e.persisted_at.clone())
+            .unwrap_or_else(utc_now);
+
+        Ok(SessionSnapshot {
+            task_id: TaskId::new(task_id.to_string()),
+            session_id: SessionId::new(session_id.to_string()),
+            state: binding.state,
+            last_seq: binding.last_seq,
+            captured_at: utc_now(),
+            cursor: TimelineCursor {
+                session_id: SessionId::new(session_id.to_string()),
+                last_seq: max_seq,
+                last_event_at,
+            },
+            recent_events: events,
+            attempt_number: binding.attempt_number,
+        })
+    }
+
+    // ==================================================================
+    // GAG-006: Recovery & Concurrency
+    // ==================================================================
+
+    fn list_tasks_by_statuses(&self, statuses: &[&str]) -> RepoResult<Vec<Task>> {
+        let conn = self.lock()?;
+        if statuses.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders: Vec<String> = statuses
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason, interrupted_at, attempt_count FROM tasks WHERE status IN ({}) ORDER BY updated_at DESC",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| db_error("list_tasks_by_statuses", &e))?;
+        let params_vec: Vec<&dyn rusqlite::types::ToSql> = statuses
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let rows = stmt
+            .query_map(params_vec.as_slice(), row_to_task)
+            .map_err(|e| db_error("list_tasks_by_statuses: map", &e))?;
+        collect_rows(rows, "list_tasks_by_statuses: row")
+    }
+
+    fn list_task_summaries(&self) -> RepoResult<Vec<TaskSummary>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, project_id, title, status, updated_at FROM tasks WHERE status NOT IN ('merged', 'archived') ORDER BY updated_at DESC",
+            )
+            .map_err(|e| db_error("list_task_summaries", &e))?;
+        let rows = stmt
+            .query_map([], row_to_task_summary)
+            .map_err(|e| db_error("list_task_summaries: map", &e))?;
+        collect_rows(rows, "list_task_summaries: row")
+    }
+
+    fn increment_binding_attempt(&self, task_id: &str) -> RepoResult<u32> {
+        let conn = self.lock()?;
+        let new_attempt: i64 = conn
+            .query_row(
+                "UPDATE session_bindings SET attempt_number = attempt_number + 1 WHERE task_id = ?1 RETURNING attempt_number",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| db_error("increment_binding_attempt", &e))?;
+        Ok(new_attempt as u32)
+    }
+
+    fn list_recovery_candidates(&self) -> RepoResult<Vec<RecoveryCandidate>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.id, t.title, t.status, t.interrupted_at, t.interrupt_reason, COALESCE(sb.task_id IS NOT NULL, 0) as has_session, 0, t.attempt_count FROM tasks t LEFT JOIN session_bindings sb ON t.id = sb.task_id WHERE t.status = 'interrupted' ORDER BY t.updated_at DESC",
+            )
+            .map_err(|e| db_error("list_recovery_candidates", &e))?;
+        let rows = stmt
+            .query_map([], row_to_recovery_candidate)
+            .map_err(|e| db_error("list_recovery_candidates: map", &e))?;
+        let mut candidates = collect_rows(rows, "list_recovery_candidates: row")?;
+
+        // Enrich with events_available info.
+        for c in &mut candidates {
+            let has_events: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM session_events WHERE task_id = ?1",
+                    params![c.task_id.0],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            c.events_available = has_events;
+        }
+
+        Ok(candidates)
+    }
+
+    fn apply_recovery_decision(&self, decision: &RecoveryDecision) -> RepoResult<()> {
+        let conn = self.lock()?;
+        let now = utc_now();
+        match decision.action {
+            RecoveryAction::Resume => {
+                conn.execute(
+                    "UPDATE tasks SET status = 'preparing', interrupt_reason = NULL, interrupted_at = NULL, updated_at = ?1, attempt_count = attempt_count + 1 WHERE id = ?2 AND status = 'interrupted'",
+                    params![now, decision.task_id.0],
+                )
+                .map_err(|e| db_error("apply_recovery_decision: resume", &e))?;
+            }
+            RecoveryAction::Archive => {
+                conn.execute(
+                    "UPDATE tasks SET status = 'archived', updated_at = ?1 WHERE id = ?2 AND status = 'interrupted'",
+                    params![now, decision.task_id.0],
+                )
+                .map_err(|e| db_error("apply_recovery_decision: archive", &e))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn get_concurrency_limits(&self, max_concurrent: u32) -> RepoResult<ConcurrencyLimits> {
+        let conn = self.lock()?;
+        let running: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'running'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'preparing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(ConcurrencyLimits {
+            max_concurrent_tasks: max_concurrent,
+            current_running: running as u32,
+            current_queued: queued as u32,
+        })
+    }
 
     fn recover_interrupted_tasks(&self, reason: &str) -> RepoResult<u32> {
         let conn = self.lock()?;
@@ -951,6 +1276,8 @@ mod tests {
             created_at: now.clone(),
             updated_at: now,
             interrupt_reason: None,
+            interrupted_at: None,
+            attempt_count: 1,
         }
     }
 
@@ -999,6 +1326,7 @@ mod tests {
             cwd: None,
             last_seq: 0,
             state: SessionState::Active,
+            attempt_number: 1,
         };
         repo.create_binding(&b1).unwrap();
 
@@ -1008,6 +1336,7 @@ mod tests {
             cwd: None,
             last_seq: 0,
             state: SessionState::Active,
+            attempt_number: 1,
         };
         assert!(repo.create_binding(&b2).is_err());
     }

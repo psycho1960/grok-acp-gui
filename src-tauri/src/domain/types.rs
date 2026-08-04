@@ -192,6 +192,11 @@ pub struct Task {
     /// Human-readable reason when status is Interrupted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interrupt_reason: Option<String>,
+    /// GAG-006: ISO-8601 when the task was last interrupted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<String>,
+    /// GAG-006: Number of recovery attempts for this task.
+    pub attempt_count: u32,
 }
 
 /// Links a Task to an ACP session.
@@ -207,6 +212,8 @@ pub struct SessionBinding {
     pub last_seq: u64,
     /// Current session state.
     pub state: SessionState,
+    /// GAG-006: Monotonically increasing attempt number for this session.
+    pub attempt_number: u32,
 }
 
 /// A Git worktree tracked by the application.
@@ -277,6 +284,132 @@ pub struct Settings {
 }
 
 // ---------------------------------------------------------------------------
+// GAG-006: TaskRuntime DTOs — concurrency, events, snapshot, recovery
+// ---------------------------------------------------------------------------
+
+/// Lightweight task summary for task-center listing (avoids full Task struct).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSummary {
+    pub id: TaskId,
+    pub project_id: ProjectId,
+    pub title: String,
+    pub status: TaskStatus,
+    pub updated_at: String,
+    /// Current concurrency position: "running", "queued", or "idle".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_position: Option<u32>,
+    /// Whether this task has an active managed process.
+    pub has_live_session: bool,
+}
+
+/// A point-in-time snapshot of a single session's state for Renderer
+/// reconnection. Includes the last known sequence and a timeline cursor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSnapshot {
+    pub task_id: TaskId,
+    pub session_id: SessionId,
+    /// Current session state.
+    pub state: SessionState,
+    /// Last acknowledged sequence number.
+    pub last_seq: u64,
+    /// ISO-8601 when the snapshot was taken.
+    pub captured_at: String,
+    /// Cursor marking the boundary between snapshot and subsequent deltas.
+    pub cursor: TimelineCursor,
+    /// Recent events included in the snapshot (bounded window).
+    pub recent_events: Vec<StoredEvent>,
+    /// Current attempt number for this session.
+    pub attempt_number: u32,
+}
+
+/// A cursor that marks the boundary between events delivered in a snapshot
+/// and subsequent delta events. The Renderer uses this to request only
+/// events after the cursor on reconnection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineCursor {
+    pub session_id: SessionId,
+    /// The highest sequence number included in the snapshot.
+    pub last_seq: u64,
+    /// The timestamp of the last event in the snapshot.
+    pub last_event_at: String,
+}
+
+/// A persisted event record stored in the event log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredEvent {
+    /// Unique deduplication key (session_id + sequence).
+    pub dedup_key: String,
+    pub session_id: SessionId,
+    pub task_id: TaskId,
+    /// Monotonic sequence number within the session.
+    pub sequence: u64,
+    /// The event type (e.g. "message.delta").
+    pub event_type: String,
+    /// The full serialized event payload.
+    pub payload: serde_json::Value,
+    /// Links to the request that caused this event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<CorrelationId>,
+    /// ISO-8601 when this event was persisted.
+    pub persisted_at: String,
+    /// Whether this event carries side effects (writes, terminal commands).
+    pub has_side_effects: bool,
+}
+
+/// A candidate task for session recovery after application restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryCandidate {
+    pub task_id: TaskId,
+    pub title: String,
+    pub previous_status: TaskStatus,
+    pub interrupted_at: String,
+    pub interrupt_reason: String,
+    /// Whether this task has a valid persisted session binding.
+    pub has_session: bool,
+    /// Whether the previous attempt's events are still readable.
+    pub events_available: bool,
+    /// Number of previous attempts for this task.
+    pub attempt_count: u32,
+}
+
+/// The user's recovery decision for a specific interrupted task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryDecision {
+    pub task_id: TaskId,
+    /// "resume" to create a new attempt, "archive" to archive the task.
+    pub action: RecoveryAction,
+    /// ISO-8601 when the decision was made.
+    pub decided_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction {
+    /// Create a new attempt and resume the session.
+    Resume,
+    /// Archive the task — no further attempts.
+    Archive,
+}
+
+/// Concurrency limits controlling how many tasks may run simultaneously.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConcurrencyLimits {
+    /// Maximum tasks that can be running concurrently.
+    pub max_concurrent_tasks: u32,
+    /// Current number of running tasks.
+    pub current_running: u32,
+    /// Current number of queued tasks.
+    pub current_queued: u32,
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap snapshot — the aggregate returned on app startup
 // ---------------------------------------------------------------------------
 
@@ -303,6 +436,12 @@ pub struct BootstrapSnapshot {
     pub recovery_performed: bool,
     /// Number of tasks that were transitioned to Interrupted.
     pub tasks_interrupted: u32,
+    /// GAG-006: Tasks that need recovery after startup.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub recovery_candidates: Vec<RecoveryCandidate>,
+    /// GAG-006: Current concurrency limits and counts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<ConcurrencyLimits>,
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +483,8 @@ mod tests {
             settings: vec![],
             recovery_performed: false,
             tasks_interrupted: 0,
+            recovery_candidates: vec![],
+            concurrency: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(json.contains("productName"));
@@ -388,5 +529,104 @@ mod tests {
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, p.id);
         assert_eq!(back.display_path, "~/project");
+    }
+
+    // --- GAG-006 DTO tests ---
+
+    #[test]
+    fn task_summary_serde() {
+        let ts = TaskSummary {
+            id: TaskId::new("t1"),
+            project_id: ProjectId::new("p1"),
+            title: "Test Task".into(),
+            status: TaskStatus::Running,
+            updated_at: utc_now(),
+            queue_position: None,
+            has_live_session: true,
+        };
+        let json = serde_json::to_string(&ts).unwrap();
+        assert!(json.contains("\"title\":\"Test Task\""));
+        assert!(!json.contains("queuePosition")); // None is skipped
+        assert!(json.contains("\"hasLiveSession\":true"));
+        let back: TaskSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, ts.id);
+        assert_eq!(back.status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn session_snapshot_serde() {
+        let snap = SessionSnapshot {
+            task_id: TaskId::new("t1"),
+            session_id: SessionId::new("s1"),
+            state: SessionState::Active,
+            last_seq: 42,
+            captured_at: utc_now(),
+            cursor: TimelineCursor {
+                session_id: SessionId::new("s1"),
+                last_seq: 42,
+                last_event_at: utc_now(),
+            },
+            recent_events: vec![],
+            attempt_number: 1,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains("\"cursor\""));
+        assert!(json.contains("\"attemptNumber\":1"));
+        let back: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.last_seq, 42);
+        assert_eq!(back.attempt_number, 1);
+    }
+
+    #[test]
+    fn recovery_candidate_serde() {
+        let rc = RecoveryCandidate {
+            task_id: TaskId::new("t1"),
+            title: "Interrupted Task".into(),
+            previous_status: TaskStatus::Running,
+            interrupted_at: utc_now(),
+            interrupt_reason: "app exited".into(),
+            has_session: true,
+            events_available: true,
+            attempt_count: 1,
+        };
+        let json = serde_json::to_string(&rc).unwrap();
+        assert!(json.contains("\"hasSession\":true"));
+        assert!(json.contains("\"eventsAvailable\":true"));
+        let back: RecoveryCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.attempt_count, 1);
+    }
+
+    #[test]
+    fn stored_event_serde() {
+        let se = StoredEvent {
+            dedup_key: "s1:42".into(),
+            session_id: SessionId::new("s1"),
+            task_id: TaskId::new("t1"),
+            sequence: 42,
+            event_type: "message.delta".into(),
+            payload: serde_json::json!({"text": "hello"}),
+            correlation_id: Some(CorrelationId::new("cid-1")),
+            persisted_at: utc_now(),
+            has_side_effects: false,
+        };
+        let json = serde_json::to_string(&se).unwrap();
+        assert!(json.contains("\"dedupKey\":\"s1:42\""));
+        assert!(json.contains("\"hasSideEffects\":false"));
+        let back: StoredEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.dedup_key, "s1:42");
+        assert!(!back.has_side_effects);
+    }
+
+    #[test]
+    fn concurrency_limits_serde() {
+        let cl = ConcurrencyLimits {
+            max_concurrent_tasks: 4,
+            current_running: 2,
+            current_queued: 1,
+        };
+        let json = serde_json::to_string(&cl).unwrap();
+        assert!(json.contains("\"maxConcurrentTasks\":4"));
+        let back: ConcurrencyLimits = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_concurrent_tasks, 4);
     }
 }

@@ -5,14 +5,15 @@
 
 use crate::domain::error::DomainError;
 use crate::domain::types::{
-    AttachmentRecord, BootstrapSnapshot, Project, RecoveryItem, SessionBinding, Settings, Task,
-    WorktreeRecord,
+    AttachmentRecord, BootstrapSnapshot, ConcurrencyLimits, Project, RecoveryCandidate,
+    RecoveryDecision, RecoveryItem, SessionBinding, SessionSnapshot, Settings, StoredEvent, Task,
+    TaskSummary, WorktreeRecord,
 };
 
 /// Result alias used throughout the persistence layer.
 pub type RepoResult<T> = Result<T, DomainError>;
 
-/// The complete Repository Interface required by GAG-004.
+/// The complete Repository Interface required by GAG-004 + GAG-006.
 ///
 /// Implementations must use transactions for multi-entity writes and
 /// must not leak SQL state (connection handles, raw errors) to callers.
@@ -46,6 +47,10 @@ pub trait Repository: Send + Sync {
     fn update_task(&self, task: &Task) -> RepoResult<()>;
     /// Transactionally update task status (used by startup recovery).
     fn update_task_status(&self, id: &str, status: &str, reason: Option<&str>) -> RepoResult<()>;
+    /// GAG-006: List tasks in states implying a live process.
+    fn list_tasks_by_statuses(&self, statuses: &[&str]) -> RepoResult<Vec<Task>>;
+    /// GAG-006: Get lightweight task summaries for task center.
+    fn list_task_summaries(&self) -> RepoResult<Vec<TaskSummary>>;
 
     // ------------------------------------------------------------------
     // Session Bindings
@@ -56,6 +61,55 @@ pub trait Repository: Send + Sync {
     fn get_binding_by_session(&self, session_id: &str) -> RepoResult<Option<SessionBinding>>;
     fn update_binding(&self, binding: &SessionBinding) -> RepoResult<()>;
     fn list_active_bindings(&self) -> RepoResult<Vec<SessionBinding>>;
+    /// GAG-006: Increment attempt_number for a session binding.
+    fn increment_binding_attempt(&self, task_id: &str) -> RepoResult<u32>;
+
+    // ------------------------------------------------------------------
+    // GAG-006: Session Events
+    // ------------------------------------------------------------------
+
+    /// Append a session event with deduplication. Returns Ok(true) if
+    /// inserted, Ok(false) if the dedup_key already existed (idempotent).
+    fn append_event(&self, event: &StoredEvent) -> RepoResult<bool>;
+
+    /// Get events for a session after a given sequence (cursor).
+    fn get_events_after(
+        &self,
+        session_id: &str,
+        after_seq: u64,
+        limit: u32,
+    ) -> RepoResult<Vec<StoredEvent>>;
+
+    /// Get events for a specific attempt within a session.
+    fn get_events_for_attempt(
+        &self,
+        session_id: &str,
+        attempt_number: u32,
+    ) -> RepoResult<Vec<StoredEvent>>;
+
+    /// Get the highest sequence number for a session.
+    fn get_max_sequence(&self, session_id: &str) -> RepoResult<Option<u64>>;
+
+    /// GAG-006: Get session snapshot for Renderer reconnection.
+    fn get_session_snapshot(
+        &self,
+        task_id: &str,
+        session_id: &str,
+        event_limit: u32,
+    ) -> RepoResult<SessionSnapshot>;
+
+    // ------------------------------------------------------------------
+    // GAG-006: Recovery Candidates
+    // ------------------------------------------------------------------
+
+    /// List tasks that were interrupted and are candidates for recovery.
+    fn list_recovery_candidates(&self) -> RepoResult<Vec<RecoveryCandidate>>;
+
+    /// Apply a recovery decision (resume or archive).
+    fn apply_recovery_decision(&self, decision: &RecoveryDecision) -> RepoResult<()>;
+
+    /// Get current concurrency limits snapshot.
+    fn get_concurrency_limits(&self, max_concurrent: u32) -> RepoResult<ConcurrencyLimits>;
 
     // ------------------------------------------------------------------
     // Worktrees
