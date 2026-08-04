@@ -22,7 +22,7 @@ pub mod state;
 
 // Re-export the most commonly used types at the module root.
 pub use config::{RuntimeConfig, RuntimeHandle, RuntimeProbeResult, WorkspaceContext};
-pub use events::{AgentEvent, EventMeta, Sequence, TimestampedEvent};
+pub use events::{AgentEvent, AssistantDeltaPayload, EventMeta, Sequence, TimestampedEvent};
 pub use requests::{ClientRequest, SendAck};
 pub use runtime::AgentRuntimeImpl;
 pub use state::{transition, RuntimeState, RuntimeTransition};

@@ -4,6 +4,7 @@ pub mod domain;
 pub mod modules {
     pub mod agent_runtime;
     pub mod persistence;
+    pub mod task_runtime;
 }
 pub mod adapters {
     pub mod grok_acp;

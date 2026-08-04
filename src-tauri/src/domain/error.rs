@@ -42,6 +42,14 @@ pub mod codes {
     pub const DOMAIN_ILLEGAL_TRANSITION: &str = "DOMAIN_ILLEGAL_TRANSITION";
     pub const DOMAIN_TASK_NOT_FOUND: &str = "DOMAIN_TASK_NOT_FOUND";
     pub const DOMAIN_WORKTREE_NOT_FOUND: &str = "DOMAIN_WORKTREE_NOT_FOUND";
+
+    // GAG-006: Concurrency & recovery errors
+    pub const CONCURRENCY_LIMIT_EXCEEDED: &str = "CONCURRENCY_LIMIT_EXCEEDED";
+    pub const EVENT_DUPLICATE: &str = "EVENT_DUPLICATE";
+    pub const EVENT_GAP_DETECTED: &str = "EVENT_GAP_DETECTED";
+    pub const EVENT_REPLAY_BLOCKED: &str = "EVENT_REPLAY_BLOCKED";
+    pub const RECOVERY_NO_SESSION: &str = "RECOVERY_NO_SESSION";
+    pub const RECOVERY_ALREADY_RESUMED: &str = "RECOVERY_ALREADY_RESUMED";
 }
 
 // ---------------------------------------------------------------------------

@@ -98,6 +98,8 @@ pub fn bootstrap_impl(repo: &dyn Repository, db_init_error: Option<&str>) -> Boo
             settings: domain_snap.settings,
             recovery_performed: domain_snap.recovery_performed,
             tasks_interrupted: domain_snap.tasks_interrupted,
+            recovery_candidates: domain_snap.recovery_candidates,
+            concurrency: domain_snap.concurrency,
         },
         Err(e) => {
             eprintln!(
@@ -148,6 +150,8 @@ fn empty_bootstrap() -> BootstrapSnapshot {
         settings: vec![],
         recovery_performed: false,
         tasks_interrupted: 0,
+        recovery_candidates: vec![],
+        concurrency: None,
     }
 }
 
@@ -173,6 +177,9 @@ pub struct BootstrapSnapshot {
     pub settings: Vec<domain::types::Settings>,
     pub recovery_performed: bool,
     pub tasks_interrupted: u32,
+    // GAG-006: Recovery candidates and concurrency
+    pub recovery_candidates: Vec<domain::types::RecoveryCandidate>,
+    pub concurrency: Option<domain::types::ConcurrencyLimits>,
 }
 
 #[derive(Debug, Serialize)]
@@ -369,6 +376,8 @@ fn task_create(
         created_at: now.clone(),
         updated_at: now,
         interrupt_reason: None,
+        interrupted_at: None,
+        attempt_count: 1,
     };
 
     match repo.create_task(&task) {
