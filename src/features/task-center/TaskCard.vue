@@ -21,36 +21,37 @@ const emit = defineEmits<{
 const presentation = () => presentTaskStatus(props.task.status);
 const caps = () => capabilitiesForStatus(props.task.status);
 
-function onActivate(): void {
+function onOpen(): void {
   emit("open", props.task.id);
-}
-
-function onKeydown(event: KeyboardEvent): void {
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    onActivate();
-  }
 }
 </script>
 
 <template>
+  <!--
+    Card is a list article, not role=button. Open is a dedicated control so
+    Cancel/Recover are not nested interactive descendants of another control.
+  -->
   <article
     class="task-card"
     :class="{ 'is-selected': selected, 'is-error': !!task.localError }"
-    role="button"
-    tabindex="0"
-    :aria-selected="selected || undefined"
+    :aria-current="selected ? 'true' : undefined"
     :aria-label="`${task.title}，${presentation().label}`"
     :data-task-id="task.id"
     :data-status="task.status"
-    @click="onActivate"
-    @keydown="onKeydown"
   >
     <div class="task-card-main">
       <StatusIcon :status="presentation().icon" :label="presentation().label" />
       <div class="task-card-body">
         <div class="task-card-title-row">
-          <h3 class="task-title">{{ task.title }}</h3>
+          <button
+            type="button"
+            class="task-open"
+            data-testid="task-open"
+            :aria-label="`打开任务 ${task.title}`"
+            @click="onOpen"
+          >
+            <h3 class="task-title">{{ task.title }}</h3>
+          </button>
           <Badge v-if="task.status === 'waiting_permission'" tone="warning">待处理</Badge>
           <Badge v-else-if="task.hasLiveSession" tone="info">会话中</Badge>
         </div>
@@ -59,7 +60,9 @@ function onKeydown(event: KeyboardEvent): void {
           <span aria-hidden="true">·</span>
           <span>{{ formatRelative(task.updatedAt) }}</span>
           <span aria-hidden="true">·</span>
-          <span>持续 {{ formatDuration(task.createdAt, task.updatedAt) }}</span>
+          <span>
+            持续 {{ formatDuration(task.createdAt, task.updatedAt, Date.now(), task.status) }}
+          </span>
         </p>
         <p v-if="task.phase || task.latestActivity" class="task-activity">
           <span v-if="task.phase">{{ task.phase }}</span>
@@ -74,7 +77,7 @@ function onKeydown(event: KeyboardEvent): void {
         <p v-if="task.localError" class="task-local-error" role="alert">{{ task.localError }}</p>
       </div>
     </div>
-    <div class="task-card-actions" @click.stop>
+    <div class="task-card-actions">
       <Button
         v-if="caps().canCancel"
         variant="ghost"
@@ -112,15 +115,10 @@ function onKeydown(event: KeyboardEvent): void {
   background: var(--ctp-mantle);
   border: 1px solid var(--ctp-surface0);
   border-radius: var(--radius-card);
-  cursor: pointer;
 }
 .task-card:hover {
   border-color: var(--ctp-surface1);
   background: var(--ctp-surface0);
-}
-.task-card:focus-visible {
-  outline: 2px solid var(--ctp-mauve);
-  outline-offset: 2px;
 }
 .task-card.is-selected {
   border-color: var(--ctp-mauve);
@@ -145,6 +143,20 @@ function onKeydown(event: KeyboardEvent): void {
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
+}
+.task-open {
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.task-open:focus-visible {
+  outline: 2px solid var(--ctp-mauve);
+  outline-offset: 2px;
 }
 .task-title {
   margin: 0;

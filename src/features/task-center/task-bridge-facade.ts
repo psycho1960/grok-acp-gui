@@ -13,6 +13,7 @@ import type {
   TypedDesktopEvent,
   Unsubscribe,
   WorktreeRecord,
+  WorkspaceKind,
 } from "../../bridge/types";
 import type { TaskViewModel } from "./types";
 import { isKnownTaskStatus } from "./status-map";
@@ -20,7 +21,10 @@ import { isKnownTaskStatus } from "./status-map";
 export interface ListTasksResult {
   tasks: TaskViewModel[];
   projects: Project[];
-  /** Bootstrap wall-clock marker used as a soft version. */
+  /**
+   * Monotonic list generation stamped *before* bootstrap await so concurrent
+   * callers cannot let a slower older response win by finishing last.
+   */
   version: number;
   refreshedAt: string;
   ready: boolean;
@@ -30,7 +34,8 @@ export interface ListTasksResult {
 export type TaskCenterBridgeEvent =
   | { kind: "task.snapshot"; event: Extract<TypedDesktopEvent, { type: "task.snapshot" }> }
   | { kind: "task.state"; event: Extract<TypedDesktopEvent, { type: "task.state" }> }
-  | { kind: "activity.updated"; event: Extract<TypedDesktopEvent, { type: "activity.updated" }> };
+  | { kind: "activity.updated"; event: Extract<TypedDesktopEvent, { type: "activity.updated" }> }
+  | { kind: "runtime.updated"; event: Extract<TypedDesktopEvent, { type: "runtime.updated" }> };
 
 export interface TaskCenterFacade {
   listTasks(): Promise<ListTasksResult>;
@@ -57,6 +62,10 @@ function worktreeFor(
   taskId: TaskId,
 ): WorktreeRecord | undefined {
   return worktrees?.find((w) => w.taskId === taskId);
+}
+
+function isWorkspaceKind(value: unknown): value is WorkspaceKind {
+  return value === "worktree" || value === "readonly" || value === "direct";
 }
 
 /** Build a view model from a Task + bootstrap context. Never invents status. */
@@ -105,7 +114,8 @@ export function mapBootstrapToTasks(snapshot: BootstrapSnapshot): TaskViewModel[
 
 /**
  * Parse task.snapshot payload. Missing/invalid shape → compatibility error,
- * never invent domain state.
+ * never invent domain state. Incomplete items without prior state are skipped
+ * with localError only when a previous task can host the notice.
  */
 export function parseSnapshotTasks(
   payload: unknown,
@@ -118,7 +128,6 @@ export function parseSnapshotTasks(
   const record = payload as Record<string, unknown>;
   const rawTasks = record.tasks;
   if (!Array.isArray(rawTasks)) {
-    // GAG-003 types tasks as unknown — tolerate empty object
     if (rawTasks == null) return { tasks: [] };
     return { error: "task.snapshot.tasks 不是数组" };
   }
@@ -130,39 +139,50 @@ export function parseSnapshotTasks(
     if (typeof t.id !== "string" || typeof t.projectId !== "string") {
       continue;
     }
+    const id = t.id as TaskId;
+    const prev = previous.get(id);
+
     if (typeof t.status !== "string" || !isKnownTaskStatus(t.status)) {
-      const prev = previous.get(t.id as TaskId);
       if (prev) {
         out.push({
           ...prev,
           localError: "任务状态字段不兼容，已保留上次已知状态",
         });
       }
+      // No prior state and unknown status: skip rather than invent.
       continue;
     }
-    const prev = previous.get(t.id as TaskId);
+
+    // Required fields: title, workspaceKind, createdAt, updatedAt — only from payload or prior.
+    const title = typeof t.title === "string" ? t.title : prev?.title;
+    const workspaceKind = isWorkspaceKind(t.workspaceKind)
+      ? t.workspaceKind
+      : prev?.workspaceKind;
+    const createdAt = typeof t.createdAt === "string" ? t.createdAt : prev?.createdAt;
+    const updatedAt = typeof t.updatedAt === "string" ? t.updatedAt : prev?.updatedAt;
+
+    if (!title || !workspaceKind || !createdAt || !updatedAt) {
+      if (prev) {
+        out.push({
+          ...prev,
+          localError: "任务快照字段不完整，已保留上次已知状态",
+        });
+      }
+      // Incomplete without prior: skip — do not invent epoch/title/kind.
+      continue;
+    }
+
     const task: Task = {
-      id: t.id as Task["id"],
+      id: id as Task["id"],
       projectId: t.projectId as Task["projectId"],
-      title: typeof t.title === "string" ? t.title : prev?.title ?? "(未命名任务)",
+      title,
       status: t.status,
-      workspaceKind:
-        t.workspaceKind === "worktree" ||
-        t.workspaceKind === "readonly" ||
-        t.workspaceKind === "direct"
-          ? t.workspaceKind
-          : prev?.workspaceKind ?? "worktree",
+      workspaceKind,
       mode: typeof t.mode === "string" ? t.mode : prev?.mode,
       model: typeof t.model === "string" ? t.model : prev?.model,
       reasoning: typeof t.reasoning === "string" ? t.reasoning : undefined,
-      createdAt:
-        typeof t.createdAt === "string"
-          ? t.createdAt
-          : prev?.createdAt ?? new Date(0).toISOString(),
-      updatedAt:
-        typeof t.updatedAt === "string"
-          ? t.updatedAt
-          : prev?.updatedAt ?? new Date(0).toISOString(),
+      createdAt,
+      updatedAt,
       interruptReason:
         typeof t.interruptReason === "string"
           ? t.interruptReason
@@ -184,13 +204,14 @@ export function createTaskCenterFacade(bridge: DesktopBridge): TaskCenterFacade 
 
   return {
     async listTasks(): Promise<ListTasksResult> {
+      // Stamp generation before I/O so a slower older call cannot win.
+      const version = ++listVersion;
       try {
         const snapshot = await bridge.bootstrap();
-        listVersion += 1;
         return {
           tasks: mapBootstrapToTasks(snapshot),
           projects: snapshot.projects ?? [],
-          version: listVersion,
+          version,
           refreshedAt: new Date().toISOString(),
           ready: snapshot.ready,
           bridgeError: snapshot.dbError,
@@ -199,7 +220,7 @@ export function createTaskCenterFacade(bridge: DesktopBridge): TaskCenterFacade 
         return {
           tasks: [],
           projects: [],
-          version: listVersion,
+          version,
           refreshedAt: new Date().toISOString(),
           ready: false,
           bridgeError:
@@ -233,6 +254,8 @@ export function createTaskCenterFacade(bridge: DesktopBridge): TaskCenterFacade 
           listener({ kind: "task.state", event });
         } else if (event.type === "activity.updated") {
           listener({ kind: "activity.updated", event });
+        } else if (event.type === "runtime.updated") {
+          listener({ kind: "runtime.updated", event });
         }
       });
     },

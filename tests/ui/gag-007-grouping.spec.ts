@@ -11,8 +11,10 @@ import {
   buildTaskCenterHash,
   parseTaskCenterHash,
 } from "../../src/features/task-center/hash-route";
+import { buildGroupedListRows } from "../../src/features/task-center/list-rows";
 import type { TaskViewModel } from "../../src/features/task-center/types";
 import { DEFAULT_FILTERS } from "../../src/features/task-center/types";
+import { formatDuration } from "../../src/features/task-center/format";
 
 function task(
   partial: Partial<TaskViewModel> & Pick<TaskViewModel, "id" | "status" | "title" | "updatedAt">,
@@ -68,6 +70,30 @@ describe("GAG-007 grouping / sort / filter", () => {
     expect(sorted.map((t) => t.id)).toEqual(["w", "r1", "r2", "c", "i"]);
   });
 
+  it("stable-sorts by Task ID when group and updatedAt are equal", () => {
+    const sameTime = [
+      task({
+        id: "z" as TaskId,
+        title: "Z",
+        status: "running",
+        updatedAt: "2026-04-01T12:00:00.000Z",
+      }),
+      task({
+        id: "a" as TaskId,
+        title: "A",
+        status: "running",
+        updatedAt: "2026-04-01T12:00:00.000Z",
+      }),
+      task({
+        id: "m" as TaskId,
+        title: "M",
+        status: "running",
+        updatedAt: "2026-04-01T12:00:00.000Z",
+      }),
+    ];
+    expect([...sameTime].sort(compareTasks).map((t) => t.id)).toEqual(["a", "m", "z"]);
+  });
+
   it("groups into the four Task Center buckets", () => {
     const groups = groupTasks(sample);
     expect(groups.map((g) => g.id)).toEqual([
@@ -84,6 +110,17 @@ describe("GAG-007 grouping / sort / filter", () => {
       completed: 1,
       failed_interrupted: 1,
     });
+  });
+
+  it("builds grouped list rows with headers", () => {
+    const rows = buildGroupedListRows(groupTasks(sample));
+    expect(rows.filter((r) => r.kind === "header").map((r) => r.groupId)).toEqual([
+      "needs_attention",
+      "running",
+      "completed",
+      "failed_interrupted",
+    ]);
+    expect(rows.filter((r) => r.kind === "task")).toHaveLength(5);
   });
 
   it("filters by query, status, project, and group", () => {
@@ -129,23 +166,50 @@ describe("GAG-007 grouping / sort / filter", () => {
       ),
     ).toBe(false);
   });
+
+  it("uses now as duration end for non-terminal statuses", () => {
+    const created = "2026-04-01T10:00:00.000Z";
+    const updated = "2026-04-01T10:01:00.000Z";
+    const now = Date.parse("2026-04-01T12:00:00.000Z");
+    const running = formatDuration(created, updated, now, "running");
+    const merged = formatDuration(created, updated, now, "merged");
+    expect(running).toBe("2h");
+    expect(merged).toBe("1m");
+  });
 });
 
 describe("GAG-007 hash deep links", () => {
-  it("parses and builds task-center routes", () => {
+  it("parses and builds task-center routes including group query", () => {
     expect(parseTaskCenterHash("#task-center")).toEqual({
       active: true,
       taskId: null,
+      group: null,
     });
     expect(parseTaskCenterHash("#task-center/task-run-1")).toEqual({
       active: true,
       taskId: "task-run-1",
+      group: null,
+    });
+    expect(parseTaskCenterHash("#task-center?group=running")).toEqual({
+      active: true,
+      taskId: null,
+      group: "running",
+    });
+    expect(parseTaskCenterHash("#task-center/task-1?group=needs_attention")).toEqual({
+      active: true,
+      taskId: "task-1",
+      group: "needs_attention",
     });
     expect(parseTaskCenterHash("#shell")).toEqual({
       active: false,
       taskId: null,
+      group: null,
     });
     expect(buildTaskCenterHash()).toBe("#task-center");
     expect(buildTaskCenterHash("task-1")).toBe("#task-center/task-1");
+    expect(buildTaskCenterHash(null, "running")).toBe("#task-center?group=running");
+    expect(buildTaskCenterHash("task-1", "completed")).toBe(
+      "#task-center/task-1?group=completed",
+    );
   });
 });

@@ -8,9 +8,15 @@ const sources = Object.fromEntries(
   await Promise.all(
     files
       .filter((f) => f.endsWith(".ts") || f.endsWith(".vue"))
-      .map(async (f) => [f, await readFile(`${featureRoot}/${f}`, "utf8")]),
+      .map(async (f) => [f.replace(/\\/g, "/"), await readFile(`${featureRoot}/${f}`, "utf8")]),
   ),
 );
+
+function src(name) {
+  const hit = Object.entries(sources).find(([k]) => k.endsWith(name));
+  assert.ok(hit, `missing ${name}`);
+  return hit[1];
+}
 
 test("GAG-007 provides Task Center feature modules", () => {
   for (const required of [
@@ -23,6 +29,7 @@ test("GAG-007 provides Task Center feature modules", () => {
     "grouping.ts",
     "status-map.ts",
     "hash-route.ts",
+    "list-rows.ts",
     "index.ts",
   ]) {
     assert.ok(
@@ -33,7 +40,7 @@ test("GAG-007 provides Task Center feature modules", () => {
 });
 
 test("GAG-007 facade maps onto existing DesktopBridge commands/events", () => {
-  const facade = sources["task-bridge-facade.ts"];
+  const facade = src("task-bridge-facade.ts");
   assert.match(facade, /task\.open/);
   assert.match(facade, /turn\.cancel/);
   assert.match(facade, /task\.snapshot/);
@@ -59,17 +66,19 @@ test("GAG-007 does not use v-html for untrusted task text", () => {
 });
 
 test("GAG-007 store keeps version/seq guards and non-optimistic cancel", () => {
-  const store = sources["task-center-store.ts"];
-  assert.match(store, /maxSeq/);
+  const store = src("task-center-store.ts");
   assert.match(store, /version/);
   assert.match(store, /stale/);
   assert.match(store, /cancelTask/);
-  assert.match(store, /turn\.cancel|facade\.cancelTask/);
+  assert.match(store, /detailRequestId/);
+  assert.match(store, /markStale/);
 });
 
-test("GAG-007 deep link helpers use hash task-center routes", async () => {
-  const hash = sources["hash-route.ts"];
+test("GAG-007 deep link helpers use hash task-center routes with group", async () => {
+  const hash = src("hash-route.ts");
   assert.match(hash, /#task-center/);
+  assert.match(hash, /group/);
   const app = await readFile("src/App.vue", "utf8");
   assert.match(app, /task-center|TaskCenterFixture/);
+  assert.match(app, /UI-ERROR-001|dbUnavailable/);
 });

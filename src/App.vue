@@ -10,39 +10,43 @@ import { parseTaskCenterHash } from "./features/task-center/hash-route";
 const isLoading = ref(true);
 const startupError = ref<string | null>(null);
 const bootstrapStatus = ref<BootstrapStatus | null>(null);
+/** True only when bootstrap threw (no Tauri host) — not when DB is unavailable. */
+const bootstrapThrew = ref(false);
 const routeHash = ref(typeof window !== "undefined" ? window.location.hash : "");
 
 function syncHash(): void {
   routeHash.value = window.location.hash;
 }
 
-const developmentRoute = computed(() =>
-  import.meta.env.DEV ? routeHash.value : routeHash.value,
-);
+const developmentRoute = computed(() => routeHash.value);
 
 const showUiKit = computed(() => developmentRoute.value === "#ui-kit");
 const showShellPreview = computed(() => developmentRoute.value === "#shell");
-const showTaskCenterFixture = computed(() => {
-  // Fixture path: always available for deep-link E2E and local UI without Tauri.
-  // Production Tauri path uses ShellView + real bridge after bootstrap.
-  const route = parseTaskCenterHash(routeHash.value);
-  if (!route.active) return false;
-  // Prefer fixture when not bootstrapped (DEV / no host). After bootstrap, ShellView hosts Task Center.
-  if (bootstrapStatus.value?.ready) return false;
-  return true;
-});
 
 // UI-ERROR-001: when the database is unavailable or corrupt the backend
-// returns `ready:false` with `dbError`. The Renderer must NOT render
-// ShellView in that case — otherwise persistence failures are hidden.
+// returns `ready:false` with `dbError`. Prefer this over fixture.
 const dbUnavailable = computed(
-  () => bootstrapStatus.value?.ready === false || !!bootstrapStatus.value?.dbError,
+  () =>
+    bootstrapStatus.value != null &&
+    (bootstrapStatus.value.ready === false || !!bootstrapStatus.value.dbError),
 );
 const dbErrorDetail = computed(
   () =>
     bootstrapStatus.value?.dbError ??
     "Application data is unavailable. Restart the application; if the problem persists, contact support.",
 );
+
+/**
+ * Fixture only when host is missing (bootstrap threw). Never mask UI-ERROR-001
+ * for ready===false / dbError responses.
+ */
+const showTaskCenterFixture = computed(() => {
+  const route = parseTaskCenterHash(routeHash.value);
+  if (!route.active) return false;
+  if (dbUnavailable.value) return false;
+  if (bootstrapStatus.value?.ready) return false;
+  return bootstrapThrew.value || bootstrapStatus.value == null;
+});
 
 onMounted(async () => {
   window.addEventListener("hashchange", syncHash);
@@ -52,13 +56,14 @@ onMounted(async () => {
     return;
   }
 
-  // Task-center hash: try bootstrap; on host failure fall back to fixture.
+  // Task-center hash: try bootstrap; fixture only if invoke throws (no host).
   if (parseTaskCenterHash(routeHash.value).active) {
     try {
       bootstrapStatus.value = await bootstrap();
+      bootstrapThrew.value = false;
     } catch {
-      // Browser / Playwright without Tauri — use TaskCenterFixture.
       bootstrapStatus.value = null;
+      bootstrapThrew.value = true;
     } finally {
       isLoading.value = false;
     }
@@ -67,8 +72,10 @@ onMounted(async () => {
 
   try {
     bootstrapStatus.value = await bootstrap();
+    bootstrapThrew.value = false;
   } catch (error) {
     startupError.value = error instanceof Error ? error.message : String(error);
+    bootstrapThrew.value = true;
   } finally {
     isLoading.value = false;
   }
@@ -82,7 +89,6 @@ onUnmounted(() => {
 <template>
   <UiKitFixture v-if="showUiKit" />
   <ShellView v-else-if="showShellPreview" />
-  <TaskCenterFixture v-else-if="showTaskCenterFixture && !isLoading" />
   <main v-else-if="isLoading" class="startup">
     <p role="status">正在启动 Grok ACP GUI…</p>
   </main>
@@ -92,6 +98,7 @@ onUnmounted(() => {
   <main v-else-if="dbUnavailable" class="startup">
     <ErrorState title="数据库不可用" :detail="dbErrorDetail" data-err="UI-ERROR-001" />
   </main>
+  <TaskCenterFixture v-else-if="showTaskCenterFixture" />
   <ShellView v-else :data-version="bootstrapStatus?.version" />
 </template>
 

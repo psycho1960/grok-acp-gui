@@ -1,4 +1,8 @@
 // GAG-007: Map TaskStatus enums to UI presentation — never parse labels.
+//
+// TaskCapabilities below are UI-only hints derived from TaskStatus enums.
+// They are NOT backend authorization. Replace with bridge-provided flags
+// when a later GAG exposes them.
 
 import type { TaskStatus } from "../../bridge/types";
 import type { TaskCapabilities, TaskGroupId } from "./types";

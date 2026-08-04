@@ -15,6 +15,8 @@ export {
   buildTaskCenterHash,
   applyTaskCenterHash,
 } from "./hash-route";
+export { buildGroupedListRows } from "./list-rows";
+export type { TaskListRow } from "./list-rows";
 export { createTaskCenterSeedSnapshot } from "./seed";
 export type {
   TaskViewModel,

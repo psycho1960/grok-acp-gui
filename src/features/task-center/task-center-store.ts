@@ -20,7 +20,7 @@ import {
   filterAndSortTasks,
   groupTasks,
 } from "./grouping";
-import { isKnownTaskStatus } from "./status-map";
+import { isKnownTaskStatus, presentTaskStatus } from "./status-map";
 import {
   DEFAULT_FILTERS,
   type TaskCenterFilters,
@@ -36,8 +36,8 @@ export const useTaskCenterStore = defineStore("task-center", () => {
   const errorMessage = ref<string | null>(null);
   const tasksById = shallowRef<Map<TaskId, TaskViewModel>>(new Map());
   const projects = shallowRef<Project[]>([]);
+  /** Highest applied list generation (from facade stamps). */
   const version = ref(0);
-  const maxSeq = ref(0);
   const refreshedAt = ref<string | null>(null);
   const filters = ref<TaskCenterFilters>({ ...DEFAULT_FILTERS });
   const selectedTaskId = ref<TaskId | null>(null);
@@ -49,6 +49,8 @@ export const useTaskCenterStore = defineStore("task-center", () => {
   let facade: TaskCenterFacade | null = null;
   let unsubscribe: (() => void) | null = null;
   let disposed = false;
+  /** Latest openDetail request id — prevents finally races. */
+  let detailRequestId = 0;
 
   const allTasks = computed(() => Array.from(tasksById.value.values()));
 
@@ -93,6 +95,8 @@ export const useTaskCenterStore = defineStore("task-center", () => {
 
   function bindFacade(bridge: DesktopBridge): TaskCenterFacade {
     facade = createTaskCenterFacade(bridge);
+    // New facade starts its generation at 0; reset so first list applies.
+    version.value = 0;
     return facade;
   }
 
@@ -111,11 +115,9 @@ export const useTaskCenterStore = defineStore("task-center", () => {
         handleBridgeEvent(evt);
       });
     } catch (error) {
-      loadState.value = tasksById.value.size > 0 ? "stale" : "error";
-      errorMessage.value =
-        error instanceof Error
-          ? error.message
-          : "无法订阅任务事件";
+      markStale(
+        error instanceof Error ? error.message : "无法订阅任务事件",
+      );
     }
   }
 
@@ -141,19 +143,20 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     const result = await facade.listTasks();
     if (disposed) return;
 
+    // Concurrent older response: generation stamped before await.
+    if (result.version < version.value) {
+      return;
+    }
+
     if (result.bridgeError && result.tasks.length === 0 && !result.ready) {
       if (tasksById.value.size > 0) {
-        loadState.value = "stale";
-        errorMessage.value = result.bridgeError;
+        markStale(result.bridgeError);
       } else {
         loadState.value = "error";
         errorMessage.value = result.bridgeError;
       }
-      return;
-    }
-
-    // Only accept equal-or-newer list versions.
-    if (result.version < version.value) {
+      // Still record generation so we do not re-apply older successes incorrectly.
+      version.value = result.version;
       return;
     }
 
@@ -188,13 +191,23 @@ export const useTaskCenterStore = defineStore("task-center", () => {
   }
 
   function handleBridgeEvent(evt: TaskCenterBridgeEvent): void {
-    if (evt.kind === "task.snapshot") {
-      const seq = evt.event.seq ?? 0;
-      if (seq < maxSeq.value) {
-        // Older snapshot must not overwrite newer state.
-        return;
+    if (evt.kind === "runtime.updated") {
+      const status = evt.event.payload?.status;
+      if (
+        typeof status === "string" &&
+        status !== "ready" &&
+        status !== "probing"
+      ) {
+        markStale(`运行时状态：${status}`);
       }
-      maxSeq.value = Math.max(maxSeq.value, seq);
+      return;
+    }
+
+    if (evt.kind === "task.snapshot") {
+      // Session-scoped seq is not globally comparable across tasks/sessions.
+      // Each task is guarded by its own lastSeq below.
+      const envelopeSeq = evt.event.seq ?? 0;
+      const envelopeTaskId = evt.event.taskId;
       const parsed = parseSnapshotTasks(
         evt.event.payload,
         projects.value,
@@ -202,34 +215,32 @@ export const useTaskCenterStore = defineStore("task-center", () => {
       );
       if (parsed.error) {
         errorMessage.value = parsed.error;
-        // Keep existing tasks; show soft compatibility notice.
         return;
       }
       if (parsed.tasks) {
-        // Merge: snapshot replaces listed tasks but keep unknown locals only if not full replace.
-        // Full list from snapshot is authoritative for listed IDs.
         const map = new Map(tasksById.value);
-        const seen = new Set<TaskId>();
         for (const task of parsed.tasks) {
           const old = map.get(task.id);
-          if (old && old.lastSeq > seq) continue;
+          // Per-task seq guard: drop stale updates for this task only.
+          if (old && old.lastSeq > envelopeSeq) continue;
+          // If snapshot is scoped to one taskId and this row is unrelated, still merge listed IDs.
+          if (
+            envelopeTaskId &&
+            parsed.tasks.length === 1 &&
+            task.id !== envelopeTaskId &&
+            old &&
+            old.lastSeq > envelopeSeq
+          ) {
+            continue;
+          }
           map.set(task.id, {
             ...task,
-            lastSeq: Math.max(task.lastSeq, seq),
+            lastSeq: Math.max(task.lastSeq, envelopeSeq),
             phase: task.phase ?? old?.phase,
             latestActivity: task.latestActivity ?? old?.latestActivity,
           });
-          seen.add(task.id);
         }
-        // When payload provides a full array, drop tasks absent from snapshot only if non-empty list.
-        if (parsed.tasks.length > 0) {
-          for (const id of Array.from(map.keys())) {
-            if (!seen.has(id)) {
-              // Keep terminal tasks not in active snapshot? Prefer keep — bootstrap is source for archive.
-              // Only update known IDs from event.
-            }
-          }
-        }
+        // Retention: only update IDs present in the snapshot payload; keep others.
         tasksById.value = map;
         if (loadState.value === "stale") loadState.value = "ready";
         announce("任务列表已更新");
@@ -244,7 +255,6 @@ export const useTaskCenterStore = defineStore("task-center", () => {
       if (existing && seq < existing.lastSeq) {
         return;
       }
-      maxSeq.value = Math.max(maxSeq.value, seq);
       const statusRaw = evt.event.payload?.status;
       if (typeof statusRaw !== "string" || !isKnownTaskStatus(statusRaw)) {
         if (existing) {
@@ -270,7 +280,8 @@ export const useTaskCenterStore = defineStore("task-center", () => {
               ? existing.interruptReason
               : existing.interruptReason,
         });
-        announce(`任务状态：${status}`);
+        const label = presentTaskStatus(status).label;
+        announce(`任务「${existing.title}」：${label}`);
       } else {
         // Unknown task — wait for list refresh; do not invent title/project.
         void refresh();
@@ -284,7 +295,6 @@ export const useTaskCenterStore = defineStore("task-center", () => {
       const existing = tasksById.value.get(taskId);
       if (!existing) return;
       if (seq < existing.lastSeq) return;
-      maxSeq.value = Math.max(maxSeq.value, seq);
       const detailText =
         typeof evt.event.payload?.detail === "string"
           ? evt.event.payload.detail
@@ -319,21 +329,25 @@ export const useTaskCenterStore = defineStore("task-center", () => {
   }
 
   async function openDetail(taskId: TaskId): Promise<void> {
+    const requestId = ++detailRequestId;
     selectedTaskId.value = taskId;
     const task = tasksById.value.get(taskId);
     if (!task) {
       detail.value = null;
+      if (requestId === detailRequestId) detailLoading.value = false;
       return;
     }
     detailLoading.value = true;
     detail.value = { task };
     if (!facade) {
-      detailLoading.value = false;
+      if (requestId === detailRequestId) detailLoading.value = false;
       return;
     }
     try {
       const result = await facade.getTaskSnapshot(taskId);
-      if (disposed || selectedTaskId.value !== taskId) return;
+      if (disposed || requestId !== detailRequestId || selectedTaskId.value !== taskId) {
+        return;
+      }
       if (result.success === "false") {
         detail.value = {
           task,
@@ -341,7 +355,6 @@ export const useTaskCenterStore = defineStore("task-center", () => {
         };
       } else {
         const data = result.data as TaskOpenResult;
-        // Enrich display only; never invent domain fields not returned.
         if (!data || typeof data !== "object" || !("taskId" in data)) {
           detail.value = {
             task,
@@ -356,20 +369,27 @@ export const useTaskCenterStore = defineStore("task-center", () => {
         }
       }
     } catch (error) {
-      if (disposed || selectedTaskId.value !== taskId) return;
+      if (disposed || requestId !== detailRequestId || selectedTaskId.value !== taskId) {
+        return;
+      }
       detail.value = {
         task,
         compatibilityError:
           error instanceof Error ? error.message : String(error),
       };
     } finally {
-      detailLoading.value = false;
+      // Only the latest in-flight open owns detailLoading.
+      if (requestId === detailRequestId) {
+        detailLoading.value = false;
+      }
     }
   }
 
   function closeDetail(): void {
+    detailRequestId += 1;
     selectedTaskId.value = null;
     detail.value = null;
+    detailLoading.value = false;
   }
 
   /**
@@ -384,7 +404,6 @@ export const useTaskCenterStore = defineStore("task-center", () => {
       const result = await facade.cancelTask(taskId);
       if (result.success === "false") {
         const msg = result.error.message;
-        // Terminal / harmless: surface message, do not invent status.
         announce(msg, true);
         return { ok: false, message: msg };
       }
@@ -417,7 +436,6 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     tasksById,
     projects,
     version,
-    maxSeq,
     refreshedAt,
     filters,
     selectedTaskId,
@@ -442,6 +460,7 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     closeDetail,
     cancelTask,
     handleBridgeEvent,
+    announce,
     __setTasksForTest,
     __setFacadeForTest,
   };

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, h, onBeforeUnmount, onMounted, ref } from "vue";
 import AppShell from "./AppShell.vue";
 import Badge from "../shared/ui/Badge.vue";
 import Button from "../shared/ui/Button.vue";
@@ -28,8 +28,6 @@ const showTaskCenter = computed(() => {
 
 function resolveBridge(): DesktopBridge {
   try {
-    // Probe: createDesktopBridge always constructs; methods throw without Tauri.
-    // Prefer real bridge when host present.
     if (
       typeof window !== "undefined" &&
       ("__TAURI_INTERNALS__" in window || "__TAURI__" in window)
@@ -58,15 +56,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("hashchange", onHashChange);
 });
 
+/** Encode group in hash so focus survives mount races (no CustomEvent). */
 function goTaskCenter(group?: TaskGroupId): void {
-  applyTaskCenterHash(null);
-  if (group) {
-    // Group focus is applied inside TaskCenter via hash query is not required;
-    // left nav emits custom event through location state alternative:
-    window.dispatchEvent(
-      new CustomEvent("task-center:focus-group", { detail: { group } }),
-    );
-  }
+  applyTaskCenterHash(null, group ?? null);
 }
 
 const left = computed(() =>
@@ -140,9 +132,6 @@ const inspector = computed(() =>
 );
 
 const statusBar = computed(() => h("span", "未选择项目 · 桌面壳已就绪"));
-
-// Keep watch for future route modes without unused lint.
-watch(showTaskCenter, () => undefined);
 </script>
 
 <template>

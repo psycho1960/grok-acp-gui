@@ -13,16 +13,17 @@ import {
   applyTaskCenterHash,
   parseTaskCenterHash,
 } from "./hash-route";
+import { buildGroupedListRows, type TaskListRow } from "./list-rows";
 import TaskCard from "./TaskCard.vue";
 import TaskDetailDrawer from "./TaskDetailDrawer.vue";
 import { useTaskCenterStore } from "./task-center-store";
-import type { TaskGroupId, TaskViewModel, UpdatedWithin } from "./types";
+import type { TaskGroupId, UpdatedWithin } from "./types";
 import { TASK_GROUP_LABELS } from "./types";
 import VirtualList from "./VirtualList.vue";
 
 const props = defineProps<{
   bridge: DesktopBridge;
-  /** When true, sync selection with location.hash (#task-center[/id]). */
+  /** When true, sync selection with location.hash (#task-center[/id][?group=]). */
   syncHash?: boolean;
 }>();
 
@@ -31,7 +32,8 @@ const confirmCancelOpen = ref(false);
 const confirmCancelTaskId = ref<TaskId | null>(null);
 const cancelFeedback = ref<string | null>(null);
 
-const ITEM_HEIGHT = 108;
+/** Fixed row height for headers + cards (allows localError line without clipping). */
+const ITEM_HEIGHT = 120;
 
 const statusOptions = [
   { value: "all", label: "全部状态" },
@@ -61,7 +63,7 @@ const projectFilterOptions = computed(() => [
   ...store.projectOptions,
 ]);
 
-const flatVisible = computed(() => store.visibleTasks);
+const listRows = computed(() => buildGroupedListRows(store.groups));
 const totalCount = computed(() => store.allTasks.length);
 const visibleCount = computed(() => store.visibleTasks.length);
 const drawerOpen = computed(() => store.selectedTaskId != null);
@@ -78,6 +80,10 @@ const isFilteredEmpty = computed(
 );
 const isError = computed(() => store.loadState === "error");
 const isStale = computed(() => store.loadState === "stale");
+
+function rowKey(item: TaskListRow): string {
+  return item.key;
+}
 
 function onQuery(value: string): void {
   store.setFilters({ query: value });
@@ -102,26 +108,35 @@ function onUpdated(value: string): void {
 }
 
 function onGroup(value: string): void {
-  store.setFilters({
-    group: (value === "all" ? "all" : value) as TaskGroupId | "all",
-  });
+  const group = (value === "all" ? "all" : value) as TaskGroupId | "all";
+  store.setFilters({ group });
+  if (props.syncHash !== false) {
+    applyTaskCenterHash(store.selectedTaskId, group === "all" ? null : group);
+  }
 }
 
 function focusGroup(group: TaskGroupId | "all"): void {
   store.setFilters({ group });
+  if (props.syncHash !== false) {
+    applyTaskCenterHash(store.selectedTaskId, group === "all" ? null : group);
+  }
 }
 
 async function openTask(taskId: string): Promise<void> {
   await store.openDetail(taskId as TaskId);
   if (props.syncHash !== false) {
-    applyTaskCenterHash(taskId);
+    const group =
+      store.filters.group !== "all" ? store.filters.group : null;
+    applyTaskCenterHash(taskId, group);
   }
 }
 
 function closeDrawer(): void {
   store.closeDetail();
   if (props.syncHash !== false) {
-    applyTaskCenterHash(null);
+    const group =
+      store.filters.group !== "all" ? store.filters.group : null;
+    applyTaskCenterHash(null, group);
   }
 }
 
@@ -150,10 +165,13 @@ function requestRecover(taskId: string): void {
   void openTask(taskId);
 }
 
-function onHashChange(): void {
+function applyRouteFromHash(): void {
   if (props.syncHash === false) return;
   const route = parseTaskCenterHash(window.location.hash);
   if (!route.active) return;
+  if (route.group) {
+    store.setFilters({ group: route.group });
+  }
   if (route.taskId) {
     if (store.selectedTaskId !== route.taskId) {
       void store.openDetail(route.taskId as TaskId);
@@ -163,26 +181,19 @@ function onHashChange(): void {
   }
 }
 
-function onFocusGroup(event: Event): void {
-  const detail = (event as CustomEvent<{ group?: TaskGroupId }>).detail;
-  if (detail?.group) {
-    store.setFilters({ group: detail.group });
-  } else {
-    store.setFilters({ group: "all" });
-  }
+function onHashChange(): void {
+  applyRouteFromHash();
 }
 
 onMounted(async () => {
   await store.attach(props.bridge);
-  window.addEventListener("task-center:focus-group", onFocusGroup);
   if (props.syncHash !== false) {
     window.addEventListener("hashchange", onHashChange);
-    onHashChange();
+    applyRouteFromHash();
   }
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("task-center:focus-group", onFocusGroup);
   window.removeEventListener("hashchange", onHashChange);
   store.detach();
 });
@@ -192,6 +203,7 @@ watch(
   async (bridge) => {
     store.detach();
     await store.attach(bridge);
+    applyRouteFromHash();
   },
 );
 </script>
@@ -251,6 +263,7 @@ watch(
       <div class="group-chips" role="toolbar" aria-label="任务分组">
         <Button
           :variant="store.filters.group === 'all' ? 'primary' : 'ghost'"
+          data-testid="group-chip-all"
           @click="focusGroup('all')"
         >
           全部
@@ -260,6 +273,7 @@ watch(
           :key="id"
           :variant="store.filters.group === id ? 'primary' : 'ghost'"
           :data-group="id"
+          :data-testid="`group-chip-${id}`"
           @click="focusGroup(id as TaskGroupId)"
         >
           {{ label }} ({{ store.counts[id as TaskGroupId] }})
@@ -316,16 +330,30 @@ watch(
 
       <VirtualList
         v-else
-        :items="flatVisible"
+        :items="listRows"
         :item-height="ITEM_HEIGHT"
+        :get-key="rowKey"
         aria-label="任务列表"
         data-testid="task-list"
       >
         <template #default="{ item }">
+          <div
+            v-if="(item as TaskListRow).kind === 'header'"
+            class="group-header"
+            :data-group-header="(item as Extract<TaskListRow, { kind: 'header' }>).groupId"
+          >
+            <h2>
+              {{ (item as Extract<TaskListRow, { kind: 'header' }>).label }}
+              <span class="group-count">
+                ({{ (item as Extract<TaskListRow, { kind: 'header' }>).count }})
+              </span>
+            </h2>
+          </div>
           <TaskCard
-            :task="(item as TaskViewModel)"
-            :selected="store.selectedTaskId === (item as TaskViewModel).id"
-            :cancel-pending="store.cancelPendingId === (item as TaskViewModel).id"
+            v-else
+            :task="(item as Extract<TaskListRow, { kind: 'task' }>).task"
+            :selected="store.selectedTaskId === (item as Extract<TaskListRow, { kind: 'task' }>).task.id"
+            :cancel-pending="store.cancelPendingId === (item as Extract<TaskListRow, { kind: 'task' }>).task.id"
             @open="openTask"
             @cancel="requestCancel"
             @recover="requestRecover"
@@ -334,7 +362,14 @@ watch(
       </VirtualList>
     </div>
 
-    <div class="sr-live" aria-live="polite" aria-atomic="true">{{ store.liveMessage }}</div>
+    <div
+      class="sr-live"
+      aria-live="polite"
+      aria-atomic="true"
+      data-testid="task-live-region"
+    >
+      {{ store.liveMessage }}
+    </div>
 
     <TaskDetailDrawer
       :open="drawerOpen"
@@ -352,7 +387,7 @@ watch(
       description="取消会请求停止当前 Turn。已终态任务可能无法取消。"
       @update:model-value="confirmCancelOpen = $event"
     >
-      <p v-if="cancelFeedback" role="alert">{{ cancelFeedback }}</p>
+      <p v-if="cancelFeedback" role="alert" data-testid="cancel-feedback">{{ cancelFeedback }}</p>
       <p v-else>确定要取消该任务吗？此操作等待后端确认，不会乐观更新状态。</p>
       <template #actions>
         <Button variant="ghost" @click="confirmCancelOpen = false">返回</Button>
@@ -442,6 +477,25 @@ watch(
 .state-block p {
   margin: 0;
   color: var(--ctp-subtext0);
+}
+.group-header {
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-1) var(--space-1);
+}
+.group-header h2 {
+  margin: 0;
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.group-count {
+  color: var(--ctp-overlay0);
+  font-weight: 500;
 }
 .sr-live {
   position: absolute;

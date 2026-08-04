@@ -1,10 +1,36 @@
 // GAG-007: Presentation formatting helpers (duration, relative time).
 
-export function formatDuration(createdAt: string, updatedAt: string, nowMs = Date.now()): string {
+import type { TaskStatus } from "../../bridge/types";
+
+const TERMINAL_STATUSES: ReadonlySet<TaskStatus> = new Set([
+  "merged",
+  "archived",
+  "interrupted",
+]);
+
+export function isTerminalStatus(status: TaskStatus): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
+/**
+ * Duration from createdAt. For non-terminal tasks, use nowMs as end so
+ * long-running tasks do not freeze at last updatedAt.
+ */
+export function formatDuration(
+  createdAt: string,
+  updatedAt: string,
+  nowMs = Date.now(),
+  status?: TaskStatus,
+): string {
   const start = Date.parse(createdAt);
-  const end = Date.parse(updatedAt);
   if (!Number.isFinite(start)) return "—";
-  const endMs = Number.isFinite(end) ? Math.max(end, start) : nowMs;
+  let endMs: number;
+  if (status && !isTerminalStatus(status)) {
+    endMs = nowMs;
+  } else {
+    const end = Date.parse(updatedAt);
+    endMs = Number.isFinite(end) ? Math.max(end, start) : nowMs;
+  }
   const seconds = Math.max(0, Math.floor((endMs - start) / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);

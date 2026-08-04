@@ -8,8 +8,14 @@ const props = withDefaults(
     /** Extra rows rendered above/below the viewport. */
     overscan?: number;
     ariaLabel?: string;
+    /** Stable key for each item — prefer id over index. */
+    getKey?: (item: T, index: number) => string | number;
   }>(),
-  { overscan: 6, ariaLabel: "任务列表" },
+  {
+    overscan: 6,
+    ariaLabel: "任务列表",
+    getKey: undefined,
+  },
 );
 
 const root = ref<HTMLElement | null>(null);
@@ -30,11 +36,16 @@ const range = computed(() => {
 
 const windowItems = computed(() => {
   const { start, end } = range.value;
-  return props.items.slice(start, end).map((item, offset) => ({
-    item,
-    index: start + offset,
-    top: (start + offset) * props.itemHeight,
-  }));
+  return props.items.slice(start, end).map((item, offset) => {
+    const index = start + offset;
+    const key = props.getKey ? props.getKey(item, index) : index;
+    return {
+      item,
+      index,
+      key,
+      top: index * props.itemHeight,
+    };
+  });
 });
 
 function onScroll(): void {
@@ -65,6 +76,13 @@ watch(
     }
   },
 );
+
+defineExpose({
+  root,
+  scrollTop,
+  range,
+  totalHeight,
+});
 </script>
 
 <template>
@@ -73,14 +91,20 @@ watch(
     class="virtual-list"
     role="list"
     :aria-label="ariaLabel"
+    data-testid="virtual-list"
     @scroll="onScroll"
   >
-    <div class="virtual-list-spacer" :style="{ height: `${totalHeight}px` }">
+    <div
+      class="virtual-list-spacer"
+      data-testid="virtual-list-spacer"
+      :style="{ height: `${totalHeight}px` }"
+    >
       <div
         v-for="row in windowItems"
-        :key="row.index"
+        :key="row.key"
         class="virtual-list-row"
         role="listitem"
+        :data-index="row.index"
         :style="{
           height: `${itemHeight}px`,
           transform: `translateY(${row.top}px)`,
