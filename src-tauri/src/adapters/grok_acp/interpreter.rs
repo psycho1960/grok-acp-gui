@@ -153,6 +153,7 @@ fn interpret_request(
                 request_id,
                 tool_call,
                 options,
+                operation: extract_permission_operation(params),
             });
             let meta = EventMeta::new(session_id.clone(), ctx.next_seq())
                 .with_correlation(CorrelationId::new(format!("perm-{}", req.id)));
@@ -166,6 +167,7 @@ fn interpret_request(
                 .unwrap_or_else(|| req.id.as_str().unwrap_or("").to_string());
             let summary = extract_string_field(params, "summary")
                 .or_else(|| extract_string_field(params, "plan"))
+                .map(|value| redact_visible_text(&value))
                 .unwrap_or_default();
             let options = extract_permission_options(params);
 
@@ -231,13 +233,16 @@ fn interpret_notification(
             let request_id = extract_string_field(params, "requestId")
                 .or_else(|| extract_string_field(params, "id"))
                 .unwrap_or_default();
+            let correlation_id = CorrelationId::new(format!("perm-{request_id}"));
 
             let event = AgentEvent::PermissionRequested(PermissionRequestedPayload {
                 request_id,
                 tool_call,
                 options,
+                operation: extract_permission_operation(params),
             });
-            let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
+            let meta =
+                EventMeta::new(session_id.clone(), ctx.next_seq()).with_correlation(correlation_id);
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
         }
         "updatePlan" => {
@@ -245,8 +250,10 @@ fn interpret_notification(
             let request_id = extract_string_field(params, "requestId")
                 .or_else(|| extract_string_field(params, "id"))
                 .unwrap_or_default();
+            let correlation_id = CorrelationId::new(format!("plan-{request_id}"));
             let summary = extract_string_field(params, "summary")
                 .or_else(|| extract_string_field(params, "plan"))
+                .map(|value| redact_visible_text(&value))
                 .unwrap_or_default();
             let options = extract_permission_options(params);
 
@@ -255,7 +262,8 @@ fn interpret_notification(
                 summary,
                 options,
             });
-            let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
+            let meta =
+                EventMeta::new(session_id.clone(), ctx.next_seq()).with_correlation(correlation_id);
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
         }
         _ => InterpretationResult::Unknown {
@@ -634,11 +642,64 @@ fn extract_permission_options(params: &serde_json::Value) -> Vec<PermissionOptio
                     .or_else(|| opt.get("label"))?
                     .as_str()?
                     .to_string();
-                Some(PermissionOptionDescriptor { option_id, name })
+                let kind = opt
+                    .get("kind")
+                    .or_else(|| opt.get("action"))
+                    .or_else(|| opt.get("type"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                Some(PermissionOptionDescriptor {
+                    option_id,
+                    name,
+                    kind,
+                })
             })
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|item| item.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.as_str().map(str::to_string))
+        .collect()
+}
+
+fn extract_permission_operation(
+    params: &serde_json::Value,
+) -> Option<PermissionOperationDescriptor> {
+    let source = params
+        .get("operation")
+        .or_else(|| {
+            params
+                .get("toolCall")
+                .and_then(|tool| tool.get("operation"))
+        })
+        .or_else(|| params.get("toolCall").and_then(|tool| tool.get("input")))?;
+    let operation_kind = source
+        .get("operationKind")
+        .or_else(|| source.get("kind"))
+        .or_else(|| source.get("type"))
+        .and_then(|value| value.as_str())?
+        .to_string();
+    Some(PermissionOperationDescriptor {
+        operation_kind,
+        executable: source
+            .get("executable")
+            .or_else(|| source.get("command"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        args: string_array(source.get("args")),
+        cwd: source
+            .get("cwd")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        read_paths: string_array(source.get("readPaths")),
+        write_paths: string_array(source.get("writePaths")),
+    })
 }
 
 // ---------------------------------------------------------------------------

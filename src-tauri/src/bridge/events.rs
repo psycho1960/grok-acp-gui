@@ -176,9 +176,14 @@ pub struct ActivityUpdatedPayload {
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRequestedPayload {
     pub request_id: String,
+    pub correlation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<u64>,
+    pub expires_at_epoch_seconds: u64,
     pub options: Vec<PermissionOption>,
     /// ACP ToolCallUpdate summary for the UI.
     pub tool_call: ToolCallSummary,
+    pub operation: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +205,7 @@ pub enum PermissionOptionKind {
     AllowAlways,
     RejectOnce,
     RejectAlways,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

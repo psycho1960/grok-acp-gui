@@ -51,6 +51,16 @@ pub mod codes {
     pub const EVENT_REPLAY_BLOCKED: &str = "EVENT_REPLAY_BLOCKED";
     pub const RECOVERY_NO_SESSION: &str = "RECOVERY_NO_SESSION";
     pub const RECOVERY_ALREADY_RESUMED: &str = "RECOVERY_ALREADY_RESUMED";
+
+    // GAG-009: permission, plan, and execution-guard failures.
+    pub const PERMISSION_DENIED: &str = "PERMISSION_DENIED";
+    pub const PERMISSION_PENDING: &str = "PERMISSION_PENDING";
+    pub const PERMISSION_EXPIRED: &str = "PERMISSION_EXPIRED";
+    pub const PERMISSION_ALREADY_RESOLVED: &str = "PERMISSION_ALREADY_RESOLVED";
+    pub const PERMISSION_CONTEXT_MISMATCH: &str = "PERMISSION_CONTEXT_MISMATCH";
+    pub const PLAN_NOT_APPROVED: &str = "PLAN_NOT_APPROVED";
+    pub const PLAN_VERSION_MISMATCH: &str = "PLAN_VERSION_MISMATCH";
+    pub const OPERATION_UNKNOWN: &str = "OPERATION_UNKNOWN";
 }
 
 // ---------------------------------------------------------------------------

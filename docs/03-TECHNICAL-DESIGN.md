@@ -157,6 +157,10 @@ Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该
 
 所有会话事件携带 `taskId`、`sessionId`、单调 `seq` 和 timestamp。Renderer reducer 丢弃已处理 seq；缺口触发 snapshot refresh，不能猜测缺失内容。
 
+GAG-009 将 `permission.resolve` 固定为 `{ taskId, sessionId, requestId, correlationId, expectedVersion, optionId }`，其中非 Plan 请求使用 `expectedVersion=0`；`plan.resolve` 使用同一上下文字段且 `expectedVersion>0`。后端逐字段核对当前 Session、Workspace 和 Plan 版本，原样回传 `optionId`。Renderer 不接收审批令牌、operation digest 或持久 scope 规则。
+
+`permission.requested` 仅发送脱敏后的结构化操作视图：类别、可执行文件、脱敏参数、cwd、读写路径、风险、过期时间以及 ACP 原始 option ID/显式 kind。缺失或未知 kind 可以显示但不可授权，禁止从 label 猜测语义。`plan.updated` 的 proposed 载荷包含 request/correlation/version、摘要、步骤和原始选项；新版本把旧卡标记为 superseded。
+
 GAG-008 的规范化会话载荷如下：用户与 Assistant 文本使用 `message.delta` 的 `{ role, text }`；工具生命周期同样使用 `message.delta`，载荷为 `{ toolCall }`，其中只允许显示 `toolCallId`、标题、种类、状态、位置、脱敏后的输入/结果摘要、起止时间和耗时，不得包含 ACP `rawInput`/`rawOutput`。Turn 正常完成发布 `task.state(status="idle", detail.completed=true)`；用户停止发布 `task.state(status="idle", detail.reason="cancelled")`；请求失败发布 `activity.updated({ kind: "error", code, detail, retryable })` 并把 Renderer 会话终止为可恢复的 `error`；进程异常退出发布并持久化 `task.state(status="interrupted")`，包括空闲但仍可复用的 ACP 子进程异常退出；只有运行时已进入受管 shutdown 的 clean exit 才保留 idle。`task.open` 返回持久化后的 `{ taskId, sessionId?, title, status, cursor, events, attempt }`，Renderer 必须先应用该快照再接收增量事件。为避免长回复的数千个流式 chunk 使快照失真或超限，后端读取完整 append-only 会话日志，把连续 Assistant delta 压缩成保留原始末尾序号的单个安全显示事件；因此快照内事件序号允许稀疏，`cursor` 才是快照与后续实时增量之间的权威连续性边界。
 
 ## 6. 信任边界与权限
@@ -206,6 +210,8 @@ stateDiagram-v2
 
 Plan 状态下，所有文件写入和非只读终端请求在客户端权限处理器被拒绝，即使 Agent 提供允许选项。批准事件成功提交给 ACP 后才解除 gate。进程退出时未决权限统一变为 expired。
 
+`ExecutionGuard.authorize(OperationDescriptor, ExecutionContext)` 是后续进程、文件和 Git Adapter 的统一执行边界。分类矩阵为：显式只读 allowlist → `read_only`；文件/Git 变更 → `write`；删除、清理和 reset → `destructive`；字段缺失、shell 拼接、未知命令或路径逃逸 → `unknown`。`unknown` 永远拒绝。一次批准证据绑定 task/session/workspace/operation digest/plan version/expiry，并由 SQLite 原子消费；Plan 阶段仅声明的只读探测可不经批准执行。ACP 提交与数据库状态变更由后端互斥串行，只有 ACP 提交成功后本地状态才进入 approved。
+
 ## 9. SQLite 设计
 
 Migration 版本从 `0001_initial.sql` 开始，使用事务。核心表：
@@ -217,8 +223,13 @@ Migration 版本从 `0001_initial.sql` 开始，使用事务。核心表：
 - `attachments(id, task_id, sha256, mime, bytes, cache_path, source_name, created_at)`
 - `recovery_items(id, task_id, directory, manifest_path, expires_at, state)`
 - `settings(key, json_value)`
+- `plans(request_id, task_id, session_id, correlation_id, workspace, version, plan_hash, state, summary_redacted, options_json, decided_option_id, created_at, updated_at)`
+- `permission_decisions(request_id, task_id, session_id, correlation_id, workspace, plan_version, operation_digest, category, summary_redacted, options_json, state, scope_json, expires_at_epoch, decided_option_id, consumed_at, created_at, updated_at)`
+- `approval_audit_events(task_id, session_id, request_id, event_kind, decision, operation_digest, plan_version, correlation_id, occurred_at)`
 
 唯一约束：规范化 project path、session_id、受管 worktree path、attachment sha256。任务、Worktree 与恢复状态更新采用事务。ACP 是消息历史事实来源；DB 不复制完整对话正文。
+
+Migration `0003_permissions_and_plans.sql` 只保存 hash、脱敏摘要和决策元数据，不保存原始敏感参数或 Renderer 可复用令牌。新 Plan 版本在同一事务中 supersede 旧 Plan 并使旧批准失效；一次批准以条件 UPDATE 原子转为 consumed。
 
 ## 10. Worktree 与集成算法
 

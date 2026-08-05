@@ -34,6 +34,7 @@ const focusedId = computed(() => {
 });
 
 onMounted(async () => {
+  window.addEventListener("keydown", focusPendingApproval);
   await store.attach(props.bridge);
   if (props.snapshot) {
     store.openFromSnapshot(props.snapshot);
@@ -46,8 +47,25 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("keydown", focusPendingApproval);
   store.detach();
 });
+
+function focusPendingApproval(event: KeyboardEvent): void {
+  if (!(event.ctrlKey && event.key === ".")) return;
+  const pending = Array.from(
+    document.querySelectorAll<HTMLElement>(
+      '[data-testid="permission-slot"], [data-testid="plan-slot"]',
+    ),
+  ).filter((element) => element.querySelector("button:not(:disabled)"));
+  const target = pending[pending.length - 1]?.querySelector<HTMLElement>(
+    "[data-safe-default='true'], button:not(:disabled)",
+  );
+  if (target) {
+    event.preventDefault();
+    target.focus();
+  }
+}
 
 watch(
   () => props.taskId,
@@ -130,6 +148,8 @@ async function onResume(): Promise<void> {
             :focused="item.id === focusedId"
             @toggle-tool="store.toggleTool"
             @toggle-thinking="store.toggleThinking"
+            @resolve-permission="store.resolvePermission"
+            @resolve-plan="store.resolvePlan"
           />
         </template>
       </TimelineVirtualList>

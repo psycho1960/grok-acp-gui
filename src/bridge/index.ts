@@ -46,6 +46,7 @@ export type {
   MessageDeltaPayload,
   ActivityUpdatedPayload,
   PermissionRequestedPayload,
+  PermissionOperationView,
   PermissionOption,
   PlanUpdatedPayload,
   ChangesUpdatedPayload,

@@ -72,6 +72,9 @@ export function fixturePermission(
 ): TypedDesktopEvent {
   return base("permission.requested", seq, {
     requestId,
+    correlationId: `corr-${requestId}`,
+    expectedVersion: 1,
+    expiresAtEpochSeconds: Math.floor(Date.now() / 1000) + 300,
     options: [
       { optionId: "allow-once-1", name: "Allow once", kind: "allow_once" },
       { optionId: "reject-1", name: "Reject", kind: "reject_once" },
@@ -82,13 +85,32 @@ export function fixturePermission(
       kind: "execute",
       locations: ["src/app.ts"],
     },
+    operation: {
+      category: "write",
+      executable: "git",
+      args: ["commit", "-m", "[redacted]"],
+      cwd: "C:/repo",
+      writePaths: ["src/app.ts"],
+      risk: "将修改工作区或 Git 状态",
+    },
   });
 }
 
 export function fixturePlan(seq: number, status = "awaiting_approval"): TypedDesktopEvent {
   return base("plan.updated", seq, {
     status,
-    detail: { steps: ["Explore", "Edit", "Test"], version: 1 },
+    detail: {
+      requestId: `plan-${seq}`,
+      correlationId: `corr-plan-${seq}`,
+      summary: "Explore, edit, and test",
+      steps: ["Explore", "Edit", "Test"],
+      version: seq,
+      options: [
+        { optionId: `revise-${seq}`, name: "继续规划", kind: "request_revision" },
+        { optionId: `approve-${seq}`, name: "批准", kind: "approve" },
+        { optionId: `cancel-${seq}`, name: "取消", kind: "cancel" },
+      ],
+    },
   });
 }
 

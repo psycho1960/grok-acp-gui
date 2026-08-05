@@ -345,8 +345,10 @@ async fn dispatch(
         DesktopCommand::SessionConfigure(_) => not_implemented("session.configure"),
         DesktopCommand::SessionResume(payload) => session_resume(repo, task_runtime, payload).await,
 
-        DesktopCommand::PermissionResolve(_) => not_implemented("permission.resolve"),
-        DesktopCommand::PlanResolve(_) => not_implemented("plan.resolve"),
+        DesktopCommand::PermissionResolve(payload) => {
+            permission_resolve(task_runtime, payload).await
+        }
+        DesktopCommand::PlanResolve(payload) => plan_resolve(task_runtime, payload).await,
 
         DesktopCommand::ArtifactImport(_) => not_implemented("artifact.import"),
         DesktopCommand::ArtifactSave(_) => not_implemented("artifact.save"),
@@ -364,6 +366,48 @@ async fn dispatch(
 
         DesktopCommand::RecoveryRestore(_) => not_implemented("recovery.restore"),
         DesktopCommand::RecoveryDelete(_) => not_implemented("recovery.delete"),
+    }
+}
+
+async fn permission_resolve(
+    task_runtime: &dyn TaskRuntime,
+    payload: &super::commands::PermissionResolvePayload,
+) -> DesktopResult {
+    let request = crate::modules::task_runtime::permission::PermissionResolutionRequest {
+        task_id: payload.task_id.clone(),
+        session_id: payload.session_id.clone(),
+        request_id: payload.request_id.clone(),
+        correlation_id: payload.correlation_id.clone(),
+        expected_version: payload.expected_version,
+        option_id: payload.option_id.clone(),
+    };
+    match task_runtime.resolve_permission(request).await {
+        Ok(state) => DesktopResult::ok(serde_json::json!({
+            "requestId": payload.request_id,
+            "state": state,
+        })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+async fn plan_resolve(
+    task_runtime: &dyn TaskRuntime,
+    payload: &super::commands::PlanResolvePayload,
+) -> DesktopResult {
+    let request = crate::modules::task_runtime::plan::PlanResolutionRequest {
+        task_id: payload.task_id.clone(),
+        session_id: payload.session_id.clone(),
+        request_id: payload.request_id.clone(),
+        correlation_id: payload.correlation_id.clone(),
+        expected_version: payload.expected_version,
+        option_id: payload.option_id.clone(),
+    };
+    match task_runtime.resolve_plan(request).await {
+        Ok(state) => DesktopResult::ok(serde_json::json!({
+            "requestId": payload.request_id,
+            "state": state,
+        })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }
 
@@ -1010,13 +1054,33 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
         AgentEvent::PermissionRequested(p) => {
             let payload = super::events::PermissionRequestedPayload {
                 request_id: p.request_id,
+                correlation_id: event
+                    .meta
+                    .correlation_id
+                    .as_ref()
+                    .map(|value| value.0.clone())
+                    .unwrap_or_default(),
+                expected_version: None,
+                expires_at_epoch_seconds: 0,
                 options: p
                     .options
                     .into_iter()
                     .map(|opt| super::events::PermissionOption {
                         option_id: opt.option_id,
                         name: opt.name,
-                        kind: super::events::PermissionOptionKind::AllowOnce, // placeholder
+                        kind: match opt.kind.as_deref() {
+                            Some("allow_once") => super::events::PermissionOptionKind::AllowOnce,
+                            Some("allow_always" | "allow_scope") => {
+                                super::events::PermissionOptionKind::AllowAlways
+                            }
+                            Some("reject_once" | "reject" | "deny") => {
+                                super::events::PermissionOptionKind::RejectOnce
+                            }
+                            Some("reject_always") => {
+                                super::events::PermissionOptionKind::RejectAlways
+                            }
+                            _ => super::events::PermissionOptionKind::Unknown,
+                        },
                     })
                     .collect(),
                 tool_call: super::events::ToolCallSummary {
@@ -1025,6 +1089,10 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
                     kind: p.tool_call.kind,
                     locations: None,
                 },
+                operation: serde_json::json!({
+                    "category": "unknown",
+                    "risk": "Operation context is unavailable on this compatibility path; backend denies it"
+                }),
             };
             Some(
                 super::events::SessionEvent::new(

@@ -545,26 +545,38 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         request: ClientRequest,
     ) -> Result<SendAck, DomainError> {
         let current_state = self.get_state(&session_id).await;
-        match current_state {
-            Some(RuntimeState::Ready) => {}
-            Some(state) => {
-                return Err(DomainError::illegal_transition(
-                    "Runtime",
-                    &state.to_string(),
-                    "send",
-                ));
-            }
-            None => {
-                return Err(DomainError::new(
-                    codes::DOMAIN_TASK_NOT_FOUND,
-                    format!("session '{}' not found", session_id),
-                ));
+        let starts_turn = matches!(request, ClientRequest::Prompt(_));
+        let valid_state = matches!(
+            (&request, current_state.as_ref()),
+            (ClientRequest::Prompt(_), Some(RuntimeState::Ready))
+                | (
+                    ClientRequest::ResolvePermission(_) | ClientRequest::ResolvePlan(_),
+                    Some(RuntimeState::Busy)
+                )
+                | (ClientRequest::Cancel, Some(RuntimeState::Busy))
+        );
+        if !valid_state {
+            match current_state {
+                Some(state) => {
+                    return Err(DomainError::illegal_transition(
+                        "Runtime",
+                        &state.to_string(),
+                        "send",
+                    ));
+                }
+                None => {
+                    return Err(DomainError::new(
+                        codes::DOMAIN_TASK_NOT_FOUND,
+                        format!("session '{}' not found", session_id),
+                    ));
+                }
             }
         }
 
-        // Transition to Busy.
-        self.try_transition(&session_id, RuntimeTransition::TurnStarted)
-            .await?;
+        if starts_turn {
+            self.try_transition(&session_id, RuntimeTransition::TurnStarted)
+                .await?;
+        }
 
         // Get the outbound channel.
         let outbound = {
@@ -583,10 +595,12 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             let slot = sessions.get_mut(&session_id).unwrap();
             slot.next_request_id += 1;
             let request_id = slot.next_request_id;
-            let mut context = slot.interp_ctx.lock().unwrap();
-            context.current_request_id = Some(request_id);
-            context.suppress_turn_updates = false;
-            context.clear_error_hint();
+            if starts_turn {
+                let mut context = slot.interp_ctx.lock().unwrap();
+                context.current_request_id = Some(request_id);
+                context.suppress_turn_updates = false;
+                context.clear_error_hint();
+            }
             let acp_session_id = slot.acp_session_id.clone().ok_or_else(|| {
                 DomainError::new(codes::ACP_HANDSHAKE_FAILED, "ACP session id is missing")
             })?;

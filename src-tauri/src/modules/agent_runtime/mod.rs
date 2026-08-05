@@ -74,7 +74,8 @@ pub trait AgentRuntime: Send + Sync {
     /// Returns the allocated request ID.
     ///
     /// # Errors
-    /// - `DOMAIN_ILLEGAL_TRANSITION` — session is not in `Ready` state.
+    /// - `DOMAIN_ILLEGAL_TRANSITION` — prompts require `Ready`; permission and
+    ///   Plan resolutions require the owning Turn to remain `Busy`.
     /// - `ACP_REQUEST_FAILED` — the agent rejected the request.
     async fn send(
         &self,

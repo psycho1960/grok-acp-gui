@@ -23,6 +23,8 @@ export interface ConversationFacade {
   cancelTurn(taskId: TaskId): Promise<DesktopResult>;
   resumeSession(taskId: TaskId): Promise<DesktopResult>;
   openTask(taskId: TaskId): Promise<DesktopResult>;
+  resolvePermission(payload: import("../../bridge/types").PermissionResolvePayload): Promise<DesktopResult>;
+  resolvePlan(payload: import("../../bridge/types").PlanResolvePayload): Promise<DesktopResult>;
   subscribe(
     listener: (evt: ConversationFacadeEvent) => void,
   ): Promise<Unsubscribe>;
@@ -58,6 +60,14 @@ export function createConversationFacade(
         type: "task.open",
         payload: { taskId },
       });
+    },
+
+    async resolvePermission(payload) {
+      return bridge.execute({ type: "permission.resolve", payload });
+    },
+
+    async resolvePlan(payload) {
+      return bridge.execute({ type: "plan.resolve", payload });
     },
 
     async subscribe(listener) {

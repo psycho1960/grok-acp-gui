@@ -9,6 +9,10 @@ use crate::domain::types::{
     RecoveryDecision, RecoveryItem, SessionBinding, SessionSnapshot, Settings, StoredEvent, Task,
     TaskSummary, WorktreeRecord,
 };
+use crate::modules::task_runtime::permission::{
+    ApprovalEvidence, ExecutionContext, PermissionDecision, PermissionRecord,
+};
+use crate::modules::task_runtime::plan::{PlanDecision, PlanRecord};
 
 /// Result alias used throughout the persistence layer.
 pub type RepoResult<T> = Result<T, DomainError>;
@@ -147,6 +151,26 @@ pub trait Repository: Send + Sync {
     fn get_setting(&self, key: &str) -> RepoResult<Option<Settings>>;
     fn set_setting(&self, setting: &Settings) -> RepoResult<()>;
     fn list_settings(&self) -> RepoResult<Vec<Settings>>;
+
+    // ------------------------------------------------------------------
+    // GAG-009: Permission and Plan transactions
+    // ------------------------------------------------------------------
+
+    fn create_plan(&self, plan: &PlanRecord) -> RepoResult<()>;
+    fn get_plan(&self, request_id: &str) -> RepoResult<PlanRecord>;
+    fn latest_plan_version(&self, task_id: &str) -> RepoResult<Option<u64>>;
+    fn decide_plan(&self, decision: &PlanDecision) -> RepoResult<PlanRecord>;
+
+    fn create_permission(&self, permission: &PermissionRecord) -> RepoResult<()>;
+    fn get_permission(&self, request_id: &str) -> RepoResult<PermissionRecord>;
+    fn decide_permission(&self, decision: &PermissionDecision) -> RepoResult<PermissionRecord>;
+    fn expire_session_permissions(&self, session_id: &str, reason: &str) -> RepoResult<u32>;
+    fn consume_permission(
+        &self,
+        context: &ExecutionContext,
+        operation_digest: &str,
+        now_epoch_seconds: u64,
+    ) -> RepoResult<Option<ApprovalEvidence>>;
 
     // ------------------------------------------------------------------
     // Startup Recovery

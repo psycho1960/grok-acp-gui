@@ -57,6 +57,9 @@ pub struct TaskRuntimeImpl<A: AgentRuntime> {
     /// Per-session semaphore permits. The permit is released back to the
     /// semaphore when the entry is removed (e.g. on session cancel/completion).
     permits: Mutex<HashMap<SessionId, tokio::sync::OwnedSemaphorePermit>>,
+    /// Serializes ACP resolution submission with the corresponding database
+    /// transition, preventing double-clicks from sending the same option twice.
+    approval_resolution: Mutex<()>,
     /// Bridge event broadcaster (Renderer subscribes to this).
     event_broadcaster: tokio::sync::broadcast::Sender<crate::bridge::events::DesktopEvent>,
 }
@@ -83,6 +86,7 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
             mailboxes: Mutex::new(HashMap::new()),
             sequence_offsets: Mutex::new(HashMap::new()),
             permits: Mutex::new(HashMap::new()),
+            approval_resolution: Mutex::new(()),
             event_broadcaster: event_tx,
         }
     }
@@ -500,6 +504,194 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             .collect();
 
         Ok(enriched)
+    }
+
+    async fn resolve_permission(
+        &self,
+        request: crate::modules::task_runtime::permission::PermissionResolutionRequest,
+    ) -> Result<crate::modules::task_runtime::permission::PermissionState, DomainError> {
+        use crate::modules::agent_runtime::requests::ResolvePermissionRequest;
+        use crate::modules::agent_runtime::ClientRequest;
+        use crate::modules::task_runtime::permission::{
+            PermissionDecision, PermissionOptionAction, PermissionState,
+        };
+
+        let _resolution = self.approval_resolution.lock().await;
+        let pending = self.repo.get_permission(&request.request_id)?;
+        let expected_plan_version =
+            (request.expected_version != 0).then_some(request.expected_version);
+        if pending.task_id != request.task_id
+            || pending.session_id != request.session_id
+            || pending.correlation_id != request.correlation_id
+            || pending.plan_version != expected_plan_version
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                "Permission request context or Plan version changed",
+            ));
+        }
+        if pending.state != PermissionState::Requested {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Permission request is no longer pending",
+            ));
+        }
+        let action = pending
+            .options
+            .iter()
+            .find(|option| option.option_id == request.option_id)
+            .map(|option| option.action)
+            .unwrap_or(PermissionOptionAction::Unknown);
+        if action == PermissionOptionAction::Unknown {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_DENIED,
+                "Permission option has no explicit ACP action",
+            ));
+        }
+        if action == PermissionOptionAction::AllowScope
+            && pending.category
+                != crate::modules::task_runtime::permission::OperationCategory::ReadOnly
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_DENIED,
+                "Persistent approval is restricted to exact read-only operations",
+            ));
+        }
+        let binding = self
+            .repo
+            .get_binding_by_task(&request.task_id.0)?
+            .ok_or_else(|| {
+                DomainError::new(
+                    crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                    "Session binding is missing",
+                )
+            })?;
+        if binding.session_id != request.session_id
+            || binding.cwd.as_deref() != Some(&pending.workspace)
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                "Workspace binding changed",
+            ));
+        }
+
+        // Send while the local record is still pending. The process-wide
+        // resolution mutex prevents duplicate sends; the gate opens only after
+        // ACP submission succeeds and the DB decision commits.
+        self.agent_runtime
+            .send(
+                request.session_id.clone(),
+                ClientRequest::ResolvePermission(ResolvePermissionRequest {
+                    request_id: request.request_id.clone(),
+                    option_id: request.option_id.clone(),
+                }),
+            )
+            .await?;
+        let decided_at = crate::domain::types::utc_now();
+        let decided = self.repo.decide_permission(&PermissionDecision {
+            request_id: request.request_id,
+            task_id: request.task_id.clone(),
+            session_id: request.session_id,
+            correlation_id: request.correlation_id,
+            workspace: pending.workspace,
+            expected_plan_version,
+            option_id: request.option_id,
+            decided_at,
+            decided_at_epoch_seconds: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        })?;
+        self.repo
+            .update_task_status(&request.task_id.0, "running", None)?;
+        Ok(decided.state)
+    }
+
+    async fn resolve_plan(
+        &self,
+        request: crate::modules::task_runtime::plan::PlanResolutionRequest,
+    ) -> Result<crate::modules::task_runtime::plan::PlanState, DomainError> {
+        use crate::modules::agent_runtime::requests::ResolvePlanRequest;
+        use crate::modules::agent_runtime::ClientRequest;
+        use crate::modules::task_runtime::plan::{PlanDecision, PlanOptionAction, PlanState};
+
+        let _resolution = self.approval_resolution.lock().await;
+        let pending = self.repo.get_plan(&request.request_id)?;
+        if pending.task_id != request.task_id
+            || pending.session_id != request.session_id
+            || pending.correlation_id != request.correlation_id
+            || pending.version != request.expected_version
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PLAN_VERSION_MISMATCH,
+                "Plan context or version changed",
+            ));
+        }
+        if pending.state != PlanState::Proposed {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Plan request is no longer pending",
+            ));
+        }
+        let action = pending
+            .options
+            .iter()
+            .find(|option| option.option_id == request.option_id)
+            .map(|option| option.action)
+            .unwrap_or(PlanOptionAction::Unknown);
+        if action == PlanOptionAction::Unknown {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_DENIED,
+                "Plan option has no explicit ACP action",
+            ));
+        }
+        let binding = self
+            .repo
+            .get_binding_by_task(&request.task_id.0)?
+            .ok_or_else(|| {
+                DomainError::new(
+                    crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                    "Session binding is missing",
+                )
+            })?;
+        if binding.session_id != request.session_id
+            || binding.cwd.as_deref() != Some(&pending.workspace)
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                "Workspace binding changed",
+            ));
+        }
+
+        self.agent_runtime
+            .send(
+                request.session_id.clone(),
+                ClientRequest::ResolvePlan(ResolvePlanRequest {
+                    request_id: request.request_id.clone(),
+                    option_id: request.option_id.clone(),
+                }),
+            )
+            .await?;
+        let decided = self.repo.decide_plan(&PlanDecision {
+            request_id: request.request_id,
+            task_id: request.task_id.clone(),
+            session_id: request.session_id,
+            correlation_id: request.correlation_id,
+            workspace: pending.workspace,
+            expected_version: request.expected_version,
+            option_id: request.option_id,
+            decided_at: crate::domain::types::utc_now(),
+        })?;
+        self.repo.update_task_status(
+            &request.task_id.0,
+            if decided.state == PlanState::Rejected {
+                "idle"
+            } else {
+                "running"
+            },
+            None,
+        )?;
+        Ok(decided.state)
     }
 }
 

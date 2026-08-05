@@ -13,6 +13,8 @@
 //!   RecoveryCandidates for the renderer.
 
 pub mod mailbox;
+pub mod permission;
+pub mod plan;
 pub mod recovery;
 pub mod runtime;
 
@@ -84,4 +86,18 @@ pub trait TaskRuntime: Send + Sync {
 
     /// Get lightweight task summaries for the task center.
     async fn task_summaries(&self) -> Result<Vec<TaskSummary>, DomainError>;
+
+    /// Atomically resolve a pending permission, then forward the exact ACP
+    /// option ID. Context/version mismatches and repeated decisions fail closed.
+    async fn resolve_permission(
+        &self,
+        request: permission::PermissionResolutionRequest,
+    ) -> Result<permission::PermissionState, DomainError>;
+
+    /// Atomically resolve the current Plan version and invalidate all older
+    /// approvals before forwarding the exact ACP option ID.
+    async fn resolve_plan(
+        &self,
+        request: plan::PlanResolutionRequest,
+    ) -> Result<plan::PlanState, DomainError>;
 }

@@ -91,14 +91,22 @@ pub struct SessionResumePayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionResolvePayload {
+    pub task_id: super::types::TaskId,
+    pub session_id: super::types::SessionId,
     pub request_id: String,
+    pub correlation_id: String,
+    pub expected_version: u64,
     pub option_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanResolvePayload {
+    pub task_id: super::types::TaskId,
+    pub session_id: super::types::SessionId,
     pub request_id: String,
+    pub correlation_id: String,
+    pub expected_version: u64,
     /// ACP option ID, passed verbatim — must not be inferred from labels.
     pub option_id: String,
 }
@@ -364,13 +372,24 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
         }
 
         DesktopCommand::PermissionResolve(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_id_non_empty(&p.session_id.0)?;
             validate_id_non_empty(&p.request_id)?;
+            validate_id_non_empty(&p.correlation_id)?;
             validate_id_non_empty(&p.option_id)?;
             Ok(())
         }
 
         DesktopCommand::PlanResolve(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_id_non_empty(&p.session_id.0)?;
             validate_id_non_empty(&p.request_id)?;
+            validate_id_non_empty(&p.correlation_id)?;
+            if p.expected_version == 0 {
+                return Err(validation_err(
+                    "plan expectedVersion must be greater than zero",
+                ));
+            }
             validate_id_non_empty(&p.option_id)?;
             Ok(())
         }
@@ -614,7 +633,11 @@ mod tests {
                 workspace_strategy: None,
             }),
             DesktopCommand::PermissionResolve(PermissionResolvePayload {
+                task_id: super::super::types::TaskId::new("task-1"),
+                session_id: super::super::types::SessionId::new("session-1"),
                 request_id: "req-1".into(),
+                correlation_id: "corr-1".into(),
+                expected_version: 0,
                 option_id: "opt-allow-once".into(),
             }),
         ];
