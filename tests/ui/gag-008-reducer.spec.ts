@@ -18,8 +18,9 @@ import {
   appendUserMessage,
   createEmptyConversationState,
   foldExploreTools,
+  setRunStatus,
 } from "../../src/features/conversation/reducer";
-import type { SessionId, TaskId } from "../../src/bridge/types";
+import type { SessionId, TaskId, TypedDesktopEvent } from "../../src/bridge/types";
 
 describe("GAG-008 conversation reducer", () => {
   it("dedupes by sessionId+seq", () => {
@@ -47,6 +48,30 @@ describe("GAG-008 conversation reducer", () => {
     expect(assistants[0].streaming).toBe(false);
     expect(assistants[0].frozen).toBe(true);
     expect(state.status).toBe("idle");
+  });
+
+  it("keeps late buffered deltas in one assistant message while cancellation is pending", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = applyEvents(state, [
+      fixtureTaskState(1, "running"),
+      fixtureAssistantDelta(2, "partial"),
+    ]);
+
+    state = setRunStatus(state, "cancelling");
+    state = applyEvent(state, fixtureAssistantDelta(3, " tail"));
+    state = applyEvent(
+      state,
+      fixtureTaskState(4, "idle", { reason: "cancelled" }),
+    );
+
+    const assistants = state.items.filter((item) => item.kind === "assistant");
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]?.kind === "assistant" && assistants[0].text).toBe(
+      "partial tail",
+    );
+    expect(
+      assistants[0]?.kind === "assistant" && assistants[0].frozen,
+    ).toBe(true);
   });
 
   it("merges tool lifecycle by toolCallId and rejects completed→running", () => {
@@ -79,6 +104,55 @@ describe("GAG-008 conversation reducer", () => {
     expect(tools[0].tool.phase).toBe("completed");
     expect(tools[0].tool.result.summary).toBe("ok");
     expect(tools[0].tool.durationMs).toBe(1000);
+  });
+
+  it("never retains a tool summary whose backend field is marked redacted", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = applyEvent(
+      state,
+      fixtureToolDelta(1, {
+        toolCallId: "tc-defence",
+        title: "Shell",
+        kind: "execute",
+        status: "completed",
+        inputSummary: "API_KEY=must-never-render",
+        inputRedacted: true,
+        resultSummary: "TOKEN=must-never-copy",
+        resultRedacted: true,
+      }),
+    );
+
+    const serialized = JSON.stringify(state.items);
+    expect(serialized).not.toContain("must-never-render");
+    expect(serialized).not.toContain("must-never-copy");
+    expect(serialized).toContain("[redacted]");
+  });
+
+  it("turns a terminal request failure into a coded recoverable error state", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = applyEvents(state, [
+      fixtureTaskState(1, "running"),
+      fixtureAssistantDelta(2, "partial response"),
+      {
+        type: "activity.updated",
+        taskId: FIX_TASK,
+        sessionId: FIX_SESSION,
+        seq: 3,
+        timestamp: "2026-08-05T00:00:03.000Z",
+        payload: {
+          kind: "error",
+          detail: "Grok Build usage balance exhausted",
+          code: "GROK_USAGE_EXHAUSTED",
+          retryable: true,
+        },
+      } as TypedDesktopEvent,
+    ]);
+
+    expect(state.status).toBe("error");
+    const error = state.items.find((item) => item.kind === "error");
+    expect(error?.kind === "error" && error.code).toBe("GROK_USAGE_EXHAUSTED");
+    const assistant = state.items.find((item) => item.kind === "assistant");
+    expect(assistant?.kind === "assistant" && assistant.frozen).toBe(true);
   });
 
   it("ignores events for other tasks", () => {
@@ -126,6 +200,37 @@ describe("GAG-008 conversation reducer", () => {
     expect(text).toContain("after");
   });
 
+  it("rebuilds an authoritative compact snapshot whose event sequences are sparse", () => {
+    const user = {
+      ...fixtureAssistantDelta(10, "historical question"),
+      payload: { role: "user" as const, text: "historical question" },
+    };
+    const assistant = fixtureAssistantDelta(590, "historical answer");
+    const interrupted = fixtureTaskState(600, "interrupted");
+
+    const state = applySnapshot(createEmptyConversationState(FIX_TASK), {
+      ...fixtureSessionSnapshot(),
+      cursor: 600,
+      events: [user, assistant, interrupted],
+      status: "error",
+    });
+
+    expect(state.items.some((item) => item.kind === "user")).toBe(true);
+    expect(
+      state.items.some(
+        (item) => item.kind === "assistant" && item.text === "historical answer",
+      ),
+    ).toBe(true);
+    expect(
+      state.items.some(
+        (item) => item.kind === "system" && item.message === "任务已中断",
+      ),
+    ).toBe(true);
+    expect(state.status).toBe("error");
+    expect(state.cursor).toEqual({ lastSeq: 600, snapshotSeq: 600 });
+    expect(state.needsSnapshotRefresh).toBe(false);
+  });
+
   it("detects sequence gaps after snapshot", () => {
     let state = applySnapshot(
       createEmptyConversationState(FIX_TASK),
@@ -134,6 +239,24 @@ describe("GAG-008 conversation reducer", () => {
     state = applyEvent(state, fixtureAssistantDelta(9, "jump"));
     expect(state.needsSnapshotRefresh).toBe(true);
     expect(state.gapFromSeq).toBe(6);
+  });
+
+  it("buffers out-of-order events and drains them strictly by sequence", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = applyEvent(state, fixtureAssistantDelta(1, "A"));
+    state = applyEvent(state, fixtureAssistantDelta(3, "C"));
+
+    const beforeGap = state.items.find((item) => item.kind === "assistant");
+    expect(beforeGap?.kind === "assistant" && beforeGap.text).toBe("A");
+    expect(state.needsSnapshotRefresh).toBe(true);
+    expect(state.gapFromSeq).toBe(2);
+
+    state = applyEvent(state, fixtureAssistantDelta(2, "B"));
+    const recovered = state.items.find((item) => item.kind === "assistant");
+    expect(recovered?.kind === "assistant" && recovered.text).toBe("ABC");
+    expect(state.cursor.lastSeq).toBe(3);
+    expect(state.needsSnapshotRefresh).toBe(false);
+    expect(state.gapFromSeq).toBeNull();
   });
 
   it("creates permission and plan slots", () => {
@@ -178,6 +301,57 @@ describe("GAG-008 conversation reducer", () => {
       expect(state.items[0].text).toBe("Hello agent");
       expect(state.items[0].pending).toBe(true);
     }
+  });
+
+  it("reconciles the confirmed ACP user echo without duplicating the optimistic message", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = { ...state, sessionId: FIX_SESSION };
+    state = appendUserMessage(state, "Hello once", { id: "local-user", pending: true });
+    state = applyEvent(state, {
+      type: "message.delta",
+      taskId: FIX_TASK,
+      sessionId: FIX_SESSION,
+      seq: 1,
+      timestamp: "2026-08-05T00:00:00.000Z",
+      payload: { role: "user", text: "Hello once" },
+    });
+
+    const users = state.items.filter((item) => item.kind === "user");
+    expect(users).toHaveLength(1);
+    expect(users[0].kind === "user" && users[0].pending).toBe(false);
+  });
+
+  it("restores a confirmed user event and makes cancellation explicit", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = applyEvents(state, [
+      {
+        type: "message.delta",
+        taskId: FIX_TASK,
+        sessionId: FIX_SESSION,
+        seq: 1,
+        timestamp: "2026-08-05T00:00:00.000Z",
+        payload: { role: "user", text: "restored user" },
+      },
+      fixtureAssistantDelta(2, "partial"),
+      {
+        type: "task.state",
+        taskId: FIX_TASK,
+        sessionId: FIX_SESSION,
+        seq: 3,
+        timestamp: "2026-08-05T00:00:02.000Z",
+        payload: {
+          taskId: FIX_TASK,
+          status: "idle",
+          detail: { reason: "cancelled" },
+        },
+      },
+    ]);
+
+    expect(state.items.filter((item) => item.kind === "user")).toHaveLength(1);
+    expect(state.items.some((item) => item.kind === "system" && item.message === "已停止")).toBe(true);
+    const assistant = state.items.find((item) => item.kind === "assistant");
+    expect(assistant?.kind === "assistant" && assistant.frozen).toBe(true);
+    expect(state.status).toBe("idle");
   });
 
   it("folds consecutive read tools into Explored N items", () => {

@@ -153,7 +153,11 @@ Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该
 
 事件联合类型：`runtime.updated`、`task.snapshot`、`task.state`、`message.delta`、`activity.updated`、`permission.requested`、`plan.updated`、`changes.updated`、`artifact.available`、`resource.warning`、`diagnostic.notice`。
 
+`BootstrapSnapshot.capabilities.models` 的 `ModelInfo` 包含 `modelId`、`name`、可选 `description` 和可选 `reasoningEffort`。`reasoningEffort` 只来自 Grok `config.toml` 对应 `[model.*]` profile 的 `reasoning_effort`，当前允许 `low`、`medium`、`high`、`max`；Renderer 选择 profile 时同步该默认值，字段缺失时保持兼容默认，不得按模型名称猜测。
+
 所有会话事件携带 `taskId`、`sessionId`、单调 `seq` 和 timestamp。Renderer reducer 丢弃已处理 seq；缺口触发 snapshot refresh，不能猜测缺失内容。
+
+GAG-008 的规范化会话载荷如下：用户与 Assistant 文本使用 `message.delta` 的 `{ role, text }`；工具生命周期同样使用 `message.delta`，载荷为 `{ toolCall }`，其中只允许显示 `toolCallId`、标题、种类、状态、位置、脱敏后的输入/结果摘要、起止时间和耗时，不得包含 ACP `rawInput`/`rawOutput`。Turn 正常完成发布 `task.state(status="idle", detail.completed=true)`；用户停止发布 `task.state(status="idle", detail.reason="cancelled")`；请求失败发布 `activity.updated({ kind: "error", code, detail, retryable })` 并把 Renderer 会话终止为可恢复的 `error`；进程异常退出发布并持久化 `task.state(status="interrupted")`，包括空闲但仍可复用的 ACP 子进程异常退出；只有运行时已进入受管 shutdown 的 clean exit 才保留 idle。`task.open` 返回持久化后的 `{ taskId, sessionId?, title, status, cursor, events, attempt }`，Renderer 必须先应用该快照再接收增量事件。为避免长回复的数千个流式 chunk 使快照失真或超限，后端读取完整 append-only 会话日志，把连续 Assistant delta 压缩成保留原始末尾序号的单个安全显示事件；因此快照内事件序号允许稀疏，`cursor` 才是快照与后续实时增量之间的权威连续性边界。
 
 ## 6. 信任边界与权限
 
@@ -177,14 +181,14 @@ flowchart LR
 ## 7. ACP 与进程生命周期
 
 1. Runtime 按配置、默认安装路径、PATH 探测 Grok。
-2. 启动 `grok --no-auto-update agent stdio`，stdin/stdout pipe，stderr 独立读取。
+2. 启动 `grok --no-auto-update agent [--model <profile-id>] stdio`，stdin/stdout pipe，stderr 独立读取。Task 保存的模型 profile 在 session 启动时以独立 argv 参数传入；ID 只允许受限字符且不得形似 CLI option，非法值以 `RUNTIME_INVALID_MODEL` fail-closed，不能静默回落到默认模型。
 3. 初始化协议并记录 capability；不支持的 UI 功能隐藏或禁用。
 4. 每个正在执行的 Task 使用独立 ACP 进程以隔离崩溃和 cwd。
 5. 一个 Task 同时最多一个 Turn；任务数量不设上限。
 6. Turn 完成后 session 持久化；进程空闲 5 分钟或用户关闭任务时终止。
 7. 下一次操作重新启动进程并以 session ID、原 cwd resume。
 8. 第 4 个并行 Turn 起发 `resource.warning`，不拒绝启动。
-9. 应用退出用 Windows Job Object/等价机制终止整个受管进程树。
+9. 应用最终退出事件同步调用 `AgentRuntime.shutdown_all`；每个 session 先关闭 stdin 并等待宽限期，超时则中止 process monitor，由 `kill_on_drop` 终止 Child。Runtime 内部转发任务只持有 Weak 引用，不得形成阻止清理的 Arc 循环；Windows Job Object/等价的进程树约束仍是生产 Adapter 的安全要求。
 
 事件规范化：ACP option ID 原样保留；未知 update 存为 `activity.updated(kind="unknown")`；stderr 不进入协议解析器。
 
@@ -275,6 +279,7 @@ Migration 版本从 `0001_initial.sql` 开始，使用事务。核心表：
 - Git Fixture：临时仓库覆盖中文/空格、脏状态、rename、binary、untracked、分支前进、冲突和 lock。
 - Artifact：magic bytes、超限、hash、缓存缺失、恢复包成功/失败。
 - E2E：真实 Tauri Windows 流程，Fake ACP 为主；真实 Grok 为 guarded live，不作为普通 CI 门禁。
+- Windows 原生 E2E 可用 Cargo feature `e2e-isolated-data` 构建，并通过绝对路径环境变量 `GROK_ACP_GUI_E2E_DATA_DIR` 使用一次性 SQLite 目录；普通生产构建不读取该变量，禁止原生测试复用用户数据库。
 - 安全负面测试：路径越界、junction、伪造 Task/Worktree ID、过期权限和 destructive precondition。
 
 ## 15. 打包与运行变量

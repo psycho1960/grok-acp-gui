@@ -4,6 +4,7 @@ import {
   plainTextSummary,
   renderSafeMarkdown,
   sanitizeHref,
+  redactVisibleText,
 } from "../../src/features/conversation/markdown";
 
 describe("GAG-008 safe markdown", () => {
@@ -40,5 +41,14 @@ describe("GAG-008 safe markdown", () => {
 
   it("escapeHtml is total for control chars used in XSS", () => {
     expect(escapeHtml(`<"&'>`)).toBe("&lt;&quot;&amp;&#39;&gt;");
+  });
+
+  it("redacts common credentials from visible and copied text", () => {
+    const source = "XAI_API_KEY=super-secret-value Authorization: Bearer abc.def.ghi";
+    const redacted = redactVisibleText(source);
+    expect(redacted).toContain("[redacted]");
+    expect(redacted).not.toContain("super-secret-value");
+    expect(redacted).not.toContain("abc.def.ghi");
+    expect(plainTextSummary(source)).not.toContain("super-secret-value");
   });
 });

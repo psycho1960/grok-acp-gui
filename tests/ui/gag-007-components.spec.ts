@@ -5,6 +5,7 @@ import { nextTick } from "vue";
 import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
 import type { SessionId, TaskId, TaskOpenResult } from "../../src/bridge/types";
 import TaskCenterView from "../../src/features/task-center/TaskCenterView.vue";
+import CreateTaskDialog from "../../src/features/task-center/CreateTaskDialog.vue";
 import VirtualList from "../../src/features/task-center/VirtualList.vue";
 import { createTaskCenterSeedSnapshot } from "../../src/features/task-center/seed";
 import { useTaskCenterStore } from "../../src/features/task-center/task-center-store";
@@ -134,6 +135,43 @@ describe("GAG-007 TaskCenterView", () => {
     await nextTick();
     expect(wrapper.find('[data-testid="task-detail"]').exists()).toBe(false);
     wrapper.unmount();
+  });
+
+  it("opens detail drawer when clicking the non-action area of a task card", async () => {
+    const bridge = createBridge();
+    const wrapper = mount(TaskCenterView, {
+      props: { bridge, syncHash: false },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await wrapper
+      .get('[data-task-id="task-run-1"] .task-meta')
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="task-detail"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("opens an existing task conversation from the detail drawer", async () => {
+    window.location.hash = "#task-center";
+    const bridge = createBridge();
+    const wrapper = mount(TaskCenterView, {
+      props: { bridge, syncHash: true },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await wrapper
+      .get('[data-task-id="task-run-1"] [data-testid="task-open"]')
+      .trigger("click");
+    await flushPromises();
+
+    await wrapper.get('[data-testid="detail-open-conversation"]').trigger("click");
+
+    expect(window.location.hash).toBe("#conversation/task-run-1");
+    wrapper.unmount();
+    window.location.hash = "";
   });
 
   it("filters by search query locally", async () => {
@@ -272,6 +310,34 @@ describe("GAG-007 TaskCenterView", () => {
     expect(card.attributes("aria-current")).toBeUndefined();
     expect(card.attributes("aria-label")).toMatch(/等待审批/);
     expect(card.get('[data-testid="task-open"]').attributes("aria-label")).toMatch(/打开任务/);
+    wrapper.unmount();
+  });
+});
+
+describe("GAG-007 CreateTaskDialog model reasoning", () => {
+  it("places model before reasoning and applies the selected model profile effort", async () => {
+    const wrapper = mount(CreateTaskDialog, {
+      props: {
+        open: true,
+        modelOptions: [
+          { value: "", label: "使用运行时默认模型" },
+          { value: "fast", label: "Fast", reasoningEffort: "high" },
+          { value: "deep", label: "Deep", reasoningEffort: "max" },
+        ],
+      },
+      attachTo: document.body,
+    });
+
+    const model = wrapper.get('[data-testid="create-task-model"]');
+    const reasoning = wrapper.get('[data-testid="create-task-reasoning"]');
+    expect(
+      model.element.compareDocumentPosition(reasoning.element) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await model.get("select").setValue("deep");
+    expect((reasoning.get("select").element as HTMLSelectElement).value).toBe("max");
+    expect(reasoning.get("select").text()).toContain("Max");
     wrapper.unmount();
   });
 });

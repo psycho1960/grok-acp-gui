@@ -13,6 +13,7 @@ import {
 describe("GAG-008 conversation store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    localStorage.clear();
     sessionStorage.clear();
   });
 
@@ -66,7 +67,7 @@ describe("GAG-008 conversation store", () => {
     store.setDraft("retry me");
     fail = true;
     // Need idle again
-    store.injectEventForTest(fixtureTaskState(50, "merged"));
+    store.injectEventForTest(fixtureTaskState(2, "merged"));
     const bad = await store.sendMessage();
     expect(bad).toBe(false);
     expect(store.draft).toBe("retry me");
@@ -132,7 +133,7 @@ describe("GAG-008 conversation store", () => {
     await store.attach(bridge);
     store.openFromSnapshot(fixtureSessionSnapshot({ taskId: FIX_TASK }));
     store.setDraft("draft-a");
-    expect(sessionStorage.getItem(`gag008:draft:${FIX_TASK}`)).toBe("draft-a");
+    expect(localStorage.getItem(`gag008:draft:${FIX_TASK}`)).toBe("draft-a");
 
     const store2 = useConversationStore();
     store2.openFromSnapshot(fixtureSessionSnapshot({ taskId: FIX_TASK }));
@@ -156,5 +157,195 @@ describe("GAG-008 conversation store", () => {
     await store.openTask("task-x" as TaskId, "X");
     expect(store.taskId).toBe("task-x");
     expect(store.title).toBe("T");
+  });
+
+  it("applies the persisted task.open timeline instead of showing an empty demo", async () => {
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type !== "task.open") {
+          return { success: "true", data: {} };
+        }
+        return {
+          success: "true",
+          data: {
+            taskId: command.payload.taskId,
+            sessionId: "session-restored",
+            title: "Restored",
+            status: "idle",
+            attempt: 2,
+            cursor: { lastSeq: 3, snapshotSeq: 3 },
+            events: [
+              {
+                type: "message.delta",
+                taskId: command.payload.taskId,
+                sessionId: "session-restored",
+                seq: 1,
+                timestamp: "2026-08-05T00:00:00.000Z",
+                payload: { role: "user", text: "persist me" },
+              },
+              {
+                type: "message.delta",
+                taskId: command.payload.taskId,
+                sessionId: "session-restored",
+                seq: 2,
+                timestamp: "2026-08-05T00:00:01.000Z",
+                payload: { role: "assistant", text: "restored reply" },
+              },
+              {
+                type: "task.state",
+                taskId: command.payload.taskId,
+                sessionId: "session-restored",
+                seq: 3,
+                timestamp: "2026-08-05T00:00:02.000Z",
+                payload: { taskId: command.payload.taskId, status: "idle", detail: {} },
+              },
+            ],
+          },
+        };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+    await store.openTask("task-restored" as TaskId);
+
+    expect(store.sessionId).toBe("session-restored");
+    expect(store.attempt).toBe(2);
+    expect(store.items.filter((item) => item.kind === "user")).toHaveLength(1);
+    expect(store.items.filter((item) => item.kind === "assistant")).toHaveLength(1);
+    expect(JSON.stringify(store.items)).toContain("restored reply");
+  });
+
+  it("resumes an interrupted session through DesktopBridge", async () => {
+    const calls: string[] = [];
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        calls.push(command.type);
+        if (command.type === "session.resume") {
+          return { success: "true", data: { sessionId: "resumed-session" } };
+        }
+        if (command.type === "task.open") {
+          return {
+            success: "true",
+            data: { taskId: command.payload.taskId, title: "Resumed", status: "idle" },
+          };
+        }
+        return { success: "true", data: {} };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+    store.openFromSnapshot(fixtureSessionSnapshot({ status: "idle" }));
+    store.injectEventForTest(fixtureTaskState(40, "interrupted"));
+
+    expect(await store.resumeSession()).toBe(true);
+    expect(calls).toContain("session.resume");
+    expect(store.status).toBe("idle");
+  });
+
+  it("switches title, state, timeline, and draft atomically between tasks", async () => {
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type !== "task.open") {
+          return { success: "true", data: {} };
+        }
+        const isA = command.payload.taskId === "task-a";
+        const taskId = command.payload.taskId;
+        const sessionId = isA ? "session-a" : "session-b";
+        return {
+          success: "true",
+          data: {
+            taskId,
+            sessionId,
+            title: isA ? "Title A" : "Title B",
+            status: isA ? "idle" : "running",
+            attempt: 1,
+            cursor: { lastSeq: 1, snapshotSeq: 1 },
+            events: [
+              {
+                type: "message.delta",
+                taskId,
+                sessionId,
+                seq: 1,
+                timestamp: "2026-08-05T00:00:00.000Z",
+                payload: { role: "user", text: isA ? "only A" : "only B" },
+              },
+            ],
+          },
+        };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+
+    await store.openTask("task-a" as TaskId);
+    store.setDraft("draft A");
+    expect(store.title).toBe("Title A");
+    expect(JSON.stringify(store.items)).toContain("only A");
+
+    await store.openTask("task-b" as TaskId);
+    expect(store.title).toBe("Title B");
+    expect(store.status).toBe("running");
+    expect(JSON.stringify(store.items)).toContain("only B");
+    expect(JSON.stringify(store.items)).not.toContain("only A");
+    expect(store.draft).toBe("");
+
+    await store.openTask("task-a" as TaskId);
+    expect(store.title).toBe("Title A");
+    expect(store.status).toBe("idle");
+    expect(JSON.stringify(store.items)).not.toContain("only B");
+    expect(store.draft).toBe("draft A");
+  });
+
+  it("never lets a stale task.open response overwrite the latest selected task", async () => {
+    let releaseA: (() => void) | null = null;
+    const delayedA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const bridge = createFakeDesktopBridge({
+      async onExecute(command) {
+        if (command.type !== "task.open") {
+          return { success: "true", data: {} };
+        }
+        if (command.payload.taskId === "task-a") {
+          await delayedA;
+        }
+        const taskId = command.payload.taskId;
+        const suffix = taskId === "task-a" ? "A" : "B";
+        return {
+          success: "true",
+          data: {
+            taskId,
+            sessionId: `session-${suffix.toLowerCase()}`,
+            title: `Title ${suffix}`,
+            status: "idle",
+            attempt: 1,
+            cursor: { lastSeq: 1, snapshotSeq: 1 },
+            events: [
+              {
+                type: "message.delta",
+                taskId,
+                sessionId: `session-${suffix.toLowerCase()}`,
+                seq: 1,
+                timestamp: "2026-08-05T00:00:00.000Z",
+                payload: { role: "user", text: `only ${suffix}` },
+              },
+            ],
+          },
+        };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+
+    const openingA = store.openTask("task-a" as TaskId);
+    const openingB = store.openTask("task-b" as TaskId);
+    await openingB;
+    releaseA?.();
+    await openingA;
+
+    expect(store.taskId).toBe("task-b");
+    expect(store.title).toBe("Title B");
+    expect(JSON.stringify(store.items)).toContain("only B");
+    expect(JSON.stringify(store.items)).not.toContain("only A");
   });
 });

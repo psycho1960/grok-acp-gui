@@ -22,9 +22,13 @@ test.describe("GAG-008 conversation timeline", () => {
       await stop.click();
     }
 
-    // After fixture autoplay may leave waiting_permission — still check virtual list exists or empty
-    const body = page.locator(".conversation");
-    await expect(body).toBeVisible();
+    await expect(page.getByText("已停止")).toBeVisible({ timeout: 5_000 });
+    const input = page.getByTestId("composer-input");
+    await input.fill("one visible user turn");
+    await page.getByTestId("composer-send").click();
+    await expect(page.getByTestId("user-message").filter({ hasText: "one visible user turn" })).toHaveCount(1);
+    await expect(page.getByTestId("assistant-message").filter({ hasText: "Echo: one visible user turn" })).toBeVisible();
+    await expect(page.getByText("空闲", { exact: true }).first()).toBeVisible();
   });
 
   test("scroll up shows jump-to-bottom control when content overflows", async ({
@@ -37,21 +41,55 @@ test.describe("GAG-008 conversation timeline", () => {
     });
 
     const list = page.getByTestId("conversation-virtual-list");
-    // Wait until list has content
     await page.waitForTimeout(1200);
-    if (await list.count()) {
-      await list.evaluate((el) => {
-        el.scrollTop = 0;
-        el.dispatchEvent(new Event("scroll"));
-      });
-      // Jump button appears when not stuck to bottom and user scrolled up
-      const jump = page.getByTestId("jump-to-bottom");
-      // May not appear if content fits viewport — soft assert
-      if (await jump.isVisible().catch(() => false)) {
-        await jump.click();
-        await expect(jump).toBeHidden({ timeout: 3000 });
-      }
+    await list.evaluate((el) => {
+      Object.defineProperty(el, "clientHeight", { configurable: true, value: 200 });
+      Object.defineProperty(el, "scrollHeight", { configurable: true, value: 1000 });
+      el.scrollTop = 0;
+      el.dispatchEvent(new Event("scroll"));
+    });
+
+    const jump = page.getByTestId("jump-to-bottom");
+    await expect(jump).toBeVisible();
+
+    const stop = page.getByTestId("composer-stop");
+    if (await stop.isVisible()) {
+      await stop.click();
+      await expect(page.getByText("已停止")).toBeVisible();
     }
+
+    const input = page.getByTestId("composer-input");
+    await input.fill("new content while reading history");
+    await page.getByTestId("composer-send").click();
+    await expect(page.getByTestId("unread-count")).toHaveText(/^[1-9]\d*$/);
+    expect(await list.evaluate((el) => el.scrollTop)).toBe(0);
+
+    await jump.click();
+    await expect(jump).toBeHidden({ timeout: 3000 });
+  });
+
+  test("refresh restores the nearby reading position", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto("/#conversation");
+    const list = page.getByTestId("conversation-virtual-list");
+    await expect(list).toBeVisible({ timeout: 15_000 });
+    await page.waitForTimeout(1200);
+
+    await list.evaluate((el) => {
+      Object.defineProperty(el, "clientHeight", { configurable: true, value: 200 });
+      Object.defineProperty(el, "scrollHeight", { configurable: true, value: 1000 });
+      el.scrollTop = 100;
+      el.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByTestId("jump-to-bottom")).toBeVisible();
+
+    await page.reload();
+    const restored = page.getByTestId("conversation-virtual-list");
+    await expect(restored).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId("jump-to-bottom")).toBeVisible();
+    await expect
+      .poll(() => restored.evaluate((el) => el.scrollTop), { timeout: 5_000 })
+      .toBeGreaterThanOrEqual(90);
   });
 
   test("deep link hash keeps conversation route", async ({ page }) => {

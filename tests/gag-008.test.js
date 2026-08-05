@@ -84,3 +84,15 @@ test("GAG-008 uses DesktopBridge turn.send / turn.cancel", () => {
   assert.match(facade, /turn\.cancel/);
   assert.match(facade, /subscribe/);
 });
+
+test("GAG-008 production shell never injects the seeded fixture timeline", async () => {
+  const shell = await readFile("src/app/ShellView.vue", "utf8");
+  assert.doesNotMatch(shell, /createSeedTimeline/);
+  assert.doesNotMatch(shell, /task-conv-1/);
+});
+
+test("GAG-008 virtual rows do not clip long Markdown or code blocks", () => {
+  const list = src("TimelineVirtualList.vue");
+  const rowCss = list.match(/\.virtual-row\s*\{([\s\S]*?)\}/)?.[1] ?? "";
+  assert.doesNotMatch(rowCss, /overflow:\s*hidden/);
+});
