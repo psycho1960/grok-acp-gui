@@ -6,10 +6,8 @@ import Button from "../shared/ui/Button.vue";
 import EmptyState from "../shared/ui/EmptyState.vue";
 import StatusIcon from "../shared/ui/StatusIcon.vue";
 import { createDesktopBridge } from "../bridge/client";
-import { createFakeDesktopBridge } from "../bridge/fake-bridge";
 import type { DesktopBridge, TaskId } from "../bridge/types";
 import TaskCenterView from "../features/task-center/TaskCenterView.vue";
-import { createTaskCenterSeedSnapshot } from "../features/task-center/seed";
 import {
   applyTaskCenterHash,
   parseTaskCenterHash,
@@ -20,10 +18,8 @@ import {
   applyConversationHash,
   parseConversationHash,
 } from "../features/conversation/hash-route";
-import {
-  createConversationSeedSnapshot,
-  createSeedTimeline,
-} from "../features/conversation/seed";
+import { createStatefulTaskCenterBridge } from "../features/task-center/stateful-fake-bridge";
+import { useTaskCenterStore } from "../features/task-center/task-center-store";
 
 defineProps<{ dataVersion?: string }>();
 
@@ -35,7 +31,12 @@ const showTaskCenter = computed(() => {
   if (showConversation.value) return false;
   const route = parseTaskCenterHash(routeHash.value);
   // Default shell main area shows Task Center when hash is task-center or empty after bootstrap.
-  return route.active || routeHash.value === "" || routeHash.value === "#";
+  return (
+    route.active ||
+    routeHash.value === "" ||
+    routeHash.value === "#" ||
+    routeHash.value === "#first-use"
+  );
 });
 
 function resolveBridge(): DesktopBridge {
@@ -49,21 +50,13 @@ function resolveBridge(): DesktopBridge {
   } catch {
     // fall through
   }
-  const taskSeed = createTaskCenterSeedSnapshot();
-  const convSeed = createConversationSeedSnapshot();
-  return createFakeDesktopBridge({
-    bootstrapSnapshot: {
-      ...taskSeed,
-      activeTasks: [
-        ...(taskSeed.activeTasks ?? []),
-        ...(convSeed.activeTasks ?? []),
-      ],
-      bindings: [...(taskSeed.bindings ?? []), ...(convSeed.bindings ?? [])],
-    },
-  });
+  // Browser/dev shell: empty projects by default so first-use closed loop is visible.
+  // Seeded demo: #task-center fixture still uses TaskCenterFixture with seed tasks.
+  return createStatefulTaskCenterBridge();
 }
 
 const bridge = ref<DesktopBridge>(resolveBridge());
+const taskStore = useTaskCenterStore();
 
 function onHashChange(): void {
   routeHash.value = window.location.hash;
@@ -83,7 +76,8 @@ function goTaskCenter(group?: TaskGroupId): void {
 }
 
 function goConversation(taskId?: string): void {
-  applyConversationHash(taskId ?? "task-conv-1");
+  const target = taskId ?? taskStore.selectedTaskId;
+  if (target) applyConversationHash(target);
 }
 
 const left = computed(() =>
@@ -129,14 +123,14 @@ const left = computed(() =>
 
 const main = computed(() => {
   if (showConversation.value) {
-    const taskId = (conversationRoute.value.taskId ?? "task-conv-1") as TaskId;
-    const snap = createSeedTimeline(taskId);
-    return h(ConversationView, {
-      bridge: bridge.value,
-      taskId,
-      snapshot: snap,
-      focusSeq: conversationRoute.value.eventSeq,
-    });
+    const routeTaskId = conversationRoute.value.taskId;
+    if (routeTaskId) {
+      return h(ConversationView, {
+        bridge: bridge.value,
+        taskId: routeTaskId as TaskId,
+        focusSeq: conversationRoute.value.eventSeq,
+      });
+    }
   }
   if (showTaskCenter.value) {
     return h(TaskCenterView, {
@@ -176,7 +170,27 @@ const inspector = computed(() =>
   ]),
 );
 
-const statusBar = computed(() => h("span", "未选择项目 · 桌面壳已就绪"));
+const statusBar = computed(() => {
+  const p = taskStore.activeProject;
+  if (p) {
+    return h(
+      "span",
+      `${p.displayPath || p.path} · 桌面壳已就绪`,
+    );
+  }
+  return h("span", "未选择项目 · 桌面壳已就绪");
+});
+
+const projectLabel = computed(() => {
+  const project = taskStore.activeProject;
+  return project?.displayPath || project?.path || "Project";
+});
+
+const workspaceLabel = computed(() => {
+  const project = taskStore.activeProject;
+  return project?.repoRoot || project?.path || "No workspace selected";
+});
+
 </script>
 
 <template>
@@ -186,6 +200,8 @@ const statusBar = computed(() => h("span", "未选择项目 · 桌面壳已就�
     :inspector="inspector"
     :inspector-open="inspectorOpen"
     :status-bar="statusBar"
+    :project-label="projectLabel"
+    :workspace-label="workspaceLabel"
     @update:inspector-open="inspectorOpen = $event"
   />
 </template>

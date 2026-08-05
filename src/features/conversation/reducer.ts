@@ -48,6 +48,7 @@ export function createEmptyConversationState(
     streamingAssistantId: null,
     needsSnapshotRefresh: false,
     gapFromSeq: null,
+    pendingEvents: new Map(),
   };
 }
 
@@ -58,13 +59,15 @@ function mapTaskStatus(status: string): ConversationRunStatus {
       return "running";
     case "waiting_permission":
       return "waiting_permission";
+    case "failed":
+    case "interrupted":
+    case "conflicted":
+      return "error";
     case "integrating":
       return "running";
     case "merged":
     case "archived":
       return "idle";
-    case "interrupted":
-      return "error";
     default:
       return "idle";
   }
@@ -135,7 +138,34 @@ function applyMessageDelta(
   event: Extract<TypedDesktopEvent, { type: "message.delta" }>,
 ): ConversationState {
   let next = markSeen(state, event.sessionId, event.seq);
-  const { text, toolCall } = event.payload;
+  const { role, text, toolCall } = event.payload;
+
+  if (role === "user" && typeof text === "string" && text.length > 0) {
+    const optimistic = [...next.items]
+      .reverse()
+      .find(
+        (item): item is UserMessageItem =>
+          item.kind === "user" &&
+          item.text === text &&
+          item.eventKey.startsWith("user:") &&
+          !item.failed,
+      );
+    const confirmed: UserMessageItem = {
+      id: optimistic?.id ?? itemId("user", event.seq),
+      kind: "user",
+      seq: event.seq,
+      sessionId: event.sessionId,
+      timestamp: event.timestamp,
+      eventKey: eventKey(event.sessionId, event.seq),
+      text,
+      pending: false,
+      failed: false,
+      errorMessage: undefined,
+    };
+    return optimistic
+      ? replaceItem(next, optimistic.id, confirmed)
+      : upsertItem(next, confirmed);
+  }
 
   if (toolCall != null) {
     const normalized = normalizeToolCall(toolCall);
@@ -225,7 +255,7 @@ function applyActivity(
   event: Extract<TypedDesktopEvent, { type: "activity.updated" }>,
 ): ConversationState {
   let next = markSeen(state, event.sessionId, event.seq);
-  const { kind, detail } = event.payload;
+  const { kind, detail, code, retryable } = event.payload;
 
   if (kind === "thinking" || kind === "thought") {
     const id = itemId("thinking", event.seq);
@@ -251,9 +281,11 @@ function applyActivity(
       timestamp: event.timestamp,
       eventKey: eventKey(event.sessionId, event.seq),
       message: detail || "发生错误",
-      retryable: true,
+      code,
+      retryable: retryable !== false,
     };
     next = freezeStreamingAssistant(next);
+    next = { ...next, status: "error" };
     return upsertItem(next, err);
   }
 
@@ -294,6 +326,34 @@ function applyTaskState(
       message: "任务已中断",
     };
     next = upsertItem(next, sys);
+  }
+
+  const detail = event.payload.detail;
+  const cancelled =
+    detail != null &&
+    typeof detail === "object" &&
+    "reason" in detail &&
+    detail.reason === "cancelled";
+  if (cancelled) {
+    next = {
+      ...next,
+      items: next.items.map((item) =>
+        item.kind === "tool" &&
+        (item.tool.phase === "pending" || item.tool.phase === "running")
+          ? { ...item, tool: { ...item.tool, phase: "cancelled" as const } }
+          : item,
+      ),
+    };
+    const stopped: SystemItem = {
+      id: itemId("system", event.seq, "cancelled"),
+      kind: "system",
+      seq: event.seq,
+      sessionId: event.sessionId,
+      timestamp: event.timestamp,
+      eventKey: eventKey(event.sessionId, event.seq),
+      message: "已停止",
+    };
+    next = upsertItem(next, stopped);
   }
 
   return next;
@@ -429,9 +489,50 @@ function applyUnknownSessionEvent(
   return upsertItem(next, item);
 }
 
+function applySequencedEvent(
+  state: ConversationState,
+  event: TypedDesktopEvent,
+): ConversationState {
+  if (!("sessionId" in event) || event.sessionId == null || event.seq == null) {
+    return state;
+  }
+  const sessionId = event.sessionId;
+  const seq = event.seq;
+  const next: ConversationState = {
+    ...state,
+    sessionId: state.sessionId ?? sessionId,
+    taskId: state.taskId ?? event.taskId ?? null,
+  };
+
+  switch (event.type) {
+    case "message.delta":
+      return applyMessageDelta(next, event);
+    case "activity.updated":
+      return applyActivity(next, event);
+    case "task.state":
+      return applyTaskState(next, event);
+    case "permission.requested":
+      return applyPermission(next, event);
+    case "plan.updated":
+      return applyPlan(next, event);
+    case "artifact.available":
+      return applyArtifact(next, event);
+    case "changes.updated":
+      return applyChanges(next, event);
+    case "task.snapshot":
+      // Full task list snapshots are handled at store layer; ignore here.
+      return markSeen(next, sessionId, seq);
+    default:
+      return applyUnknownSessionEvent(
+        next,
+        event as TypedDesktopEvent & { sessionId: SessionId; seq: number },
+      );
+  }
+}
+
 /**
- * Apply a single DesktopEvent. Duplicate (sessionId, seq) is ignored.
- * Non-session events that are diagnostic/resource are folded as system when task matches.
+ * Apply a single DesktopEvent. Session events are rendered only in strict seq
+ * order; future events are buffered and exact duplicates are ignored.
  */
 export function applyEvent(
   state: ConversationState,
@@ -476,54 +577,61 @@ export function applyEvent(
     return state;
   }
 
-  // Session-scoped
   if (!("sessionId" in event) || event.sessionId == null || event.seq == null) {
     return state;
   }
-
-  // Filter other tasks
   if (state.taskId && event.taskId && event.taskId !== state.taskId) {
     return state;
   }
-
-  const sessionId = event.sessionId;
-  const seq = event.seq;
-  const key = eventKey(sessionId, seq);
-  if (state.seenKeys.has(key)) {
-    return state; // exact dedup
+  if (state.sessionId && event.sessionId !== state.sessionId) {
+    return state;
   }
 
-  // Ensure session binding
-  const next: ConversationState = {
+  const key = eventKey(event.sessionId, event.seq);
+  if (state.seenKeys.has(key) || state.pendingEvents.has(event.seq)) {
+    return state;
+  }
+
+  const bound: ConversationState = {
     ...state,
-    sessionId: state.sessionId ?? sessionId,
+    sessionId: state.sessionId ?? event.sessionId,
     taskId: state.taskId ?? event.taskId ?? null,
   };
-
-  switch (event.type) {
-    case "message.delta":
-      return applyMessageDelta(next, event);
-    case "activity.updated":
-      return applyActivity(next, event);
-    case "task.state":
-      return applyTaskState(next, event);
-    case "permission.requested":
-      return applyPermission(next, event);
-    case "plan.updated":
-      return applyPlan(next, event);
-    case "artifact.available":
-      return applyArtifact(next, event);
-    case "changes.updated":
-      return applyChanges(next, event);
-    case "task.snapshot":
-      // Full task list snapshots are handled at store layer; ignore here.
-      return markSeen(next, sessionId, seq);
-    default:
-      return applyUnknownSessionEvent(
-        next,
-        event as TypedDesktopEvent & { sessionId: SessionId; seq: number },
-      );
+  const expected = bound.cursor.lastSeq + 1;
+  if (event.seq > expected) {
+    const pendingEvents = new Map(bound.pendingEvents);
+    pendingEvents.set(event.seq, event);
+    return {
+      ...bound,
+      pendingEvents,
+      needsSnapshotRefresh: true,
+      gapFromSeq: expected,
+    };
   }
+  if (event.seq < expected) {
+    return {
+      ...bound,
+      needsSnapshotRefresh: true,
+      gapFromSeq: Math.min(bound.gapFromSeq ?? event.seq, event.seq),
+    };
+  }
+
+  let next = applySequencedEvent(bound, event);
+  const pendingEvents = new Map(next.pendingEvents);
+  let queued = pendingEvents.get(next.cursor.lastSeq + 1);
+  while (queued) {
+    pendingEvents.delete(next.cursor.lastSeq + 1);
+    next = applySequencedEvent({ ...next, pendingEvents }, queued);
+    queued = pendingEvents.get(next.cursor.lastSeq + 1);
+  }
+
+  const hasGap = pendingEvents.size > 0;
+  return {
+    ...next,
+    pendingEvents,
+    needsSnapshotRefresh: hasGap,
+    gapFromSeq: hasGap ? next.cursor.lastSeq + 1 : null,
+  };
 }
 
 /** Apply many events in order (still enforces dedup / gap rules). */
@@ -551,11 +659,12 @@ export function applySnapshot(
     status: snapshot.status,
     attempt: snapshot.attempt ?? 1,
     cursor: {
-      lastSeq: snapshot.cursor,
-      snapshotSeq: snapshot.cursor,
+      lastSeq: 0,
+      snapshotSeq: 0,
     },
     needsSnapshotRefresh: false,
     gapFromSeq: null,
+    pendingEvents: new Map(),
   };
 
   if (snapshot.items && snapshot.items.length > 0) {
@@ -580,12 +689,29 @@ export function applySnapshot(
       seenKeys,
       toolIndex,
       streamingAssistantId: null,
+      pendingEvents: new Map(),
     };
     return next;
   }
 
-  // Replay snapshot events (all ≤ cursor)
-  next = applyEvents(next, snapshot.events);
+  // A snapshot is authoritative history; replay it by seq even if persistence
+  // returned rows in an unexpected order.
+  const orderedEvents = [...snapshot.events].sort((left, right) => {
+    const leftSeq = "seq" in left && typeof left.seq === "number" ? left.seq : 0;
+    const rightSeq = "seq" in right && typeof right.seq === "number" ? right.seq : 0;
+    return leftSeq - rightSeq;
+  });
+  // Snapshot rows may be compacted (for example thousands of consecutive
+  // assistant deltas become one safe message event), so their original ACP
+  // sequence numbers are intentionally sparse. The snapshot cursor is the
+  // authoritative gap boundary; strict contiguous sequencing is only for
+  // live deltas received after this snapshot.
+  next = orderedEvents.reduce((state, event) => {
+    if (!("sessionId" in event) || event.sessionId == null || event.seq == null) {
+      return state;
+    }
+    return applySequencedEvent(state, event);
+  }, next);
   next = freezeStreamingAssistant(next);
   next = {
     ...next,
@@ -688,7 +814,10 @@ export function setRunStatus(
   status: ConversationRunStatus,
 ): ConversationState {
   let next = { ...state, status };
-  if (status === "idle" || status === "error" || status === "cancelling") {
+  // Cancelling is only a local request state. ACP deltas already in transit
+  // must keep appending to the same visible message until the backend emits
+  // the terminal idle/error event.
+  if (status === "idle" || status === "error") {
     next = freezeStreamingAssistant(next);
   }
   return next;

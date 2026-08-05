@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { plainTextSummary, renderSafeMarkdown } from "./markdown";
+import { renderSafeMarkdown, visiblePlainText } from "./markdown";
 
 const props = defineProps<{
   source: string;
@@ -10,7 +10,7 @@ const props = defineProps<{
 const html = computed(() => renderSafeMarkdown(props.source));
 
 async function copyVisible(): Promise<void> {
-  const text = plainTextSummary(props.source);
+  const text = visiblePlainText(props.source);
   try {
     await navigator.clipboard.writeText(text);
   } catch {

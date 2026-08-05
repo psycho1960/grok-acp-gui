@@ -24,8 +24,25 @@ const props = withDefaults(
   },
 );
 
+const conversationEvents = fixtureConversationEvents();
+const snapshot = props.bulkEvents > 0
+  ? fixtureSessionSnapshot({
+      cursor: 0,
+      events: [],
+      items: [],
+      status: "running",
+      title: `Perf ${props.bulkEvents}`,
+    })
+  : fixtureSessionSnapshot();
+
 const sentMessages: string[] = [];
 let cancelCount = 0;
+let interactiveSeq = snapshot.cursor;
+
+function nextInteractiveSeq(): number {
+  interactiveSeq += 1;
+  return interactiveSeq;
+}
 
 const bridge = createFakeDesktopBridge({
   bootstrapSnapshot: createConversationSeedSnapshot(),
@@ -34,12 +51,11 @@ const bridge = createFakeDesktopBridge({
       sentMessages.push(command.payload.message);
       // Echo assistant reply for interactive fixture
       queueMicrotask(() => {
-        const seqBase = 1000 + sentMessages.length * 10;
         push({
           type: "task.state",
           taskId: command.payload.taskId,
           sessionId: "sess-conv-1" as never,
-          seq: seqBase,
+          seq: nextInteractiveSeq(),
           timestamp: new Date().toISOString(),
           payload: {
             taskId: command.payload.taskId,
@@ -51,7 +67,7 @@ const bridge = createFakeDesktopBridge({
           type: "message.delta",
           taskId: command.payload.taskId,
           sessionId: "sess-conv-1" as never,
-          seq: seqBase + 1,
+          seq: nextInteractiveSeq(),
           timestamp: new Date().toISOString(),
           payload: { text: `Echo: ${command.payload.message}` },
         });
@@ -59,7 +75,7 @@ const bridge = createFakeDesktopBridge({
           type: "task.state",
           taskId: command.payload.taskId,
           sessionId: "sess-conv-1" as never,
-          seq: seqBase + 2,
+          seq: nextInteractiveSeq(),
           timestamp: new Date().toISOString(),
           payload: {
             taskId: command.payload.taskId,
@@ -72,6 +88,24 @@ const bridge = createFakeDesktopBridge({
     }
     if (command.type === "turn.cancel") {
       cancelCount += 1;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      queueMicrotask(() => {
+        push({
+          type: "task.state",
+          taskId: command.payload.taskId,
+          sessionId: "sess-conv-1" as never,
+          seq: nextInteractiveSeq(),
+          timestamp: new Date().toISOString(),
+          payload: {
+            taskId: command.payload.taskId,
+            status: "idle",
+            detail: { reason: "cancelled" },
+          },
+        });
+      });
       return { success: "true", data: { acknowledged: "turn.cancel" } };
     }
     if (command.type === "task.open") {
@@ -88,21 +122,14 @@ const bridge = createFakeDesktopBridge({
   },
 });
 
-const snapshot = props.bulkEvents > 0
-  ? fixtureSessionSnapshot({
-      cursor: 0,
-      events: [],
-      items: [],
-      status: "running",
-      title: `Perf ${props.bulkEvents}`,
-    })
-  : fixtureSessionSnapshot();
-
 const taskId = FIX_TASK as TaskId;
 let timer: ReturnType<typeof setInterval> | null = null;
 const playIndex = ref(0);
 
 function push(event: TypedDesktopEvent): void {
+  if ("seq" in event && typeof event.seq === "number") {
+    interactiveSeq = Math.max(interactiveSeq, event.seq);
+  }
   bridge.pushEvent(event);
 }
 
@@ -124,7 +151,7 @@ onMounted(() => {
   }
 
   if (!props.autoPlay) return;
-  const live = fixtureConversationEvents().filter((e) => {
+  const live = conversationEvents.filter((e) => {
     if (!("seq" in e) || e.seq == null) return true;
     return e.seq > snapshot.cursor;
   });

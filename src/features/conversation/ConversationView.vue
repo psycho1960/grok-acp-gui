@@ -82,6 +82,10 @@ async function onSend(): Promise<void> {
 async function onCancel(): Promise<void> {
   await store.cancelTurn();
 }
+
+async function onResume(): Promise<void> {
+  await store.resumeSession();
+}
 </script>
 
 <template>
@@ -94,6 +98,7 @@ async function onCancel(): Promise<void> {
       :needs-refresh="store.needsRefresh"
       @cancel="onCancel"
       @refresh="props.taskId && store.openTask(props.taskId as TaskId)"
+      @resume="onResume"
     />
 
     <div class="body">

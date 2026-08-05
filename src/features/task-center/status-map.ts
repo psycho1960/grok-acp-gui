@@ -22,6 +22,12 @@ export interface TaskStatusPresentation {
 }
 
 const PRESENTATION: Record<TaskStatus, TaskStatusPresentation> = {
+  draft: {
+    group: "running",
+    icon: "waiting",
+    label: "草稿",
+    capabilities: { canCancel: false, canRecover: false, canOpen: true },
+  },
   preparing: {
     group: "running",
     icon: "running",
@@ -40,11 +46,35 @@ const PRESENTATION: Record<TaskStatus, TaskStatusPresentation> = {
     label: "等待审批",
     capabilities: { canCancel: true, canRecover: false, canOpen: true },
   },
+  idle: {
+    group: "running",
+    icon: "success",
+    label: "空闲",
+    capabilities: { canCancel: false, canRecover: false, canOpen: true },
+  },
+  failed: {
+    group: "failed_interrupted",
+    icon: "error",
+    label: "失败，可重试",
+    capabilities: { canCancel: false, canRecover: true, canOpen: true },
+  },
+  ready_for_review: {
+    group: "needs_attention",
+    icon: "waiting",
+    label: "等待审查",
+    capabilities: { canCancel: false, canRecover: false, canOpen: true },
+  },
   integrating: {
     group: "running",
     icon: "running",
     label: "集成中",
     capabilities: { canCancel: false, canRecover: false, canOpen: true },
+  },
+  conflicted: {
+    group: "needs_attention",
+    icon: "error",
+    label: "存在冲突",
+    capabilities: { canCancel: false, canRecover: true, canOpen: true },
   },
   merged: {
     group: "completed",

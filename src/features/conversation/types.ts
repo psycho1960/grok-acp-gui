@@ -243,6 +243,8 @@ export interface ConversationState {
   /** Pending seq gap — UI should request refresh. */
   needsSnapshotRefresh: boolean;
   gapFromSeq: number | null;
+  /** Out-of-order session events held until every preceding seq arrives. */
+  pendingEvents: Map<number, import("../../bridge/types").TypedDesktopEvent>;
 }
 
 export type ConversationLoadState =

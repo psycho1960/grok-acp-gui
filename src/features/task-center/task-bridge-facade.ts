@@ -5,7 +5,9 @@ import type {
   BootstrapSnapshot,
   DesktopBridge,
   DesktopResult,
+  ModelInfo,
   Project,
+  ReasoningEffort,
   SessionBinding,
   Task,
   TaskId,
@@ -21,6 +23,8 @@ import { isKnownTaskStatus } from "./status-map";
 export interface ListTasksResult {
   tasks: TaskViewModel[];
   projects: Project[];
+  /** Model choices supplied by the runtime capability snapshot. */
+  models: ModelInfo[];
   /**
    * Monotonic list generation stamped *before* bootstrap await so concurrent
    * callers cannot let a slower older response win by finishing last.
@@ -37,10 +41,38 @@ export type TaskCenterBridgeEvent =
   | { kind: "activity.updated"; event: Extract<TypedDesktopEvent, { type: "activity.updated" }> }
   | { kind: "runtime.updated"; event: Extract<TypedDesktopEvent, { type: "runtime.updated" }> };
 
+export interface OpenProjectResult {
+  projectId: import("../../bridge/types").ProjectId;
+  path?: string;
+  displayPath?: string;
+  repoRoot?: string;
+  /** When true, directory is usable but not a git repo. */
+  nonGit?: boolean;
+}
+
+export interface CreateTaskResult {
+  taskId: TaskId;
+  title?: string;
+  status?: string;
+}
+
 export interface TaskCenterFacade {
   listTasks(): Promise<ListTasksResult>;
   getTaskSnapshot(taskId: TaskId): Promise<DesktopResult<TaskOpenResult>>;
   cancelTask(taskId: TaskId): Promise<DesktopResult>;
+  /** Validate path (existence / git) without persisting. */
+  inspectWorkspace(path: string): Promise<DesktopResult<import("../../bridge/types").WorkspaceInspectResult>>;
+  /** Open or re-open a project directory and persist it. */
+  openProject(path: string): Promise<DesktopResult<OpenProjectResult>>;
+  createTask(input: {
+    projectId: import("../../bridge/types").ProjectId;
+    title: string;
+    prompt: string;
+    mode?: string;
+    model?: string;
+    reasoning?: ReasoningEffort;
+    workspaceStrategy?: "worktree" | "readonly" | "direct";
+  }): Promise<DesktopResult<CreateTaskResult>>;
   subscribe(listener: (event: TaskCenterBridgeEvent) => void): Promise<Unsubscribe>;
 }
 
@@ -211,6 +243,7 @@ export function createTaskCenterFacade(bridge: DesktopBridge): TaskCenterFacade 
         return {
           tasks: mapBootstrapToTasks(snapshot),
           projects: snapshot.projects ?? [],
+          models: snapshot.capabilities.models ?? [],
           version,
           refreshedAt: new Date().toISOString(),
           ready: snapshot.ready,
@@ -220,6 +253,7 @@ export function createTaskCenterFacade(bridge: DesktopBridge): TaskCenterFacade 
         return {
           tasks: [],
           projects: [],
+          models: [],
           version,
           refreshedAt: new Date().toISOString(),
           ready: false,
@@ -242,6 +276,110 @@ export function createTaskCenterFacade(bridge: DesktopBridge): TaskCenterFacade 
         type: "turn.cancel",
         payload: { taskId },
       });
+    },
+
+    async inspectWorkspace(path: string) {
+      return bridge.execute({
+        type: "workspace.inspect",
+        payload: { path },
+      }) as Promise<
+        DesktopResult<import("../../bridge/types").WorkspaceInspectResult>
+      >;
+    },
+
+    async openProject(path: string) {
+      const result = await bridge.execute({
+        type: "project.open",
+        payload: { path },
+      });
+      if (result.success === "false") return result;
+      const data = result.data as Record<string, unknown> | null;
+      const projectId =
+        data && typeof data === "object"
+          ? (data.projectId as OpenProjectResult["projectId"] | undefined) ??
+            (typeof data.id === "string"
+              ? (data.id as OpenProjectResult["projectId"])
+              : undefined)
+          : undefined;
+      if (!projectId) {
+        return {
+          success: "false" as const,
+          error: {
+            code: "BRIDGE_INVALID_PAYLOAD",
+            message: "project.open 响应缺少 projectId",
+            retryable: false,
+            detailsRedacted: true,
+            correlationId: "facade000project" as never,
+          },
+        };
+      }
+      return {
+        success: "true" as const,
+        data: {
+          projectId,
+          path: typeof data?.path === "string" ? data.path : path,
+          displayPath:
+            typeof data?.displayPath === "string"
+              ? data.displayPath
+              : typeof data?.path === "string"
+                ? data.path
+                : path,
+          repoRoot:
+            typeof data?.repoRoot === "string" ? data.repoRoot : undefined,
+          nonGit: data?.nonGit === true,
+        } satisfies OpenProjectResult,
+      };
+    },
+
+    async createTask(input) {
+      const result = await bridge.execute({
+        type: "task.create",
+        payload: {
+          projectId: input.projectId,
+          title: input.title,
+          prompt: input.prompt,
+          mode: input.mode,
+          model: input.model,
+          reasoning: input.reasoning,
+          workspaceStrategy: input.workspaceStrategy,
+        },
+      });
+      if (result.success === "false") return result;
+      const data = result.data as Record<string, unknown> | null;
+      // Support both { taskId } and { task: { id } } shapes.
+      let taskId: TaskId | undefined;
+      let title: string | undefined;
+      let status: string | undefined;
+      if (data && typeof data === "object") {
+        if (typeof data.taskId === "string") {
+          taskId = data.taskId as TaskId;
+        }
+        const nested = data.task;
+        if (nested && typeof nested === "object") {
+          const t = nested as Record<string, unknown>;
+          if (typeof t.id === "string") taskId = t.id as TaskId;
+          if (typeof t.title === "string") title = t.title;
+          if (typeof t.status === "string") status = t.status;
+        }
+        if (typeof data.title === "string") title = data.title;
+        if (typeof data.status === "string") status = data.status;
+      }
+      if (!taskId) {
+        return {
+          success: "false" as const,
+          error: {
+            code: "BRIDGE_INVALID_PAYLOAD",
+            message: "task.create 响应缺少 taskId",
+            retryable: false,
+            detailsRedacted: true,
+            correlationId: "facade000taskcreate" as never,
+          },
+        };
+      }
+      return {
+        success: "true" as const,
+        data: { taskId, title, status } satisfies CreateTaskResult,
+      };
     },
 
     async subscribe(

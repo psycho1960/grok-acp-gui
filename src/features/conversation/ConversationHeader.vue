@@ -12,7 +12,7 @@ const props = defineProps<{
   needsRefresh?: boolean;
 }>();
 
-const emit = defineEmits<{ cancel: []; refresh: [] }>();
+const emit = defineEmits<{ cancel: []; refresh: []; resume: [] }>();
 
 function statusIcon(
   s: ConversationRunStatus,
@@ -65,6 +65,14 @@ const tone = () => {
       <Badge v-if="attempt" tone="neutral">attempt {{ attempt }}</Badge>
     </div>
     <div class="right">
+      <Button
+        v-if="status === 'error' || status === 'disconnected'"
+        variant="primary"
+        data-testid="resume-session"
+        @click="emit('resume')"
+      >
+        恢复会话
+      </Button>
       <Button
         v-if="needsRefresh"
         variant="secondary"

@@ -24,6 +24,17 @@ const caps = () => capabilitiesForStatus(props.task.status);
 function onOpen(): void {
   emit("open", props.task.id);
 }
+
+function onCardClick(event: MouseEvent): void {
+  const target = event.target;
+  if (
+    target instanceof Element &&
+    target.closest("button, a, input, select, textarea, [role='button']")
+  ) {
+    return;
+  }
+  onOpen();
+}
 </script>
 
 <template>
@@ -38,6 +49,7 @@ function onOpen(): void {
     :aria-label="`${task.title}，${presentation().label}`"
     :data-task-id="task.id"
     :data-status="task.status"
+    @click="onCardClick"
   >
     <div class="task-card-main">
       <StatusIcon :status="presentation().icon" :label="presentation().label" />
@@ -115,6 +127,7 @@ function onOpen(): void {
   background: var(--ctp-mantle);
   border: 1px solid var(--ctp-surface0);
   border-radius: var(--radius-card);
+  cursor: pointer;
 }
 .task-card:hover {
   border-color: var(--ctp-surface1);

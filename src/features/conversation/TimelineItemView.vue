@@ -110,6 +110,7 @@ function formatTime(iso: string): string {
 
     <template v-else-if="item.kind === 'error'">
       <div class="bubble error" role="alert" data-testid="error-item">
+        <code v-if="item.code" class="error-code">{{ item.code }}</code>
         <p>{{ item.message }}</p>
       </div>
     </template>
@@ -163,6 +164,11 @@ function formatTime(iso: string): string {
 .bubble.error {
   border-color: var(--ctp-red);
   color: var(--ctp-red);
+}
+.error-code {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-family: var(--font-mono);
 }
 .bubble.unknown {
   border-style: dashed;

@@ -77,7 +77,7 @@ function redactedField(
     redactedFlag === "true" ||
     summary === "[redacted]";
   return {
-    summary: summary && summary.length > 0 ? summary : fallback,
+    summary: flag ? "[redacted]" : summary && summary.length > 0 ? summary : fallback,
     redacted: flag || !summary,
   };
 }

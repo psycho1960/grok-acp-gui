@@ -1,6 +1,7 @@
 export { createDesktopBridge } from "./client";
 export { createFakeDesktopBridge, fakeError } from "./fake-bridge";
 export type { FakeBridgeOptions } from "./fake-bridge";
+export { pickDirectory } from "./folder-picker";
 export type {
   DesktopBridge,
   DesktopCommand,

@@ -4,6 +4,7 @@ import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import type {
   DesktopBridge,
+  TaskOpenResult,
   TaskId,
   TypedDesktopEvent,
 } from "../../bridge/types";
@@ -12,6 +13,7 @@ import {
   type ConversationFacade,
 } from "./conversation-facade";
 import { clearDraft, loadDraft, saveDraft } from "./draft";
+import { redactVisibleText } from "./markdown";
 import {
   applyEvent,
   applySnapshot,
@@ -53,6 +55,7 @@ export const useConversationStore = defineStore("conversation", () => {
   let pendingDeltas: TypedDesktopEvent[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingUserId: string | null = null;
+  let openVersion = 0;
 
   const items = computed<TimelineItem[]>(() => {
     const raw = timeline.value.items;
@@ -206,6 +209,7 @@ export const useConversationStore = defineStore("conversation", () => {
 
   function detach(): void {
     disposed = true;
+    openVersion += 1;
     if (flushTimer) {
       clearTimeout(flushTimer);
       flushTimer = null;
@@ -218,7 +222,7 @@ export const useConversationStore = defineStore("conversation", () => {
     facade = null;
   }
 
-  function openFromSnapshot(snapshot: SessionTimelineSnapshot): void {
+  function commitSnapshot(snapshot: SessionTimelineSnapshot): void {
     loadState.value = "loading";
     const next = applySnapshot(createEmptyConversationState(snapshot.taskId), snapshot);
     commit(next);
@@ -228,7 +232,13 @@ export const useConversationStore = defineStore("conversation", () => {
     errorMessage.value = null;
   }
 
+  function openFromSnapshot(snapshot: SessionTimelineSnapshot): void {
+    openVersion += 1;
+    commitSnapshot(snapshot);
+  }
+
   async function openTask(taskId: TaskId, title = "任务会话"): Promise<void> {
+    const version = ++openVersion;
     loadState.value = "loading";
     errorMessage.value = null;
     commit({
@@ -245,17 +255,54 @@ export const useConversationStore = defineStore("conversation", () => {
 
     try {
       const result = await facade.openTask(taskId);
+      if (version !== openVersion || disposed) return;
       if (result.success === "false") {
         errorMessage.value = result.error.message;
         loadState.value = "error";
         return;
       }
-      const data = result.data as { title?: string; status?: string } | undefined;
-      if (data?.title) {
-        commit({ ...timeline.value, title: data.title });
+      const data = result.data as TaskOpenResult | undefined;
+      if (data?.sessionId && Array.isArray(data.events)) {
+        const cursor =
+          typeof data.cursor === "number"
+            ? data.cursor
+            : (data.cursor?.lastSeq ?? data.cursor?.snapshotSeq ?? 0);
+        const status: ConversationState["status"] =
+          data.status === "running" || data.status === "preparing"
+            ? "running"
+            : data.status === "waiting_permission"
+              ? "waiting_permission"
+              : data.status === "failed" ||
+                  data.status === "interrupted" ||
+                  data.status === "conflicted"
+                ? "error"
+                : "idle";
+        commitSnapshot({
+          taskId: data.taskId,
+          sessionId: data.sessionId,
+          title: data.title || title,
+          status,
+          cursor,
+          events: data.events,
+          attempt: data.attempt,
+        });
+      } else if (data?.title) {
+        commit({
+          ...timeline.value,
+          title: data.title,
+          status:
+            data.status === "running" || data.status === "preparing"
+              ? "running"
+              : data.status === "waiting_permission"
+                ? "waiting_permission"
+                : data.status === "failed" || data.status === "interrupted"
+                  ? "error"
+                  : "idle",
+        });
       }
       loadState.value = "ready";
     } catch (error) {
+      if (version !== openVersion || disposed) return;
       errorMessage.value =
         error instanceof Error ? error.message : "打开任务失败";
       loadState.value = "error";
@@ -285,11 +332,14 @@ export const useConversationStore = defineStore("conversation", () => {
     const localId = `user-${Date.now()}`;
     pendingUserId = localId;
     commit(
-      appendUserMessage(timeline.value, text, {
+      appendUserMessage(timeline.value, redactVisibleText(text), {
         id: localId,
         pending: true,
       }),
     );
+    // Enter running before IPC. ACP events may complete the turn before the
+    // execute Promise resolves; setting it afterwards would overwrite idle.
+    commit(setRunStatus(timeline.value, "running"));
 
     try {
       const result = await facade.sendTurn(timeline.value.taskId, text);
@@ -302,11 +352,11 @@ export const useConversationStore = defineStore("conversation", () => {
           ),
         );
         sendError.value = result.error.message;
+        commit(setRunStatus(timeline.value, "error"));
         // Keep draft for retry
         return false;
       }
       commit(markUserMessageConfirmed(timeline.value, localId));
-      commit(setRunStatus(timeline.value, "running"));
       draft.value = "";
       clearDraft(timeline.value.taskId);
       pendingUserId = null;
@@ -314,6 +364,7 @@ export const useConversationStore = defineStore("conversation", () => {
     } catch (error) {
       const msg = error instanceof Error ? error.message : "发送失败";
       commit(markUserMessageFailed(timeline.value, localId, msg));
+      commit(setRunStatus(timeline.value, "error"));
       sendError.value = msg;
       return false;
     } finally {
@@ -341,6 +392,23 @@ export const useConversationStore = defineStore("conversation", () => {
       return false;
     } finally {
       cancelPending.value = false;
+    }
+  }
+
+  async function resumeSession(): Promise<boolean> {
+    if (!timeline.value.taskId || !facade) return false;
+    sendError.value = null;
+    try {
+      const result = await facade.resumeSession(timeline.value.taskId);
+      if (result.success === "false") {
+        sendError.value = result.error.message;
+        return false;
+      }
+      await openTask(timeline.value.taskId);
+      return true;
+    } catch (error) {
+      sendError.value = error instanceof Error ? error.message : "恢复会话失败";
+      return false;
     }
   }
 
@@ -392,6 +460,7 @@ export const useConversationStore = defineStore("conversation", () => {
     setDraft,
     sendMessage,
     cancelTurn,
+    resumeSession,
     toggleTool,
     toggleThinking,
     setFocusEventSeq,

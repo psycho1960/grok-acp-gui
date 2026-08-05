@@ -150,9 +150,9 @@ export function fixtureUnknown(
   } as TypedDesktopEvent;
 }
 
-export function fixtureToolLifecycle(): TypedDesktopEvent[] {
+export function fixtureToolLifecycle(startSeq = 10): TypedDesktopEvent[] {
   return [
-    fixtureToolDelta(10, {
+    fixtureToolDelta(startSeq, {
       toolCallId: "tc-1",
       title: "Read file",
       kind: "read",
@@ -161,7 +161,7 @@ export function fixtureToolLifecycle(): TypedDesktopEvent[] {
       inputRedacted: false,
       startedAt: ts(10),
     }),
-    fixtureToolDelta(11, {
+    fixtureToolDelta(startSeq + 1, {
       toolCallId: "tc-1",
       title: "Read file",
       kind: "read",
@@ -171,7 +171,7 @@ export function fixtureToolLifecycle(): TypedDesktopEvent[] {
       endedAt: ts(12),
       durationMs: 2000,
     }),
-    fixtureToolDelta(12, {
+    fixtureToolDelta(startSeq + 2, {
       toolCallId: "tc-2",
       title: "Run tests",
       kind: "execute",
@@ -180,7 +180,7 @@ export function fixtureToolLifecycle(): TypedDesktopEvent[] {
       inputRedacted: false,
       startedAt: ts(12),
     }),
-    fixtureToolDelta(13, {
+    fixtureToolDelta(startSeq + 3, {
       toolCallId: "tc-2",
       status: "failed",
       resultSummary: "exit 1",
@@ -212,14 +212,14 @@ export function fixtureConversationEvents(): TypedDesktopEvent[] {
     fixtureAssistantDelta(3, "I'll "),
     fixtureAssistantDelta(4, "inspect the "),
     fixtureAssistantDelta(5, "module."),
-    ...fixtureToolLifecycle(),
-    fixturePermission(20),
-    fixturePlan(21),
-    fixtureArtifact(22),
-    fixtureChanges(23),
-    fixtureTaskState(24, "waiting_permission"),
-    fixtureUnknown(25),
-    fixtureRedactedTool(26),
+    ...fixtureToolLifecycle(6),
+    fixturePermission(10),
+    fixturePlan(11),
+    fixtureArtifact(12),
+    fixtureChanges(13),
+    fixtureTaskState(14, "waiting_permission"),
+    fixtureUnknown(15),
+    fixtureRedactedTool(16),
   ];
 }
 

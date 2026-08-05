@@ -37,17 +37,47 @@ const scrollTop = ref(0);
 const viewportHeight = ref(400);
 const anchor = ref<ScrollAnchor>(loadScrollAnchor(props.sessionKey));
 let prevCount = props.items.length;
+const layoutRevision = ref(0);
+const measuredHeights = new Map<string, number>();
 
-const totalHeight = computed(() => props.items.length * props.itemHeight);
+const layout = computed(() => {
+  const revision = layoutRevision.value;
+  const tops: number[] = [];
+  const heights: number[] = [];
+  let top = 0;
+  for (const item of props.items) {
+    tops.push(top);
+    const height = Math.max(
+      props.itemHeight,
+      measuredHeights.get(item.id) ?? props.itemHeight,
+    );
+    heights.push(height);
+    top += height;
+  }
+  return { tops, heights, total: top, revision };
+});
+
+const totalHeight = computed(() => layout.value.total);
+
+function indexAt(offset: number): number {
+  const tops = layout.value.tops;
+  let low = 0;
+  let high = tops.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if ((tops[mid] ?? 0) < offset) low = mid + 1;
+    else high = mid;
+  }
+  return Math.max(0, Math.min(tops.length - 1, low - 1));
+}
 
 const range = computed(() => {
-  const start = Math.max(
-    0,
-    Math.floor(scrollTop.value / props.itemHeight) - props.overscan,
+  if (props.items.length === 0) return { start: 0, end: 0 };
+  const start = Math.max(0, indexAt(scrollTop.value) - props.overscan);
+  const end = Math.min(
+    props.items.length,
+    indexAt(scrollTop.value + viewportHeight.value) + props.overscan + 2,
   );
-  const visible =
-    Math.ceil(viewportHeight.value / props.itemHeight) + props.overscan * 2;
-  const end = Math.min(props.items.length, start + visible);
   return { start, end };
 });
 
@@ -59,7 +89,8 @@ const windowItems = computed(() => {
       item,
       index,
       key: item.id,
-      top: index * props.itemHeight,
+      top: layout.value.tops[index] ?? 0,
+      height: layout.value.heights[index] ?? props.itemHeight,
     };
   });
 });
@@ -74,13 +105,37 @@ function persist(): void {
 function onScroll(): void {
   if (!root.value) return;
   scrollTop.value = root.value.scrollTop;
-  anchor.value = onUserScroll(
+  const topIndex = indexAt(root.value.scrollTop);
+  const itemTop = layout.value.tops[topIndex] ?? 0;
+  const next = onUserScroll(
     anchor.value,
     root.value.scrollTop,
     root.value.clientHeight,
     root.value.scrollHeight,
   );
+  anchor.value = {
+    ...next,
+    anchorEventKey: props.items[topIndex]?.eventKey,
+    anchorOffsetPx: Math.max(0, root.value.scrollTop - itemTop),
+  };
   persist();
+}
+
+function restoreSavedPosition(): void {
+  if (!root.value || anchor.value.stickToBottom) return;
+  let top = anchor.value.scrollTop;
+  if (anchor.value.anchorEventKey) {
+    const index = props.items.findIndex(
+      (item) => item.eventKey === anchor.value.anchorEventKey,
+    );
+    if (index >= 0) {
+      top =
+        (layout.value.tops[index] ?? top) +
+        Math.max(0, anchor.value.anchorOffsetPx ?? 0);
+    }
+  }
+  root.value.scrollTop = top;
+  scrollTop.value = root.value.scrollTop;
 }
 
 function scrollToBottom(smooth = false): void {
@@ -99,7 +154,7 @@ function scrollToBottom(smooth = false): void {
 function scrollToSeq(seq: number): void {
   const idx = props.items.findIndex((i) => i.seq === seq);
   if (idx < 0 || !root.value) return;
-  const top = idx * props.itemHeight;
+  const top = layout.value.tops[idx] ?? idx * props.itemHeight;
   root.value.scrollTop = top;
   scrollTop.value = top;
   anchor.value = {
@@ -111,9 +166,22 @@ function scrollToSeq(seq: number): void {
   persist();
 }
 
+function visibleRevision(): string {
+  const last = props.items[props.items.length - 1];
+  if (!last) return "0";
+  if (last.kind === "assistant") {
+    return `${props.items.length}:${last.id}:${last.seq}:${last.text.length}:${last.streaming}`;
+  }
+  if (last.kind === "tool") {
+    return `${props.items.length}:${last.id}:${last.seq}:${last.tool.phase}:${last.tool.result.summary}`;
+  }
+  return `${props.items.length}:${last.id}:${last.seq}:${last.kind}`;
+}
+
 watch(
-  () => props.items.length,
-  async (len) => {
+  visibleRevision,
+  async (revision, previous) => {
+    const len = props.items.length;
     const appended = len - prevCount;
     prevCount = len;
     if (appended > 0) {
@@ -122,6 +190,19 @@ watch(
       if (anchor.value.stickToBottom) {
         await nextTick();
         scrollToBottom(false);
+      } else {
+        await nextTick();
+        restoreSavedPosition();
+      }
+    } else if (previous != null && revision !== previous) {
+      anchor.value = onItemsAppended(anchor.value, 1);
+      persist();
+      if (anchor.value.stickToBottom) {
+        await nextTick();
+        scrollToBottom(false);
+      } else {
+        await nextTick();
+        restoreSavedPosition();
       }
     }
   },
@@ -134,7 +215,7 @@ watch(
     prevCount = props.items.length;
     nextTick(() => {
       if (anchor.value.stickToBottom) scrollToBottom(false);
-      else if (root.value) root.value.scrollTop = anchor.value.scrollTop;
+      else restoreSavedPosition();
     });
   },
 );
@@ -147,6 +228,23 @@ watch(
 );
 
 let resizeObserver: ResizeObserver | null = null;
+let rowResizeObserver: ResizeObserver | null = null;
+
+function measureRow(element: HTMLElement, id: string): void {
+  const height = Math.ceil(element.getBoundingClientRect().height);
+  if (height <= 0 || measuredHeights.get(id) === height) return;
+  measuredHeights.set(id, height);
+  layoutRevision.value += 1;
+  if (anchor.value.stickToBottom) nextTick(() => scrollToBottom(false));
+  else nextTick(restoreSavedPosition);
+}
+
+function setRowElement(element: unknown, id: string): void {
+  if (!(element instanceof HTMLElement)) return;
+  element.dataset.rowKey = id;
+  rowResizeObserver?.observe(element);
+  measureRow(element, id);
+}
 
 onMounted(() => {
   if (!root.value) return;
@@ -155,15 +253,29 @@ onMounted(() => {
     if (root.value) viewportHeight.value = root.value.clientHeight || 400;
   });
   resizeObserver.observe(root.value);
+  rowResizeObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const element = entry.target as HTMLElement;
+      const id = element.dataset.rowKey;
+      if (id) measureRow(element, id);
+    }
+  });
+  root.value.querySelectorAll<HTMLElement>(".virtual-row").forEach((element) => {
+    const id = element.dataset.rowKey;
+    if (id) rowResizeObserver?.observe(element);
+  });
   if (props.focusSeq != null) {
     scrollToSeq(props.focusSeq);
   } else if (anchor.value.stickToBottom) {
     scrollToBottom(false);
+  } else {
+    restoreSavedPosition();
   }
 });
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
+  rowResizeObserver?.disconnect();
   persist();
 });
 
@@ -203,11 +315,13 @@ defineExpose({
       >
         <div
           v-for="row in windowItems"
+          :ref="(element) => setRowElement(element, row.item.id)"
           :key="row.key"
           class="virtual-row"
           :data-index="row.index"
+          :data-row-key="row.item.id"
           :style="{
-            height: `${itemHeight}px`,
+            minHeight: `${itemHeight}px`,
             transform: `translateY(${row.top}px)`,
           }"
         >
@@ -251,7 +365,6 @@ defineExpose({
   left: 0;
   right: 0;
   box-sizing: border-box;
-  overflow: hidden;
 }
 .jump-bottom {
   position: absolute;

@@ -2,6 +2,17 @@
 
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 
+/** Defense-in-depth redaction for content rendered or copied in Renderer. */
+export function redactVisibleText(source: string): string {
+  const sensitive =
+    /(xai_api_key|api[_-]?key|apikey|authorization|password|passwd|credential|private[_-]?key|secret|token|cookie)\s*([=:])\s*(?:"[^"]*"|'[^']*'|[^\s]+)/gi;
+  return source
+    .replace(/\bbearer\s+[^\s]+/gi, "Bearer [redacted]")
+    .replace(sensitive, (_match, key: string, separator: string) =>
+      `${key}${separator} [redacted]`,
+    );
+}
+
 /** Escape HTML special characters. */
 export function escapeHtml(text: string): string {
   return text
@@ -57,7 +68,7 @@ export function renderSafeMarkdown(source: string): string {
   const fences: CodeFence[] = [];
   const FENCE_OPEN = "%%FENCE";
   const FENCE_CLOSE = "%%";
-  let text = source.replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
+  let text = redactVisibleText(source).replace(/```([^\n`]*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
     const idx = fences.length;
     fences.push({
       lang: String(lang || "").trim().slice(0, 32),
@@ -118,13 +129,18 @@ export function renderSafeMarkdown(source: string): string {
     .join("");
 }
 
-/** Visible plain-text summary for copy (strips markdown syntax lightly). */
-export function plainTextSummary(source: string, maxLen = 4000): string {
-  const plain = source
-    .replace(/```[\s\S]*?```/g, "[code]")
+/** Complete visible plain text for the default copy action. */
+export function visiblePlainText(source: string): string {
+  return redactVisibleText(source)
+    .replace(/```[^\n`]*\n?([\s\S]*?)```/g, "$1")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
     .replace(/[*_>#]/g, "");
+}
+
+/** Visible plain-text summary for compact diagnostic surfaces. */
+export function plainTextSummary(source: string, maxLen = 4000): string {
+  const plain = visiblePlainText(source);
   if (plain.length <= maxLen) return plain;
   return `${plain.slice(0, maxLen)}…`;
 }

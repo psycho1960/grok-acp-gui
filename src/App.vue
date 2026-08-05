@@ -23,7 +23,11 @@ function syncHash(): void {
 const developmentRoute = computed(() => routeHash.value);
 
 const showUiKit = computed(() => developmentRoute.value === "#ui-kit");
-const showShellPreview = computed(() => developmentRoute.value === "#shell");
+const showShellPreview = computed(
+  () =>
+    developmentRoute.value === "#shell" ||
+    developmentRoute.value === "#first-use",
+);
 const conversationRoute = computed(() => parseConversationHash(routeHash.value));
 
 // UI-ERROR-001: when the database is unavailable or corrupt the backend

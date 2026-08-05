@@ -23,6 +23,46 @@ function requireTauriHost(): void {
 
 const EVENT_CHANNEL = "bridge:event";
 
+const SESSION_EVENT_TYPES = new Set([
+  "task.snapshot",
+  "task.state",
+  "message.delta",
+  "activity.updated",
+  "permission.requested",
+  "plan.updated",
+  "changes.updated",
+  "artifact.available",
+]);
+
+/** Runtime guard for the untrusted IPC event envelope. */
+export function isValidDesktopEvent(raw: unknown): boolean {
+  if (typeof raw !== "object" || raw === null) return false;
+  const event = raw as Record<string, unknown>;
+  if (
+    typeof event.type !== "string" ||
+    event.type.length === 0 ||
+    typeof event.timestamp !== "string" ||
+    !("payload" in event)
+  ) {
+    return false;
+  }
+
+  const hasAnyScope =
+    "taskId" in event || "sessionId" in event || "seq" in event;
+  if (SESSION_EVENT_TYPES.has(event.type) || hasAnyScope) {
+    return (
+      typeof event.taskId === "string" &&
+      event.taskId.length > 0 &&
+      typeof event.sessionId === "string" &&
+      event.sessionId.length > 0 &&
+      typeof event.seq === "number" &&
+      Number.isSafeInteger(event.seq) &&
+      event.seq > 0
+    );
+  }
+  return true;
+}
+
 export function createDesktopBridge(): DesktopBridge {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let invokeFn: ((cmd: string, args?: Record<string, unknown>) => Promise<any>) | null =
@@ -59,14 +99,7 @@ export function createDesktopBridge(): DesktopBridge {
         EVENT_CHANNEL,
         (event: { payload: unknown }) => {
           const raw = event.payload;
-          if (
-            typeof raw === "object" &&
-            raw !== null &&
-            "type" in raw &&
-            typeof (raw as Record<string, unknown>).type === "string" &&
-            "timestamp" in raw &&
-            "payload" in raw
-          ) {
+          if (isValidDesktopEvent(raw)) {
             listener(raw as import("./types").TypedDesktopEvent);
           }
           // Drop malformed events silently — the Renderer must not trust IPC.

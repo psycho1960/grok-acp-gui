@@ -21,6 +21,7 @@ export interface ConversationFacade {
     attachments?: string[],
   ): Promise<DesktopResult<TurnSendResult | unknown>>;
   cancelTurn(taskId: TaskId): Promise<DesktopResult>;
+  resumeSession(taskId: TaskId): Promise<DesktopResult>;
   openTask(taskId: TaskId): Promise<DesktopResult>;
   subscribe(
     listener: (evt: ConversationFacadeEvent) => void,
@@ -41,6 +42,13 @@ export function createConversationFacade(
     async cancelTurn(taskId) {
       return bridge.execute({
         type: "turn.cancel",
+        payload: { taskId },
+      });
+    },
+
+    async resumeSession(taskId) {
+      return bridge.execute({
+        type: "session.resume",
         payload: { taskId },
       });
     },

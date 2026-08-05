@@ -1,4 +1,4 @@
-// GAG-008: Per-task composer draft persistence (sessionStorage).
+// GAG-008: Durable per-task composer draft persistence.
 
 const PREFIX = "gag008:draft:";
 
@@ -6,23 +6,47 @@ export function draftStorageKey(taskId: string): string {
   return `${PREFIX}${taskId}`;
 }
 
-export function loadDraft(taskId: string | null | undefined): string {
-  if (!taskId || typeof sessionStorage === "undefined") return "";
+function browserStorage(kind: "localStorage" | "sessionStorage"): Storage | null {
   try {
-    return sessionStorage.getItem(draftStorageKey(taskId)) ?? "";
+    if (typeof window === "undefined") return null;
+    return window[kind];
+  } catch {
+    return null;
+  }
+}
+
+export function loadDraft(taskId: string | null | undefined): string {
+  if (!taskId) return "";
+  const key = draftStorageKey(taskId);
+  try {
+    const durable = browserStorage("localStorage")?.getItem(key);
+    if (durable != null) return durable;
+
+    // Migrate drafts written by the earlier page-session-only implementation.
+    const legacyStorage = browserStorage("sessionStorage");
+    const legacy = legacyStorage?.getItem(key);
+    if (legacy != null) {
+      browserStorage("localStorage")?.setItem(key, legacy);
+      legacyStorage?.removeItem(key);
+      return legacy;
+    }
+    return "";
   } catch {
     return "";
   }
 }
 
 export function saveDraft(taskId: string | null | undefined, text: string): void {
-  if (!taskId || typeof sessionStorage === "undefined") return;
+  if (!taskId) return;
+  const key = draftStorageKey(taskId);
   try {
+    const durable = browserStorage("localStorage");
     if (!text) {
-      sessionStorage.removeItem(draftStorageKey(taskId));
+      durable?.removeItem(key);
     } else {
-      sessionStorage.setItem(draftStorageKey(taskId), text);
+      durable?.setItem(key, text);
     }
+    browserStorage("sessionStorage")?.removeItem(key);
   } catch {
     // quota / private mode — ignore
   }
