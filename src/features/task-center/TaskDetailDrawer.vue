@@ -18,6 +18,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:open": [value: boolean];
+  conversation: [taskId: string];
   cancel: [taskId: string];
   recover: [taskId: string];
 }>();
@@ -123,6 +124,13 @@ const title = computed(
 
       <section class="detail-actions">
         <!-- Safe actions first so focus trap lands on close (Drawer) or open, not danger. -->
+        <Button
+          variant="primary"
+          data-testid="detail-open-conversation"
+          @click="emit('conversation', task.id)"
+        >
+          打开对话
+        </Button>
         <Button
           v-if="caps.canRecover"
           variant="primary"

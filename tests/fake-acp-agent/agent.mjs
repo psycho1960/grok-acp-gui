@@ -4,8 +4,10 @@
 //
 // Scenario selection is controlled by the FAKE_ACP_SCENARIO env var:
 //   - "normal"      (default): full happy-path handshake + streaming
+//   - "slow":       same lifecycle with a deliberately slow turn
 //   - "timeout":    accepts initialize but never responds (handshake timeout)
 //   - "crash":      exits immediately with code 1 after receiving initialize
+//   - "crash-after-prompt": exits after accepting the first prompt
 //   - "bad-frame":  writes a non-JSON line to stdout
 //   - "stderr-flood": writes thousands of lines to stderr
 //   - "unknown-method": responds to initialize but sends unknown notifications
@@ -47,6 +49,8 @@ function logErr(msg) {
 // --- Scenario handlers ---
 
 let requestCounter = 0;
+let authenticated = false;
+let activeSessionId = null;
 
 function handleInitialize(id) {
   if (SCENARIO === 'timeout') {
@@ -75,6 +79,7 @@ function handleInitialize(id) {
       terminal: true,
     },
     instructions: 'Fake ACP agent for testing.',
+    authMethods: [{ id: 'cached_token', name: 'Cached login' }],
     models: [
       { modelId: 'grok-4', name: 'Grok 4' },
     ],
@@ -85,7 +90,50 @@ function handleInitialize(id) {
   });
 }
 
-function handlePrompt(id) {
+function handleAuthenticate(id, params) {
+  if (params?.methodId !== 'cached_token') {
+    sendError(id, -32602, 'unsupported auth method');
+    return;
+  }
+  authenticated = true;
+  sendResponse(id, {});
+}
+
+function handleSessionNew(id, params) {
+  if (!authenticated) {
+    sendError(id, -32000, 'authentication required');
+    return;
+  }
+  if (typeof params?.cwd !== 'string' || !Array.isArray(params?.mcpServers)) {
+    sendError(id, -32602, 'cwd and mcpServers are required');
+    return;
+  }
+  activeSessionId = `fake-session-${++requestCounter}`;
+  sendResponse(id, { sessionId: activeSessionId });
+}
+
+function handlePrompt(id, params) {
+  if (
+    params?.sessionId !== activeSessionId ||
+    !Array.isArray(params?.prompt) ||
+    params.prompt[0]?.type !== 'text' ||
+    typeof params.prompt[0]?.text !== 'string'
+  ) {
+    sendError(id, -32602, 'sessionId and text prompt content blocks are required');
+    return;
+  }
+
+  sendNotification('session/update', {
+    sessionId: activeSessionId,
+    update: {
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: params.prompt[0].text },
+    },
+  });
+  if (SCENARIO === 'crash-after-prompt') {
+    setTimeout(() => process.exit(2), 10);
+    return;
+  }
   if (SCENARIO === 'permission') {
     // Send a requestPermission before responding.
     const permId = `perm-${++requestCounter}`;
@@ -123,50 +171,54 @@ function handlePrompt(id) {
 
   // Stream assistant deltas.
   const words = ['Hello', ' from', ' fake', ' ACP', ' agent!'];
-  let delay = 10;
+  let delay = SCENARIO === 'slow' ? 200 : 10;
+  const step = SCENARIO === 'slow' ? 100 : 10;
   for (const word of words) {
     setTimeout(() => {
       sendNotification('session/update', {
-        type: 'assistantMessage',
-        content: word,
+        sessionId: activeSessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: word },
+        },
       });
     }, delay);
-    delay += 10;
+    delay += step;
   }
 
   // Send a tool call.
   setTimeout(() => {
     sendNotification('session/update', {
-      type: 'toolCall',
-      toolCallId: `tc-${++requestCounter}`,
-      title: 'Edit file',
-      kind: 'edit',
+      sessionId: activeSessionId,
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId: `tc-${++requestCounter}`,
+        title: 'Edit file',
+        kind: 'edit',
+        status: 'in_progress',
+        rawInput: { path: 'fixture.txt' },
+      },
     });
   }, delay);
-  delay += 10;
+  delay += step;
 
   // Tool complete.
   setTimeout(() => {
     sendNotification('session/update', {
-      type: 'toolCallComplete',
-      toolCallId: `tc-${requestCounter}`,
-      outcome: 'success',
-      summary: 'File edited successfully.',
+      sessionId: activeSessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: `tc-${requestCounter}`,
+        status: 'completed',
+        rawOutput: { linesChanged: 1 },
+      },
     });
   }, delay);
-  delay += 10;
-
-  // Assistant message complete.
-  setTimeout(() => {
-    sendNotification('session/update', {
-      type: 'assistantMessageComplete',
-    });
-  }, delay);
-  delay += 10;
+  delay += step;
 
   // Respond to the prompt request.
   setTimeout(() => {
-    sendResponse(id, { ok: true });
+    sendResponse(id, { stopReason: 'end_turn' });
   }, delay);
 }
 
@@ -222,8 +274,14 @@ rl.on('line', (line) => {
       case 'initialize':
         handleInitialize(msg.id);
         break;
+      case 'authenticate':
+        handleAuthenticate(msg.id, msg.params);
+        break;
+      case 'session/new':
+        handleSessionNew(msg.id, msg.params);
+        break;
       case 'session/prompt':
-        handlePrompt(msg.id);
+        handlePrompt(msg.id, msg.params);
         break;
       case 'session/cancel':
         handleCancel(msg.id);

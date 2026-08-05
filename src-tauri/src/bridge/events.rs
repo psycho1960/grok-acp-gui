@@ -166,6 +166,10 @@ pub struct MessageDeltaPayload {
 pub struct ActivityUpdatedPayload {
     pub kind: String,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

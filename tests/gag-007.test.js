@@ -30,6 +30,9 @@ test("GAG-007 provides Task Center feature modules", () => {
     "status-map.ts",
     "hash-route.ts",
     "list-rows.ts",
+    "OpenProjectDialog.vue",
+    "CreateTaskDialog.vue",
+    "stateful-fake-bridge.ts",
     "index.ts",
   ]) {
     assert.ok(
@@ -45,9 +48,19 @@ test("GAG-007 facade maps onto existing DesktopBridge commands/events", () => {
   assert.match(facade, /turn\.cancel/);
   assert.match(facade, /task\.snapshot/);
   assert.match(facade, /task\.state/);
+  assert.match(facade, /project\.open/);
+  assert.match(facade, /task\.create/);
+  assert.match(facade, /workspace\.inspect/);
   assert.doesNotMatch(facade, /list_tasks/);
   assert.doesNotMatch(facade, /cancel_task/);
   assert.doesNotMatch(facade, /task:status_changed/);
+});
+
+test("GAG-007 closed-loop surfaces open project and create task CTAs", () => {
+  const view = src("TaskCenterView.vue");
+  assert.match(view, /header-open-project|empty-open-project/);
+  assert.match(view, /header-create-task|empty-create-task/);
+  assert.match(view, /#conversation\//);
 });
 
 test("GAG-007 does not hardcode Mocha palette hex in feature sources", () => {

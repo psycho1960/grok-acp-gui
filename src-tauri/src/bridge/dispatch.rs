@@ -17,6 +17,7 @@ use super::events::DesktopEvent;
 use crate::domain;
 use crate::modules::agent_runtime::{AgentEvent, RuntimeConfig, TimestampedEvent};
 use crate::modules::persistence::Repository;
+use crate::modules::task_runtime::TaskRuntime;
 
 /// Wrapper that the `execute` Tauri command returns.
 ///
@@ -68,6 +69,18 @@ pub fn bootstrap_impl(repo: &dyn Repository, db_init_error: Option<&str>) -> Boo
         };
     }
 
+    // Grok Build model profiles are user-owned configuration. Read them once
+    // for the capability snapshot; errors intentionally degrade to no choices.
+    let configured_models = crate::modules::agent_runtime::configured_models()
+        .into_iter()
+        .map(|model| ModelInfo {
+            model_id: model.id,
+            name: model.name,
+            description: None,
+            reasoning_effort: model.reasoning_effort,
+        })
+        .collect();
+
     // Load domain entities from persistence.
     match repo.bootstrap_snapshot() {
         Ok(domain_snap) => BootstrapSnapshot {
@@ -83,7 +96,7 @@ pub fn bootstrap_impl(repo: &dyn Repository, db_init_error: Option<&str>) -> Boo
                 authenticated: None,
             },
             capabilities: CapabilitySnapshot {
-                models: vec![],
+                models: configured_models,
                 modes: vec![],
                 slash_commands: vec![],
                 model_state: None,
@@ -225,6 +238,8 @@ pub struct ModelInfo {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -253,6 +268,7 @@ pub struct SlashCommandInfo {
 pub async fn execute_impl(
     repo: &dyn Repository,
     runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    task_runtime: &dyn TaskRuntime,
     raw: serde_json::Value,
 ) -> DesktopResult {
     // Reject oversized payloads before any deserialization.
@@ -298,7 +314,7 @@ pub async fn execute_impl(
         return DesktopResult::err(err);
     }
 
-    dispatch(repo, runtime, cmd).await
+    dispatch(repo, runtime, task_runtime, cmd).await
 }
 
 use super::commands::DesktopCommand;
@@ -306,23 +322,28 @@ use super::commands::DesktopCommand;
 async fn dispatch(
     repo: &dyn Repository,
     runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    task_runtime: &dyn TaskRuntime,
     cmd: DesktopCommand,
 ) -> DesktopResult {
     match &cmd {
         DesktopCommand::RuntimeRefresh(_) => runtime_refresh(runtime).await,
         DesktopCommand::RuntimeLogin(_) => not_implemented("runtime.login"),
 
-        DesktopCommand::ProjectOpen(_) => not_implemented("project.open"),
+        DesktopCommand::ProjectOpen(payload) => project_open(repo, payload),
         DesktopCommand::ProjectForget(_) => not_implemented("project.forget"),
 
-        DesktopCommand::TaskCreate(payload) => task_create(repo, payload),
-        DesktopCommand::TaskOpen(_) => not_implemented("task.open"),
+        DesktopCommand::TaskCreate(payload) => {
+            task_create(repo, runtime, task_runtime, payload).await
+        }
+        DesktopCommand::TaskOpen(payload) => task_open(repo, task_runtime, payload).await,
         DesktopCommand::TaskArchive(_) => not_implemented("task.archive"),
 
-        DesktopCommand::TurnSend(_) => not_implemented("turn.send"),
-        DesktopCommand::TurnCancel(_) => not_implemented("turn.cancel"),
+        DesktopCommand::TurnSend(payload) => turn_send(repo, runtime, task_runtime, payload).await,
+        DesktopCommand::TurnCancel(payload) => {
+            turn_cancel(repo, runtime, task_runtime, payload).await
+        }
         DesktopCommand::SessionConfigure(_) => not_implemented("session.configure"),
-        DesktopCommand::SessionResume(_) => not_implemented("session.resume"),
+        DesktopCommand::SessionResume(payload) => session_resume(repo, task_runtime, payload).await,
 
         DesktopCommand::PermissionResolve(_) => not_implemented("permission.resolve"),
         DesktopCommand::PlanResolve(_) => not_implemented("plan.resolve"),
@@ -330,7 +351,7 @@ async fn dispatch(
         DesktopCommand::ArtifactImport(_) => not_implemented("artifact.import"),
         DesktopCommand::ArtifactSave(_) => not_implemented("artifact.save"),
 
-        DesktopCommand::WorkspaceInspect(_) => not_implemented("workspace.inspect"),
+        DesktopCommand::WorkspaceInspect(payload) => workspace_inspect(payload),
         DesktopCommand::WorktreeAdopt(_) => not_implemented("worktree.adopt"),
 
         DesktopCommand::ReviewDiff(_) => not_implemented("review.diff"),
@@ -355,13 +376,268 @@ async fn runtime_refresh(
     DesktopResult::ok(serde_json::to_value(&result).unwrap_or(serde_json::Value::Null))
 }
 
-/// Wire `task.create` to the persistence layer.
-fn task_create(
+/// Inspect a workspace path: exists as directory, discover git root if any.
+fn workspace_inspect(payload: &super::commands::WorkspaceInspectPayload) -> DesktopResult {
+    let path = payload.path.trim();
+    if path.is_empty() {
+        return DesktopResult::err(
+            AppError::new(
+                domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                "Path is required",
+            )
+            .with_action("Choose a folder or enter a valid absolute path."),
+        );
+    }
+
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => {
+            return DesktopResult::err(
+                AppError::new(
+                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                    "Directory does not exist or is not accessible",
+                )
+                .with_action("Check the path and try again."),
+            );
+        }
+    };
+    if !meta.is_dir() {
+        return DesktopResult::err(
+            AppError::new(
+                domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                "Path is not a directory",
+            )
+            .with_action("Select a folder, not a file."),
+        );
+    }
+
+    let repo_root = find_git_root(std::path::Path::new(path));
+    let branch = repo_root
+        .as_ref()
+        .and_then(|r| read_git_branch(std::path::Path::new(r)))
+        .unwrap_or_else(|| "unknown".into());
+
+    DesktopResult::ok(serde_json::json!({
+        "repoRoot": repo_root.clone().unwrap_or_else(|| path.to_string()),
+        "branch": branch,
+        "dirty": false,
+        "isGit": repo_root.is_some(),
+    }))
+}
+
+/// Open (or re-open) a project directory and persist it.
+/// Non-git directories are accepted with nonGit=true (Ask/Agent without Worktree).
+fn project_open(
     repo: &dyn Repository,
+    payload: &super::commands::ProjectOpenPayload,
+) -> DesktopResult {
+    use crate::domain::types::{utc_now, Project, ProjectId};
+    use uuid::Uuid;
+
+    let path = payload.path.trim();
+    if path.is_empty() {
+        return DesktopResult::err(
+            AppError::new(
+                domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                "Path is required",
+            )
+            .with_action("Choose a folder or enter a valid absolute path."),
+        );
+    }
+
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => {
+            return DesktopResult::err(
+                AppError::new(
+                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                    "Directory does not exist or is not accessible",
+                )
+                .with_action("Check the path and try again."),
+            );
+        }
+    };
+    if !meta.is_dir() {
+        return DesktopResult::err(
+            AppError::new(
+                domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                "Path is not a directory",
+            )
+            .with_action("Select a folder, not a file."),
+        );
+    }
+
+    let canonical = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    // Strip Windows \\?\ prefix for display
+    let normalized = canonical
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&canonical)
+        .to_string();
+
+    let repo_root = find_git_root(std::path::Path::new(&normalized));
+    let non_git = repo_root.is_none();
+    let now = utc_now();
+    let display_path = display_path_for(&normalized);
+
+    // Re-open existing project by path if present
+    if let Ok(existing) = repo.list_projects() {
+        if let Some(found) = existing
+            .iter()
+            .find(|p| paths_equal(&p.path, &normalized) || paths_equal(&p.path, path))
+        {
+            let mut updated = found.clone();
+            updated.last_opened_at = now.clone();
+            updated.repo_root = repo_root.clone();
+            updated.display_path = display_path.clone();
+            if updated.trusted_at.is_none() {
+                updated.trusted_at = Some(now.clone());
+            }
+            if let Err(e) = repo.update_project(&updated) {
+                return DesktopResult::err(AppError::new(e.code, e.message));
+            }
+            return DesktopResult::ok(serde_json::json!({
+                "projectId": updated.id.0,
+                "path": updated.path,
+                "displayPath": updated.display_path,
+                "repoRoot": updated.repo_root,
+                "nonGit": non_git,
+            }));
+        }
+    }
+
+    let project = Project {
+        id: ProjectId::new(format!("proj-{}", Uuid::new_v4())),
+        path: normalized.clone(),
+        display_path,
+        repo_root: repo_root.clone(),
+        trusted_at: Some(now.clone()),
+        last_opened_at: now,
+    };
+
+    match repo.create_project(&project) {
+        Ok(()) => {}
+        Err(e) => {
+            // Unique path race — try list again
+            if e.code == domain::error::codes::PROJECT_ALREADY_EXISTS {
+                if let Ok(list) = repo.list_projects() {
+                    if let Some(found) = list.iter().find(|p| paths_equal(&p.path, &normalized)) {
+                        return DesktopResult::ok(serde_json::json!({
+                            "projectId": found.id.0,
+                            "path": found.path,
+                            "displayPath": found.display_path,
+                            "repoRoot": found.repo_root,
+                            "nonGit": non_git,
+                        }));
+                    }
+                }
+            }
+            return DesktopResult::err(AppError::new(e.code, e.message));
+        }
+    }
+
+    DesktopResult::ok(serde_json::json!({
+        "projectId": project.id.0,
+        "path": project.path,
+        "displayPath": project.display_path,
+        "repoRoot": project.repo_root,
+        "nonGit": non_git,
+    }))
+}
+
+fn find_git_root(start: &std::path::Path) -> Option<String> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        let git = dir.join(".git");
+        if git.exists() {
+            return Some(dir.to_string_lossy().to_string());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn read_git_branch(repo_root: &std::path::Path) -> Option<String> {
+    let head = repo_root.join(".git").join("HEAD");
+    let content = std::fs::read_to_string(head).ok()?;
+    let content = content.trim();
+    if let Some(rest) = content.strip_prefix("ref: refs/heads/") {
+        return Some(rest.to_string());
+    }
+    if content.len() >= 7 {
+        return Some(content[..7].to_string());
+    }
+    Some("HEAD".into())
+}
+
+fn display_path_for(path: &str) -> String {
+    // Prefer last two path segments for UI.
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() >= 2 {
+        format!("{}/{}", parts[parts.len() - 2], parts[parts.len() - 1])
+    } else if let Some(last) = parts.last() {
+        (*last).to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn paths_equal(a: &str, b: &str) -> bool {
+    let na = a
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    let nb = b
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_ascii_lowercase();
+    na == nb
+}
+
+/// Wire `task.create` to the persistence layer.
+async fn task_create(
+    repo: &dyn Repository,
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    task_runtime: &dyn TaskRuntime,
     payload: &super::commands::TaskCreatePayload,
 ) -> DesktopResult {
     use crate::domain::types::{utc_now, Task, TaskId, TaskStatus, WorkspaceKind};
     use uuid::Uuid;
+
+    if payload.prompt.trim().is_empty() {
+        return DesktopResult::err(
+            AppError::new(
+                domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                "Task prompt is required",
+            )
+            .with_action("Enter a task goal before creating."),
+        );
+    }
+    if payload.title.trim().is_empty() {
+        return DesktopResult::err(
+            AppError::new(
+                domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                "Task title is required",
+            )
+            .with_action("Provide a title or a non-empty prompt."),
+        );
+    }
+
+    // Ensure project exists
+    if repo.get_project(&payload.project_id.0).is_err() {
+        return DesktopResult::err(
+            AppError::new(domain::error::codes::PROJECT_NOT_FOUND, "Project not found")
+                .with_action("Open a project before creating a task."),
+        );
+    }
+
+    let workspace_kind = match payload.workspace_strategy.as_deref() {
+        Some("direct") => WorkspaceKind::Direct,
+        Some("readonly") => WorkspaceKind::Readonly,
+        _ => WorkspaceKind::Worktree,
+    };
 
     let now = utc_now();
     let task = Task {
@@ -369,7 +645,7 @@ fn task_create(
         project_id: payload.project_id.clone(),
         title: payload.title.clone(),
         status: TaskStatus::Preparing,
-        workspace_kind: WorkspaceKind::Worktree,
+        workspace_kind,
         mode: payload.mode.clone(),
         model: payload.model.clone(),
         reasoning: payload.reasoning.clone(),
@@ -385,7 +661,8 @@ fn task_create(
         Err(e) => return DesktopResult::err(AppError::new(e.code, e.message)),
     }
 
-    DesktopResult::ok(serde_json::json!({
+    let task_data = serde_json::json!({
+        "taskId": task.id.0,
         "task": {
             "id": task.id.0,
             "projectId": task.project_id.0,
@@ -393,6 +670,208 @@ fn task_create(
             "status": "preparing",
             "createdAt": task.created_at,
         }
+    });
+
+    // FR-TASK-001 defines the creation prompt as the first user turn.
+    // Keep the task visible even when process startup fails and return a
+    // structured error field so the Renderer can offer recovery.
+    let initial_turn = super::commands::TurnSendPayload {
+        task_id: task.id.clone(),
+        message: payload.prompt.clone(),
+        attachments: payload.attachments.clone(),
+    };
+    match turn_send(repo, runtime, task_runtime, &initial_turn).await {
+        DesktopResult::Ok { data } => {
+            let mut result = task_data;
+            result["turn"] = data;
+            result["task"]["status"] = serde_json::Value::String("running".into());
+            DesktopResult::ok(result)
+        }
+        DesktopResult::Err { error } => {
+            let _ = repo.update_task_status(&task.id.0, "failed", Some(&error.message));
+            let mut result = task_data;
+            result["task"]["status"] = serde_json::Value::String("failed".into());
+            result["startError"] = serde_json::to_value(error).unwrap_or_default();
+            DesktopResult::ok(result)
+        }
+    }
+}
+
+async fn ensure_task_session(
+    repo: &dyn Repository,
+    task_runtime: &dyn TaskRuntime,
+    task_id: &crate::bridge::types::TaskId,
+) -> Result<crate::bridge::types::SessionId, AppError> {
+    use uuid::Uuid;
+
+    // Validate the task before creating any process or binding side effects.
+    repo.get_task(&task_id.0)
+        .map_err(|error| AppError::new(error.code, error.message))?;
+
+    let session_id = if let Some(binding) = repo
+        .get_binding_by_task(&task_id.0)
+        .map_err(|error| AppError::new(error.code, error.message))?
+    {
+        binding.session_id
+    } else {
+        let session_id =
+            crate::bridge::types::SessionId::new(format!("session-{}", Uuid::new_v4()));
+        task_runtime
+            .enqueue_task(task_id.clone(), session_id.clone())
+            .await
+            .map_err(|error| AppError::new(error.code, error.message))?;
+        session_id
+    };
+
+    task_runtime
+        .start_session(task_id.clone(), session_id.clone())
+        .await
+        .map_err(|error| AppError::new(error.code, error.message))?;
+    Ok(session_id)
+}
+
+async fn turn_send(
+    repo: &dyn Repository,
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    task_runtime: &dyn TaskRuntime,
+    payload: &super::commands::TurnSendPayload,
+) -> DesktopResult {
+    use crate::modules::agent_runtime::requests::PromptRequest;
+    use crate::modules::agent_runtime::ClientRequest;
+
+    let session_id = match ensure_task_session(repo, task_runtime, &payload.task_id).await {
+        Ok(session_id) => session_id,
+        Err(error) => return DesktopResult::err(error),
+    };
+    let task = match repo.get_task(&payload.task_id.0) {
+        Ok(task) => task,
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
+    if let Err(error) = repo.update_task_status(&payload.task_id.0, "running", None) {
+        return DesktopResult::err(AppError::new(error.code, error.message));
+    }
+
+    match runtime
+        .send(
+            session_id,
+            ClientRequest::Prompt(PromptRequest {
+                message: payload.message.clone(),
+                attachments: payload.attachments.clone().unwrap_or_default(),
+                mode: task.mode,
+                model: task.model,
+                reasoning: task.reasoning,
+            }),
+        )
+        .await
+    {
+        Ok(ack) => DesktopResult::ok(ack),
+        Err(error) => {
+            let _ = repo.update_task_status(&payload.task_id.0, "failed", Some(&error.message));
+            DesktopResult::err(AppError::new(error.code, error.message))
+        }
+    }
+}
+
+async fn turn_cancel(
+    repo: &dyn Repository,
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    task_runtime: &dyn TaskRuntime,
+    payload: &super::commands::TurnCancelPayload,
+) -> DesktopResult {
+    let binding = match repo.get_binding_by_task(&payload.task_id.0) {
+        Ok(Some(binding)) => binding,
+        Ok(None) => return DesktopResult::ok(serde_json::json!({ "cancelled": false })),
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
+    runtime.cancel(binding.session_id, None).await;
+    match task_runtime.cancel_session(payload.task_id.clone()).await {
+        Ok(()) => DesktopResult::ok(serde_json::json!({ "cancelled": true })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+async fn session_resume(
+    repo: &dyn Repository,
+    task_runtime: &dyn TaskRuntime,
+    payload: &super::commands::SessionResumePayload,
+) -> DesktopResult {
+    let should_increment_attempt = match repo.get_binding_by_task(&payload.task_id.0) {
+        Ok(binding) => binding.is_some_and(|binding| {
+            binding.state == crate::domain::types::SessionState::Disconnected
+        }),
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
+    if should_increment_attempt {
+        if let Err(error) = repo.increment_binding_attempt(&payload.task_id.0) {
+            return DesktopResult::err(AppError::new(error.code, error.message));
+        }
+    }
+    match ensure_task_session(repo, task_runtime, &payload.task_id).await {
+        Ok(session_id) => {
+            if let Err(error) = repo.update_task_status(&payload.task_id.0, "idle", None) {
+                return DesktopResult::err(AppError::new(error.code, error.message));
+            }
+            DesktopResult::ok(serde_json::json!({ "sessionId": session_id }))
+        }
+        Err(error) => DesktopResult::err(error),
+    }
+}
+
+async fn task_open(
+    repo: &dyn Repository,
+    task_runtime: &dyn TaskRuntime,
+    payload: &super::commands::TaskOpenPayload,
+) -> DesktopResult {
+    use crate::modules::task_runtime::mailbox::map_stored_events_to_bridge_snapshot;
+
+    let task = match repo.get_task(&payload.task_id.0) {
+        Ok(task) => task,
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
+    let status = serde_json::to_value(task.status)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "interrupted".into());
+    let Some(binding) = (match repo.get_binding_by_task(&payload.task_id.0) {
+        Ok(binding) => binding,
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    }) else {
+        return DesktopResult::ok(serde_json::json!({
+            "taskId": task.id,
+            "title": task.title,
+            "status": status,
+            "cursor": { "lastSeq": 0, "snapshotSeq": 0 },
+            "events": [],
+            "attempt": task.attempt_count,
+        }));
+    };
+
+    let snapshot = match task_runtime
+        .get_snapshot(task.id.clone(), binding.session_id.clone(), None)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
+    // The runtime snapshot window is deliberately bounded, but `task.open`
+    // must restore every confirmed logical message. Read the append-only log
+    // and compact consecutive streaming chunks before crossing the bridge.
+    let stored_events = match repo.get_events_after(&binding.session_id.0, 0, u32::MAX) {
+        Ok(events) => events,
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
+    let events = map_stored_events_to_bridge_snapshot(&stored_events);
+    DesktopResult::ok(serde_json::json!({
+        "taskId": task.id,
+        "sessionId": binding.session_id,
+        "title": task.title,
+        "status": status,
+        "cursor": {
+            "lastSeq": snapshot.last_seq,
+            "snapshotSeq": snapshot.last_seq,
+        },
+        "events": events,
+        "attempt": snapshot.attempt_number,
     }))
 }
 
@@ -428,6 +907,23 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
     let seq = event.meta.sequence;
 
     match event.event {
+        AgentEvent::UserMessage(p) => {
+            let payload = serde_json::json!({
+                "role": "user",
+                "text": p.text,
+            });
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::MESSAGE_DELTA,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    payload,
+                )
+                .build(),
+            )
+        }
+
         AgentEvent::SessionReady(p) => {
             // Emit a runtime.updated event (non-session) with the
             // session-ready info.  The Renderer uses this to update
@@ -477,6 +973,8 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
             let payload = super::events::ActivityUpdatedPayload {
                 kind: "tool".into(),
                 detail: p.title.unwrap_or_default(),
+                code: None,
+                retryable: None,
             };
             Some(
                 super::events::SessionEvent::new(
@@ -494,6 +992,8 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
             let payload = super::events::ActivityUpdatedPayload {
                 kind: format!("tool:{}", p.outcome),
                 detail: p.summary.unwrap_or_default(),
+                code: None,
+                retryable: None,
             };
             Some(
                 super::events::SessionEvent::new(
@@ -596,6 +1096,20 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
             )
         }
 
+        AgentEvent::TurnCancelled(_) => Some(
+            super::events::SessionEvent::new(
+                super::events::event_types::TASK_STATE,
+                super::types::TaskId::new(""),
+                session_id,
+                seq,
+                serde_json::json!({
+                    "status": "idle",
+                    "detail": { "reason": "cancelled" },
+                }),
+            )
+            .build(),
+        ),
+
         AgentEvent::ProcessExited(p) => {
             // Emit a runtime.updated event with the exit info.
             let payload = serde_json::json!({
@@ -634,13 +1148,16 @@ mod tests {
     #[tokio::test]
     async fn unknown_command_returns_unsupported() {
         let raw = serde_json::json!({"type": "no.such.command", "payload": {}});
-        let repo =
-            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
+        let repo = std::sync::Arc::new(
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo"),
+        );
         // Use a fake runtime for the test.
         let config = RuntimeConfig::default();
         let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
         let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
-        let result = execute_impl(&repo, runtime.as_ref(), raw).await;
+        let task_runtime =
+            crate::modules::task_runtime::TaskRuntimeImpl::new(repo.clone(), runtime.clone());
+        let result = execute_impl(repo.as_ref(), runtime.as_ref(), &task_runtime, raw).await;
         match result {
             DesktopResult::Err { error } => {
                 assert_eq!(error.code, domain::error::codes::BRIDGE_UNSUPPORTED_COMMAND);
@@ -653,12 +1170,15 @@ mod tests {
     async fn oversized_payload_rejected() {
         let big: String = "x".repeat(2_000_000);
         let raw = serde_json::json!({"type": "runtime.refresh", "payload": {}, "big": big});
-        let repo =
-            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
+        let repo = std::sync::Arc::new(
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo"),
+        );
         let config = RuntimeConfig::default();
         let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
         let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
-        let result = execute_impl(&repo, runtime.as_ref(), raw).await;
+        let task_runtime =
+            crate::modules::task_runtime::TaskRuntimeImpl::new(repo.clone(), runtime.clone());
+        let result = execute_impl(repo.as_ref(), runtime.as_ref(), &task_runtime, raw).await;
         match result {
             DesktopResult::Err { error } => {
                 assert_eq!(error.code, domain::error::codes::BRIDGE_INVALID_PAYLOAD);
@@ -669,16 +1189,25 @@ mod tests {
 
     #[tokio::test]
     async fn task_create_persists() {
-        let repo =
-            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
+        let repo = std::sync::Arc::new(
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo"),
+        );
 
         // Create a project first (FK constraint).
         use crate::domain::types::{utc_now, Project, ProjectId};
         let project = Project {
             id: ProjectId::new("proj-1"),
-            path: "/test/project".into(),
-            display_path: "/test/project".into(),
-            repo_root: Some("/test/project".into()),
+            path: std::env::current_dir()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            display_path: "test/project".into(),
+            repo_root: Some(
+                std::env::current_dir()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             trusted_at: Some(utc_now()),
             last_opened_at: utc_now(),
         };
@@ -689,20 +1218,34 @@ mod tests {
             "payload": {
                 "projectId": "proj-1",
                 "title": "Test task",
-                "prompt": "Do something"
+                "prompt": "Do something",
+                "mode": "ask",
+                "workspaceStrategy": "direct"
             }
         });
 
-        let config = RuntimeConfig::default();
-        let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
+        let fake_agent = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/fake-acp-agent/agent.mjs");
+        let adapter = crate::adapters::grok_acp::FakeAcpTransport::new(
+            crate::adapters::grok_acp::FakeScenario::Normal,
+            fake_agent,
+        );
         let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
+        let task_runtime = std::sync::Arc::new(crate::modules::task_runtime::TaskRuntimeImpl::new(
+            repo.clone(),
+            runtime.clone(),
+        ));
+        task_runtime.spawn_agent_event_forwarder();
 
-        let result = execute_impl(&repo, runtime.as_ref(), raw).await;
+        let result =
+            execute_impl(repo.as_ref(), runtime.as_ref(), task_runtime.as_ref(), raw).await;
         match result {
             DesktopResult::Ok { data } => {
                 let task = &data["task"];
                 assert_eq!(task["title"], "Test task");
-                assert_eq!(task["status"], "preparing");
+                assert_eq!(task["status"], "running");
                 assert!(!task["id"].as_str().unwrap().is_empty());
             }
             DesktopResult::Err { error } => {
@@ -713,15 +1256,18 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_refresh_returns_probe_result() {
-        let repo =
-            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo");
+        let repo = std::sync::Arc::new(
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo"),
+        );
         let raw = serde_json::json!({"type": "runtime.refresh", "payload": {}});
 
         let config = RuntimeConfig::default();
         let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
         let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
+        let task_runtime =
+            crate::modules::task_runtime::TaskRuntimeImpl::new(repo.clone(), runtime.clone());
 
-        let result = execute_impl(&repo, runtime.as_ref(), raw).await;
+        let result = execute_impl(repo.as_ref(), runtime.as_ref(), &task_runtime, raw).await;
         match result {
             DesktopResult::Ok { data } => {
                 // The probe will fail (no grok installed in test env),

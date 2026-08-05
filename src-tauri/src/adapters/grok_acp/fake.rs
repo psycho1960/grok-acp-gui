@@ -23,8 +23,10 @@ use crate::modules::agent_runtime::diagnostics::{DiagLog, StderrBuffer};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FakeScenario {
     Normal,
+    Slow,
     Timeout,
     Crash,
+    CrashAfterPrompt,
     BadFrame,
     StderrFlood,
     UnknownMethod,
@@ -36,8 +38,10 @@ impl FakeScenario {
     fn env_value(&self) -> &'static str {
         match self {
             FakeScenario::Normal => "normal",
+            FakeScenario::Slow => "slow",
             FakeScenario::Timeout => "timeout",
             FakeScenario::Crash => "crash",
+            FakeScenario::CrashAfterPrompt => "crash-after-prompt",
             FakeScenario::BadFrame => "bad-frame",
             FakeScenario::StderrFlood => "stderr-flood",
             FakeScenario::UnknownMethod => "unknown-method",
@@ -81,6 +85,7 @@ impl AcpTransport for FakeAcpTransport {
         &self,
         _session_id: SessionId,
         _workspace: WorkspaceContext,
+        _config: &RuntimeConfig,
     ) -> Result<TransportHandle, TransportError> {
         // Find node executable.
         let node = which_node().await?;
@@ -91,6 +96,7 @@ impl AcpTransport for FakeAcpTransport {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         // Inherit only safe env vars (Node.js needs SYSTEMROOT on Windows).
         cmd.env_clear();

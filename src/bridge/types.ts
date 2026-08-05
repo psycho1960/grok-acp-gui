@@ -84,7 +84,11 @@ export interface ModelInfo {
   name: string;
   /** Optional description. */
   description?: string;
+  /** Default reasoning effort from the selected Grok config model profile. */
+  reasoningEffort?: ReasoningEffort;
 }
+
+export type ReasoningEffort = "low" | "medium" | "high" | "max";
 
 export interface ModeInfo {
   /** Mode identifier string. */
@@ -112,10 +116,15 @@ export type BootstrapStatus = BootstrapSnapshot;
 // ---------------------------------------------------------------------------
 
 export type TaskStatus =
+  | "draft"
   | "preparing"
   | "running"
   | "waiting_permission"
+  | "idle"
+  | "failed"
+  | "ready_for_review"
   | "integrating"
+  | "conflicted"
   | "merged"
   | "archived"
   | "interrupted";
@@ -255,8 +264,8 @@ export interface TaskCreatePayload {
   mode?: string;
   /** Model ID to use for this task. */
   model?: string;
-  /** Reasoning effort: "low" | "medium" | "high". */
-  reasoning?: "low" | "medium" | "high";
+  /** Reasoning effort from the selected Grok config model profile. */
+  reasoning?: ReasoningEffort;
   /** Workspace strategy: "worktree" | "readonly" | "direct". */
   workspaceStrategy?: "worktree" | "readonly" | "direct";
 }
@@ -414,6 +423,7 @@ export interface TaskStatePayload {
 }
 
 export interface MessageDeltaPayload {
+  role?: "user" | "assistant";
   text?: string;
   toolCall?: unknown;
 }
@@ -421,6 +431,8 @@ export interface MessageDeltaPayload {
 export interface ActivityUpdatedPayload {
   kind: string;
   detail: string;
+  code?: string;
+  retryable?: boolean;
 }
 
 export interface PermissionRequestedPayload {
@@ -500,10 +512,16 @@ export interface TaskOpenResult {
   taskId: TaskId;
   title: string;
   status: string;
+  sessionId?: SessionId;
+  cursor?: number | { lastSeq?: number; snapshotSeq?: number };
+  events?: TypedDesktopEvent[];
+  attempt?: number;
 }
 
 export interface TurnSendResult {
-  seq: number;
+  requestId?: number;
+  /** Compatibility with the original mock response. */
+  seq?: number;
 }
 
 export interface WorkspaceInspectResult {

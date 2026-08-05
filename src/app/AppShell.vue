@@ -9,6 +9,8 @@ export type AppShellProps = {
   inspector?: VNode;
   inspectorOpen: boolean;
   statusBar?: VNode;
+  projectLabel?: string;
+  workspaceLabel?: string;
 };
 
 const props = defineProps({
@@ -17,6 +19,8 @@ const props = defineProps({
   inspector: { type: Object as PropType<VNode>, required: false, default: undefined },
   inspectorOpen: { type: Boolean, required: true },
   statusBar: { type: Object as PropType<VNode>, required: false, default: undefined },
+  projectLabel: { type: String, required: false, default: "Project" },
+  workspaceLabel: { type: String, required: false, default: "No workspace selected" },
 });
 const emit = defineEmits<{ "update:inspectorOpen": [value: boolean] }>();
 const RenderVNode = defineComponent({
@@ -108,8 +112,8 @@ onBeforeUnmount(() => {
     <header class="shell-topbar">
       <slot name="topbar">
         <IconButton v-if="compactLayout" label="打开任务导航" :aria-expanded="navigationOpen" @click="toggleNavigation">☰</IconButton>
-        <span class="project-name">Project</span>
-        <span class="branch">No workspace selected</span>
+        <span class="project-name" data-testid="topbar-project" :title="projectLabel">{{ projectLabel }}</span>
+        <span class="branch" data-testid="topbar-workspace" :title="workspaceLabel">{{ workspaceLabel }}</span>
         <span class="topbar-spacer" />
         <IconButton v-if="inspector" label="打开 Inspector" :aria-expanded="drawerLayout ? inspectorDrawerOpen : inspectorOpen" @click="toggleInspector">☷</IconButton>
       </slot>
@@ -131,7 +135,7 @@ onBeforeUnmount(() => {
 .app-shell { display:grid; grid-template-rows:48px minmax(0, 1fr) 28px; height:100vh; min-height:680px; overflow:hidden; background:var(--ctp-base); }
 .shell-topbar, .shell-statusbar { display:flex; align-items:center; gap:var(--space-3); padding:0 var(--space-4); background:var(--ctp-crust); border-color:var(--ctp-surface0); }
 .shell-topbar { border-bottom:1px solid var(--ctp-surface0); }.shell-statusbar { color:var(--ctp-subtext0); border-top:1px solid var(--ctp-surface0); font-size:var(--font-small); }
-.project-name { color:var(--ctp-text); font-weight:650; }.branch { color:var(--ctp-subtext0); font-size:var(--font-small); }.topbar-spacer { flex:1; }
+.project-name, .branch { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.project-name { max-width:220px; color:var(--ctp-text); font-weight:650; }.branch { max-width:360px; color:var(--ctp-subtext0); font-size:var(--font-small); }.topbar-spacer { flex:1; }
 .shell-columns { display:grid; grid-template-columns:var(--left-width) minmax(520px, 1fr); min-width:0; }
 .shell-columns.has-left-resizer { grid-template-columns:var(--left-width) 4px minmax(520px, 1fr); }
 .shell-columns.has-inspector { grid-template-columns:var(--left-width) minmax(520px, 1fr) 4px var(--right-width); }

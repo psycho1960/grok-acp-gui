@@ -9,6 +9,11 @@ edition = "2021"
 name = "grok_acp_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Test-only escape hatch for native Windows WebDriver runs. Production builds
+# keep using Tauri's managed app-data directory.
+e2e-isolated-data = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

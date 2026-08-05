@@ -62,6 +62,7 @@ pub trait AcpTransport: Send + Sync {
         &self,
         session_id: SessionId,
         workspace: WorkspaceContext,
+        config: &RuntimeConfig,
     ) -> Result<TransportHandle, TransportError>;
 
     /// Returns the resolved executable path, if `probe()` has been

@@ -4,7 +4,9 @@ import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import type {
   DesktopBridge,
+  ModelInfo,
   Project,
+  ProjectId,
   TaskId,
   TaskOpenResult,
   TaskStatus,
@@ -30,12 +32,55 @@ import {
 } from "./types";
 
 const LIVE_ANNOUNCE_THROTTLE_MS = 1500;
+const ACTIVE_PROJECT_KEY = "gag007:activeProjectId";
+
+function classifyProjectError(
+  msg: string,
+): "invalid" | "non_git" | "failed" {
+  if (
+    /not found|does not exist|不存在|invalid|无效|ENOENT|not a directory|not accessible|无法访问/i.test(
+      msg,
+    )
+  ) {
+    return "invalid";
+  }
+  if (/not a git|非 git|no git|not a repository/i.test(msg)) {
+    return "non_git";
+  }
+  return "failed";
+}
+
+function loadActiveProjectId(): string | null {
+  if (typeof sessionStorage === "undefined") return null;
+  try {
+    return sessionStorage.getItem(ACTIVE_PROJECT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function persistActiveProjectId(id: string | null): void {
+  if (typeof sessionStorage === "undefined") return;
+  try {
+    if (!id) sessionStorage.removeItem(ACTIVE_PROJECT_KEY);
+    else sessionStorage.setItem(ACTIVE_PROJECT_KEY, id);
+  } catch {
+    // ignore quota / private mode
+  }
+}
 
 export const useTaskCenterStore = defineStore("task-center", () => {
   const loadState = ref<TaskCenterLoadState>("idle");
   const errorMessage = ref<string | null>(null);
   const tasksById = shallowRef<Map<TaskId, TaskViewModel>>(new Map());
   const projects = shallowRef<Project[]>([]);
+  const models = shallowRef<ModelInfo[]>([]);
+  /** Currently selected project for create-task / shell header. */
+  const activeProjectId = ref<ProjectId | null>(null);
+  const projectActionError = ref<string | null>(null);
+  const projectActionPending = ref(false);
+  const createTaskPending = ref(false);
+  const createTaskError = ref<string | null>(null);
   /** Highest applied list generation (from facade stamps). */
   const version = ref(0);
   const refreshedAt = ref<string | null>(null);
@@ -94,6 +139,56 @@ export const useTaskCenterStore = defineStore("task-center", () => {
       label: p.displayPath || p.path || p.id,
     })),
   );
+
+  const modelOptions = computed(() => [
+    { value: "", label: "使用运行时默认模型" },
+    ...models.value
+      .filter((model) => model.modelId.trim().length > 0)
+      .map((model) => ({
+        value: model.modelId,
+        label: model.name || model.modelId,
+        ...(model.reasoningEffort
+          ? { reasoningEffort: model.reasoningEffort }
+          : {}),
+      })),
+  ]);
+
+  const activeProject = computed(() => {
+    if (!activeProjectId.value) return null;
+    return projects.value.find((p) => p.id === activeProjectId.value) ?? null;
+  });
+
+  const hasActiveProject = computed(() => activeProject.value != null);
+
+  function resolveActiveProject(list: Project[]): void {
+    if (list.length === 0) {
+      activeProjectId.value = null;
+      persistActiveProjectId(null);
+      return;
+    }
+    const remembered = loadActiveProjectId();
+    if (remembered && list.some((p) => p.id === remembered)) {
+      activeProjectId.value = remembered as ProjectId;
+      return;
+    }
+    // Prefer most recently opened
+    const sorted = [...list].sort((a, b) =>
+      (b.lastOpenedAt || "").localeCompare(a.lastOpenedAt || ""),
+    );
+    activeProjectId.value = sorted[0].id;
+    persistActiveProjectId(sorted[0].id);
+  }
+
+  function setActiveProject(projectId: ProjectId | null): void {
+    activeProjectId.value = projectId;
+    persistActiveProjectId(projectId);
+  }
+
+  function clearActiveProject(): void {
+    setActiveProject(null);
+    projectActionError.value = null;
+    announce("已取消选择项目", true);
+  }
 
   function replaceTasks(next: TaskViewModel[]): void {
     const map = new Map<TaskId, TaskViewModel>();
@@ -196,6 +291,8 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     });
     replaceTasks(merged);
     projects.value = result.projects;
+    models.value = result.models;
+    resolveActiveProject(result.projects);
     version.value = result.version;
     refreshedAt.value = result.refreshedAt;
     loadState.value = "ready";
@@ -436,6 +533,136 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     }
   }
 
+  /**
+   * Open a project path: optional pre-inspect, then project.open, then refresh.
+   * Returns structured outcome for dialog UX.
+   */
+  async function openProjectPath(
+    path: string,
+  ): Promise<{
+    ok: boolean;
+    message?: string;
+    code?: "cancelled" | "invalid" | "non_git" | "failed" | "ok";
+    project?: Project;
+  }> {
+    const trimmed = path.trim();
+    if (!trimmed) {
+      projectActionError.value = "请输入或选择项目目录";
+      return { ok: false, code: "invalid", message: projectActionError.value };
+    }
+    if (!facade) {
+      projectActionError.value = "未绑定 DesktopBridge";
+      return { ok: false, code: "failed", message: projectActionError.value };
+    }
+
+    projectActionPending.value = true;
+    projectActionError.value = null;
+    try {
+      // Preflight inspect when available (invalid / non-git messaging).
+      const inspect = await facade.inspectWorkspace(trimmed);
+      if (inspect.success === "false") {
+        const msg = inspect.error.message || "无法打开该目录";
+        projectActionError.value = msg;
+        const code = classifyProjectError(msg);
+        // Hard-fail invalid paths; non_git may still open
+        if (code === "invalid" || code === "failed") {
+          return { ok: false, code, message: msg };
+        }
+      }
+
+      const opened = await facade.openProject(trimmed);
+      if (opened.success === "false") {
+        const msg = opened.error.message || "打开项目失败";
+        projectActionError.value = msg;
+        return { ok: false, code: classifyProjectError(msg), message: msg };
+      }
+
+      await refresh();
+      const id = opened.data.projectId;
+      setActiveProject(id);
+      // Ensure project is in list even if bootstrap race
+      if (!projects.value.some((p) => p.id === id)) {
+        const stub: Project = {
+          id,
+          path: opened.data.path ?? trimmed,
+          displayPath: opened.data.displayPath ?? trimmed,
+          repoRoot: opened.data.repoRoot,
+          lastOpenedAt: new Date().toISOString(),
+        };
+        projects.value = [stub, ...projects.value];
+      }
+      announce(`已打开项目 ${opened.data.displayPath ?? trimmed}`, true);
+      return {
+        ok: true,
+        code: opened.data.nonGit ? "non_git" : "ok",
+        project: activeProject.value ?? undefined,
+        message: opened.data.nonGit
+          ? "已打开（无 Git：Worktree/集成功能将隐藏）"
+          : undefined,
+      };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      projectActionError.value = msg;
+      return { ok: false, code: "failed", message: msg };
+    } finally {
+      projectActionPending.value = false;
+    }
+  }
+
+  async function createTask(input: {
+    prompt: string;
+    title?: string;
+    mode?: string;
+    model?: string;
+    reasoning?: import("../../bridge/types").ReasoningEffort;
+    workspaceStrategy?: "worktree" | "readonly" | "direct";
+  }): Promise<{ ok: boolean; taskId?: TaskId; message?: string }> {
+    createTaskError.value = null;
+    if (!facade) {
+      createTaskError.value = "未绑定 DesktopBridge";
+      return { ok: false, message: createTaskError.value };
+    }
+    if (!activeProjectId.value) {
+      createTaskError.value = "请先选择项目";
+      return { ok: false, message: createTaskError.value };
+    }
+    const prompt = input.prompt.trim();
+    if (!prompt) {
+      createTaskError.value = "请填写任务目标（必填）";
+      return { ok: false, message: createTaskError.value };
+    }
+    const title =
+      (input.title?.trim() ||
+        prompt.split(/\r?\n/).find((l) => l.trim())?.trim() ||
+        "未命名任务").slice(0, 120);
+
+    createTaskPending.value = true;
+    try {
+      const result = await facade.createTask({
+        projectId: activeProjectId.value,
+        title,
+        prompt,
+        mode: input.mode,
+        model: input.model,
+        reasoning: input.reasoning,
+        workspaceStrategy: input.workspaceStrategy,
+      });
+      if (result.success === "false") {
+        createTaskError.value = result.error.message || "创建任务失败";
+        return { ok: false, message: createTaskError.value };
+      }
+      await refresh();
+      announce(`已创建任务「${title}」`, true);
+      return { ok: true, taskId: result.data.taskId };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      createTaskError.value = msg;
+      return { ok: false, message: msg };
+    } finally {
+      createTaskPending.value = false;
+    }
+  }
+
   /** Test helper: inject tasks without bridge. */
   function __setTasksForTest(tasks: TaskViewModel[], nextVersion = 1): void {
     replaceTasks(tasks);
@@ -448,11 +675,28 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     facade = next;
   }
 
+  function __setProjectsForTest(list: Project[], activeId?: ProjectId | null): void {
+    projects.value = list;
+    if (activeId !== undefined) {
+      setActiveProject(activeId);
+    } else {
+      resolveActiveProject(list);
+    }
+  }
+
   return {
     loadState,
     errorMessage,
     tasksById,
     projects,
+    models,
+    activeProjectId,
+    activeProject,
+    hasActiveProject,
+    projectActionError,
+    projectActionPending,
+    createTaskPending,
+    createTaskError,
     version,
     refreshedAt,
     filters,
@@ -467,6 +711,7 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     counts,
     selectedTask,
     projectOptions,
+    modelOptions,
     attach,
     detach,
     refresh,
@@ -477,9 +722,14 @@ export const useTaskCenterStore = defineStore("task-center", () => {
     openDetail,
     closeDetail,
     cancelTask,
+    setActiveProject,
+    clearActiveProject,
+    openProjectPath,
+    createTask,
     handleBridgeEvent,
     announce,
     __setTasksForTest,
     __setFacadeForTest,
+    __setProjectsForTest,
   };
 });

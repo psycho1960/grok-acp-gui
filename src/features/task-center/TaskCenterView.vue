@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { DesktopBridge, TaskId, TaskStatus } from "../../bridge/types";
+import type { DesktopBridge, ReasoningEffort, TaskId, TaskStatus } from "../../bridge/types";
 import Badge from "../../shared/ui/Badge.vue";
 import Button from "../../shared/ui/Button.vue";
 import Dialog from "../../shared/ui/Dialog.vue";
@@ -14,6 +14,8 @@ import {
   parseTaskCenterHash,
 } from "./hash-route";
 import { buildGroupedListRows, type TaskListRow } from "./list-rows";
+import CreateTaskDialog from "./CreateTaskDialog.vue";
+import OpenProjectDialog from "./OpenProjectDialog.vue";
 import TaskCard from "./TaskCard.vue";
 import TaskDetailDrawer from "./TaskDetailDrawer.vue";
 import { useTaskCenterStore } from "./task-center-store";
@@ -31,6 +33,10 @@ const store = useTaskCenterStore();
 const confirmCancelOpen = ref(false);
 const confirmCancelTaskId = ref<TaskId | null>(null);
 const cancelFeedback = ref<string | null>(null);
+const openProjectOpen = ref(false);
+const createTaskOpen = ref(false);
+const createAfterProjectSelection = ref(false);
+const nonGitNotice = ref<string | null>(null);
 
 /** Fixed row height for headers + cards (allows localError line without clipping). */
 const ITEM_HEIGHT = 120;
@@ -165,6 +171,67 @@ function requestRecover(taskId: string): void {
   void openTask(taskId);
 }
 
+/** Navigate to conversation timeline (hash contract shared with GAG-008). */
+function openConversation(taskId: string): void {
+  if (typeof window === "undefined") return;
+  const next = `#conversation/${encodeURIComponent(taskId)}`;
+  if (window.location.hash !== next) {
+    window.location.hash = next;
+  }
+}
+
+function showOpenProject(): void {
+  createAfterProjectSelection.value = false;
+  nonGitNotice.value = null;
+  openProjectOpen.value = true;
+}
+
+function showCreateTask(): void {
+  if (!store.hasActiveProject) {
+    createAfterProjectSelection.value = true;
+    nonGitNotice.value = null;
+    openProjectOpen.value = true;
+    return;
+  }
+  createTaskOpen.value = true;
+}
+
+async function onOpenProject(path: string): Promise<void> {
+  const result = await store.openProjectPath(path);
+  if (result.ok) {
+    const shouldCreate = createAfterProjectSelection.value;
+    openProjectOpen.value = false;
+    createAfterProjectSelection.value = false;
+    if (result.message) nonGitNotice.value = result.message;
+    if (shouldCreate) createTaskOpen.value = true;
+  }
+}
+
+function closeOpenProject(): void {
+  openProjectOpen.value = false;
+  createAfterProjectSelection.value = false;
+}
+
+async function onCreateTask(payload: {
+  prompt: string;
+  title: string;
+  mode: string;
+  model?: string;
+  reasoning: ReasoningEffort;
+  workspaceStrategy: "worktree" | "readonly" | "direct";
+}): Promise<void> {
+  const result = await store.createTask(payload);
+  if (result.ok && result.taskId) {
+    createTaskOpen.value = false;
+    openConversation(result.taskId);
+  }
+}
+
+function onClearProject(): void {
+  store.clearActiveProject();
+  nonGitNotice.value = null;
+}
+
 function applyRouteFromHash(): void {
   if (props.syncHash === false) return;
   const route = parseTaskCenterHash(window.location.hash);
@@ -211,14 +278,68 @@ watch(
   <section class="task-center" data-testid="task-center" aria-labelledby="task-center-title">
     <header class="task-center-header">
       <div class="title-row">
-        <h1 id="task-center-title">任务中心</h1>
-        <div class="counts" aria-label="任务计数">
-          <Badge tone="warning">等待 {{ store.counts.needs_attention }}</Badge>
-          <Badge tone="info">运行 {{ store.counts.running }}</Badge>
-          <Badge tone="success">完成 {{ store.counts.completed }}</Badge>
-          <Badge tone="danger">中断 {{ store.counts.failed_interrupted }}</Badge>
-          <span class="count-total">共 {{ totalCount }} · 显示 {{ visibleCount }}</span>
+        <div class="title-block">
+          <h1 id="task-center-title">任务中心</h1>
+          <p
+            v-if="store.activeProject"
+            class="active-project"
+            data-testid="active-project-label"
+          >
+            当前项目：{{ store.activeProject.displayPath || store.activeProject.path }}
+          </p>
+          <p v-else class="active-project muted" data-testid="no-project-label">
+            未选择项目
+          </p>
         </div>
+        <div class="header-actions">
+          <Button
+            v-if="!store.hasActiveProject"
+            variant="primary"
+            data-testid="header-open-project"
+            @click="showOpenProject"
+          >
+            选择项目 / 打开文件夹
+          </Button>
+          <Button
+            variant="primary"
+            data-testid="header-create-task"
+            @click="showCreateTask"
+          >
+            新建任务
+          </Button>
+          <template v-if="store.hasActiveProject">
+            <Button
+              variant="ghost"
+              data-testid="header-switch-project"
+              @click="showOpenProject"
+            >
+              切换项目
+            </Button>
+            <Button
+              variant="ghost"
+              data-testid="header-clear-project"
+              @click="onClearProject"
+            >
+              取消选择
+            </Button>
+          </template>
+          <div class="counts" aria-label="任务计数">
+            <Badge tone="warning">等待 {{ store.counts.needs_attention }}</Badge>
+            <Badge tone="info">运行 {{ store.counts.running }}</Badge>
+            <Badge tone="success">完成 {{ store.counts.completed }}</Badge>
+            <Badge tone="danger">中断 {{ store.counts.failed_interrupted }}</Badge>
+            <span class="count-total">共 {{ totalCount }} · 显示 {{ visibleCount }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-if="nonGitNotice"
+        class="banner banner-warn"
+        role="status"
+        data-testid="nongit-banner"
+      >
+        {{ nonGitNotice }}
       </div>
 
       <div class="filters" role="search">
@@ -312,11 +433,34 @@ watch(
       </ErrorState>
 
       <EmptyState
+        v-else-if="!store.hasActiveProject"
+        title="选择一个项目开始"
+        detail="打开本地文件夹后即可创建任务，并进入对话时间线。"
+        data-testid="project-empty"
+      >
+        <Button
+          variant="primary"
+          data-testid="empty-open-project"
+          @click="showOpenProject"
+        >
+          选择项目 / 打开文件夹
+        </Button>
+      </EmptyState>
+
+      <EmptyState
         v-else-if="isEmpty"
         title="还没有任务"
-        detail="创建任务后，将按运行中、等待处理、已完成和失败/中断分组显示。"
+        detail="创建任务后，将按运行中、等待处理、已完成和失败/中断分组显示，并自动打开对话。"
         data-testid="task-empty"
-      />
+      >
+        <Button
+          variant="primary"
+          data-testid="empty-create-task"
+          @click="showCreateTask"
+        >
+          新建任务
+        </Button>
+      </EmptyState>
 
       <EmptyState
         v-else-if="isFilteredEmpty"
@@ -376,6 +520,7 @@ watch(
       :loading="store.detailLoading"
       :cancel-pending="store.cancelPendingId != null && store.cancelPendingId === store.selectedTaskId"
       @update:open="(open) => !open && closeDrawer()"
+      @conversation="openConversation"
       @cancel="requestCancel"
       @recover="requestRecover"
     />
@@ -400,6 +545,28 @@ watch(
         </Button>
       </template>
     </Dialog>
+
+    <OpenProjectDialog
+      :open="openProjectOpen"
+      :pending="store.projectActionPending"
+      :error="store.projectActionError"
+      @update:open="(open) => open ? (openProjectOpen = true) : closeOpenProject()"
+      @open="onOpenProject"
+      @cancel="closeOpenProject"
+    />
+
+    <CreateTaskDialog
+      :open="createTaskOpen"
+      :pending="store.createTaskPending"
+      :error="store.createTaskError"
+      :model-options="store.modelOptions"
+      :project-label="
+        store.activeProject?.displayPath || store.activeProject?.path || ''
+      "
+      @update:open="createTaskOpen = $event"
+      @create="onCreateTask"
+      @cancel="createTaskOpen = false"
+    />
   </section>
 </template>
 
@@ -423,19 +590,39 @@ watch(
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
 }
-.title-row h1 {
+.title-block h1 {
   margin: 0;
   font-size: 20px;
   line-height: 28px;
+}
+.active-project {
+  margin: var(--space-1) 0 0;
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
+}
+.active-project.muted {
+  color: var(--ctp-subtext0);
+}
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: flex-end;
 }
 .counts {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
+}
+.banner-warn {
+  color: var(--ctp-text);
+  background: color-mix(in srgb, var(--ctp-yellow) 16%, var(--ctp-mantle));
+  border: 1px solid var(--ctp-yellow);
 }
 .count-total {
   color: var(--ctp-subtext0);

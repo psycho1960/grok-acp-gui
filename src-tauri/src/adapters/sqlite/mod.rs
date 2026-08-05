@@ -223,10 +223,15 @@ fn row_to_recovery_candidate(row: &rusqlite::Row) -> rusqlite::Result<RecoveryCa
 
 fn parse_task_status(s: &str) -> TaskStatus {
     match s {
+        "draft" => TaskStatus::Draft,
         "preparing" => TaskStatus::Preparing,
         "running" => TaskStatus::Running,
         "waiting_permission" => TaskStatus::WaitingPermission,
+        "idle" => TaskStatus::Idle,
+        "failed" => TaskStatus::Failed,
+        "ready_for_review" => TaskStatus::ReadyForReview,
         "integrating" => TaskStatus::Integrating,
+        "conflicted" => TaskStatus::Conflicted,
         "merged" => TaskStatus::Merged,
         "archived" => TaskStatus::Archived,
         "interrupted" => TaskStatus::Interrupted,
@@ -236,10 +241,15 @@ fn parse_task_status(s: &str) -> TaskStatus {
 
 fn task_status_to_str(s: TaskStatus) -> &'static str {
     match s {
+        TaskStatus::Draft => "draft",
         TaskStatus::Preparing => "preparing",
         TaskStatus::Running => "running",
         TaskStatus::WaitingPermission => "waiting_permission",
+        TaskStatus::Idle => "idle",
+        TaskStatus::Failed => "failed",
+        TaskStatus::ReadyForReview => "ready_for_review",
         TaskStatus::Integrating => "integrating",
+        TaskStatus::Conflicted => "conflicted",
         TaskStatus::Merged => "merged",
         TaskStatus::Archived => "archived",
         TaskStatus::Interrupted => "interrupted",
@@ -963,6 +973,13 @@ impl Repository for SqliteRepository {
 
     fn append_event(&self, event: &StoredEvent) -> RepoResult<bool> {
         let conn = self.lock()?;
+        let attempt_number: i64 = conn
+            .query_row(
+                "SELECT attempt_number FROM session_bindings WHERE task_id = ?1 AND session_id = ?2",
+                params![event.task_id.0, event.session_id.0],
+                |row| row.get(0),
+            )
+            .map_err(|e| db_error("append_event: binding attempt", &e))?;
         let payload_str = serde_json::to_string(&event.payload)
             .map_err(|e| DomainError::new("DB_QUERY_FAILED", format!("JSON serialize: {}", e)))?;
         let result = conn.execute(
@@ -977,8 +994,7 @@ impl Repository for SqliteRepository {
                 event.correlation_id.as_ref().map(|c| c.0.as_str()),
                 event.persisted_at,
                 event.has_side_effects as i64,
-                // attempt_number is not on StoredEvent — we read it from the binding
-                1i64,
+                attempt_number,
             ],
         );
         match result {
@@ -1231,7 +1247,29 @@ impl Repository for SqliteRepository {
         let now = utc_now();
         let count = conn
             .execute(
-                "UPDATE tasks SET status = 'interrupted', interrupt_reason = ?1, updated_at = ?2 WHERE status IN ('running', 'waiting_permission', 'integrating')",
+                "UPDATE tasks
+                 SET status = 'interrupted', interrupt_reason = ?1, updated_at = ?2
+                 WHERE status IN ('running', 'waiting_permission', 'integrating')
+                    OR (
+                        status = 'idle'
+                        AND EXISTS (
+                            SELECT 1
+                            FROM session_bindings sb
+                            JOIN session_events se ON se.session_id = sb.session_id
+                            WHERE sb.task_id = tasks.id
+                              AND sb.state = 'disconnected'
+                              AND se.sequence = (
+                                  SELECT MAX(latest.sequence)
+                                  FROM session_events latest
+                                  WHERE latest.session_id = sb.session_id
+                              )
+                              AND se.event_type = 'process_exited'
+                              AND (
+                                  json_valid(se.payload) = 0
+                                  OR COALESCE(json_extract(se.payload, '$.reason'), 'unknown') != 'clean'
+                              )
+                        )
+                    )",
                 params![reason, now],
             )
             .map_err(|e| db_error("recover_interrupted_tasks", &e))?;
@@ -1385,6 +1423,54 @@ mod tests {
 
         let t5_after = repo.get_task("t5").unwrap();
         assert_eq!(t5_after.status, TaskStatus::Archived); // unaffected
+    }
+
+    #[test]
+    fn recovery_repairs_idle_task_after_non_clean_disconnected_process_only() {
+        let repo = make_test_repo();
+        repo.create_project(&make_project("p1", "/test")).unwrap();
+        for task_id in ["idle-crash", "idle-clean"] {
+            repo.create_task(&make_task(task_id, "p1", TaskStatus::Idle))
+                .unwrap();
+            let session_id = format!("session-{task_id}");
+            repo.create_binding(&SessionBinding {
+                task_id: TaskId::new(task_id),
+                session_id: SessionId::new(&session_id),
+                cwd: Some("/test".into()),
+                last_seq: 0,
+                state: SessionState::Disconnected,
+                attempt_number: 1,
+            })
+            .unwrap();
+            repo.append_event(&StoredEvent {
+                dedup_key: format!("{session_id}:1"),
+                session_id: SessionId::new(&session_id),
+                task_id: TaskId::new(task_id),
+                sequence: 1,
+                event_type: "process_exited".into(),
+                payload: serde_json::json!({
+                    "kind": "process_exited",
+                    "reason": if task_id == "idle-clean" { "clean" } else { "inbound_closed" }
+                }),
+                correlation_id: None,
+                persisted_at: utc_now(),
+                has_side_effects: false,
+            })
+            .unwrap();
+        }
+
+        let count = repo
+            .recover_interrupted_tasks("application restarted")
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            repo.get_task("idle-crash").unwrap().status,
+            TaskStatus::Interrupted
+        );
+        assert_eq!(
+            repo.get_task("idle-clean").unwrap().status,
+            TaskStatus::Idle
+        );
     }
 
     #[test]

@@ -5,7 +5,14 @@ import vueParser from "vue-eslint-parser";
 
 export default typescript.config(
   {
-    ignores: ["dist/**", "src-tauri/**", "node_modules/**"],
+    ignores: [
+      "dist/**",
+      "dist-test/**",
+      "test-results*/**",
+      "src-tauri/**",
+      "node_modules/**",
+      ".workbuddy/**",
+    ],
   },
   eslint.configs.recommended,
   ...vue.configs["flat/recommended"],
