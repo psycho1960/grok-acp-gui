@@ -73,7 +73,9 @@ async fn cleanup_temporary_database(path: &std::path::Path) {
 }
 
 async fn wait_for_task_status(repo: &SqliteRepository, task_id: &str, expected: TaskStatus) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    // Generous deadline: CI runners spawn Node + the fake ACP agent per test,
+    // and a loaded runner can take well over 5s to complete a turn.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
         if repo.get_task(task_id).expect("task query").status == expected {
             return;
@@ -228,7 +230,8 @@ async fn create_send_stream_persist_and_reopen_real_production_path() {
         DesktopResult::Err { error } => panic!("create failed: {error:?}"),
     };
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    // Generous deadline: CI runners spawn Node + the fake ACP agent per test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut streamed = String::new();
     let mut idle = false;
     while tokio::time::Instant::now() < deadline && !idle {
