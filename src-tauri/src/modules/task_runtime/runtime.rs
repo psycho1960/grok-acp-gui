@@ -13,6 +13,8 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
@@ -20,9 +22,11 @@ use crate::bridge::types::{SessionId, TaskId};
 use crate::domain::error::DomainError;
 use crate::domain::types::{
     ConcurrencyLimits, RecoveryCandidate, RecoveryDecision, SessionSnapshot, SessionState,
-    TaskSummary, TimelineCursor,
+    TaskSummary, TimelineCursor, WorkspaceKind, WorktreeOwnership, WorktreeState,
 };
-use crate::modules::agent_runtime::{AgentRuntime, TimestampedEvent};
+use crate::modules::agent_runtime::{
+    AgentRuntime, RuntimeConfig, RuntimeState, TimestampedEvent, WorkspaceContext,
+};
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::mailbox::{SessionCommand, SessionMailbox};
 use crate::modules::task_runtime::TaskRuntime;
@@ -31,21 +35,25 @@ use crate::modules::task_runtime::TaskRuntime;
 const DEFAULT_MAX_CONCURRENT: u32 = 4;
 
 /// Maximum event window for snapshots.
-const SNAPSHOT_EVENT_LIMIT: u32 = 100;
+const SNAPSHOT_EVENT_LIMIT: u32 = 500;
 
 /// The concrete TaskRuntime implementation.
 pub struct TaskRuntimeImpl<A: AgentRuntime> {
     /// The repository (persistent state).
     repo: Arc<dyn Repository>,
-    /// The agent runtime (process management) — reserved for future wiring.
-    #[allow(dead_code)]
+    /// The agent runtime (process management).
     agent_runtime: Arc<A>,
+    /// Guards the single runtime → task-runtime event pump.
+    forwarding_started: AtomicBool,
     /// Global concurrency semaphore.
     semaphore: Arc<Semaphore>,
     /// Maximum permits on the semaphore.
     max_concurrent: u32,
     /// Per-session mailboxes, keyed by session_id.
     mailboxes: Mutex<HashMap<SessionId, SessionMailbox>>,
+    /// Per-process generation offset used when a persisted session is
+    /// restarted but AgentRuntime begins its local sequence at one again.
+    sequence_offsets: Mutex<HashMap<SessionId, u64>>,
     /// Per-session semaphore permits. The permit is released back to the
     /// semaphore when the entry is removed (e.g. on session cancel/completion).
     permits: Mutex<HashMap<SessionId, tokio::sync::OwnedSemaphorePermit>>,
@@ -69,9 +77,11 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
         Self {
             repo,
             agent_runtime,
+            forwarding_started: AtomicBool::new(false),
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             max_concurrent,
             mailboxes: Mutex::new(HashMap::new()),
+            sequence_offsets: Mutex::new(HashMap::new()),
             permits: Mutex::new(HashMap::new()),
             event_broadcaster: event_tx,
         }
@@ -104,12 +114,31 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
         self.event_broadcaster.subscribe()
     }
 
-    /// Release the semaphore permit for a session, if one is held.
-    /// Idempotent — calling when no permit exists is a no-op.
-    async fn release_session_permit(&self, session_id: &SessionId) {
-        let mut permits = self.permits.lock().await;
-        permits.remove(session_id);
-        // Permit is returned to the semaphore on drop.
+    /// Start the single event pump that persists normalized AgentRuntime
+    /// events before publishing task-scoped DesktopEvents.
+    pub fn spawn_agent_event_forwarder(self: &Arc<Self>) {
+        if self
+            .forwarding_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let mut events = self.agent_runtime.subscribe();
+        let runtime = Arc::downgrade(self);
+        tauri::async_runtime::spawn(async move {
+            while let Some(event) = events.recv().await {
+                let Some(runtime) = runtime.upgrade() else {
+                    break;
+                };
+                if let Err(error) = runtime.accept_agent_event(event).await {
+                    if error.code != crate::domain::error::codes::EVENT_DUPLICATE {
+                        eprintln!("task runtime rejected an agent event ({})", error.code);
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -182,27 +211,126 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         task_id: TaskId,
         session_id: SessionId,
     ) -> Result<(), DomainError> {
-        // Ensure binding exists.
-        if self.repo.get_binding_by_task(&task_id.0)?.is_none() {
+        // Ensure binding exists and belongs to the requested session.
+        let Some(mut binding) = self.repo.get_binding_by_task(&task_id.0)? else {
             return Err(DomainError::new(
                 "TASK_RUNTIME_NO_BINDING",
                 format!("no binding for task {}", task_id),
             ));
+        };
+        if binding.session_id != session_id {
+            return Err(DomainError::new(
+                "TASK_RUNTIME_BINDING_MISMATCH",
+                format!("task {} is bound to a different session", task_id),
+            ));
+        }
+
+        // A stopped/idle task may retain a reusable ACP process after its
+        // active-task permit was released. Reacquire the slot before the next
+        // turn so cancellation recovery does not bypass concurrency limits.
+        {
+            let mut permits = self.permits.lock().await;
+            if !permits.contains_key(&session_id) {
+                let permit = self.semaphore.clone().try_acquire_owned().map_err(|_| {
+                    DomainError::new(
+                        crate::domain::error::codes::CONCURRENCY_LIMIT_EXCEEDED,
+                        format!(
+                            "concurrency limit reached ({}/{} running); task {} remains idle",
+                            self.max_concurrent, self.max_concurrent, task_id
+                        ),
+                    )
+                })?;
+                permits.insert(session_id.clone(), permit);
+            }
         }
 
         // Create/ensure mailbox exists.
         self.get_or_create_mailbox(&task_id, &session_id).await;
 
-        // Transition to Active.
-        if let Some(mut binding) = self.repo.get_binding_by_task(&task_id.0)? {
-            binding.state = SessionState::Active;
+        // Derive the process cwd from the persisted workspace strategy.
+        // GAG-011 owns Worktree creation. Until it has persisted a managed
+        // Worktree record, fail closed instead of silently running an isolated
+        // task in the user's original checkout.
+        let task = self.repo.get_task(&task_id.0)?;
+        let project = self.repo.get_project(&task.project_id.0)?;
+        let cwd_result = match task.workspace_kind {
+            WorkspaceKind::Worktree => {
+                let candidates: Vec<_> = self
+                    .repo
+                    .list_worktrees_by_task(&task_id.0)?
+                    .into_iter()
+                    .filter(|worktree| {
+                        worktree.ownership == WorktreeOwnership::Managed
+                            && !matches!(
+                                worktree.state,
+                                WorktreeState::Deleted
+                                    | WorktreeState::Unknown
+                                    | WorktreeState::Integrating
+                            )
+                    })
+                    .collect();
+                if candidates.len() != 1 {
+                    Err(DomainError::new(
+                        "WORKTREE_NOT_READY",
+                        "isolated workspace has not been created and verified",
+                    ))
+                } else {
+                    Ok(PathBuf::from(&candidates[0].path))
+                }
+            }
+            WorkspaceKind::Readonly | WorkspaceKind::Direct => Ok(PathBuf::from(&project.path)),
+        };
+        let cwd = match cwd_result {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                binding.state = SessionState::Disconnected;
+                self.repo.update_binding(&binding)?;
+                self.permits.lock().await.remove(&session_id);
+                return Err(error);
+            }
+        };
+        if !cwd.is_absolute() || !cwd.is_dir() {
+            binding.state = SessionState::Disconnected;
             self.repo.update_binding(&binding)?;
+            self.permits.lock().await.remove(&session_id);
+            return Err(DomainError::new(
+                "TASK_RUNTIME_INVALID_CWD",
+                "task workspace is not an existing absolute directory",
+            ));
+        }
+
+        binding.cwd = Some(cwd.to_string_lossy().into_owned());
+        binding.state = SessionState::Active;
+        self.repo.update_binding(&binding)?;
+
+        let start_result = match self.agent_runtime.session_state(&session_id) {
+            Some(RuntimeState::Ready | RuntimeState::Busy) => Ok(()),
+            Some(state) if state.is_live() => Err(DomainError::new(
+                crate::domain::error::codes::DOMAIN_ILLEGAL_TRANSITION,
+                format!("session is not ready ({state})"),
+            )),
+            _ => {
+                let runtime_config = RuntimeConfig {
+                    model: task.model.clone(),
+                    ..RuntimeConfig::default()
+                };
+                self.agent_runtime
+                    .start(session_id, WorkspaceContext { cwd }, &runtime_config)
+                    .await
+                    .map(|_| ())
+            }
+        };
+        if let Err(error) = start_result {
+            binding.state = SessionState::Disconnected;
+            self.repo.update_binding(&binding)?;
+            self.permits.lock().await.remove(&binding.session_id);
+            return Err(error);
         }
 
         Ok(())
     }
 
-    async fn accept_agent_event(&self, event: TimestampedEvent) -> Result<(), DomainError> {
+    async fn accept_agent_event(&self, mut event: TimestampedEvent) -> Result<(), DomainError> {
         let session_id = event.meta.session_id.clone();
 
         // Find the binding to get the task_id.
@@ -217,6 +345,21 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             })?;
 
         let task_id = binding.task_id.clone();
+        let raw_sequence = event.meta.sequence;
+        let offset = {
+            let mut offsets = self.sequence_offsets.lock().await;
+            if matches!(
+                &event.event,
+                crate::modules::agent_runtime::AgentEvent::SessionReady(_)
+            ) && raw_sequence <= binding.last_seq
+            {
+                offsets.insert(session_id.clone(), binding.last_seq);
+                binding.last_seq
+            } else {
+                offsets.get(&session_id).copied().unwrap_or(0)
+            }
+        };
+        event.meta.sequence = raw_sequence.saturating_add(offset);
         let mailbox = self.get_or_create_mailbox(&task_id, &session_id).await;
 
         // Dispatch to the session's mailbox for serial execution.
@@ -243,9 +386,6 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
 
         let session_id = binding.session_id.clone();
 
-        // Release the semaphore permit so another task can start.
-        self.release_session_permit(&session_id).await;
-
         // Update task status back to idle so it can be re-enqueued.
         self.repo
             .update_task_status(&task_id.0, "idle", Some("cancelled by user"))?;
@@ -264,7 +404,13 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             .await?;
         rx.await.map_err(|_| {
             DomainError::new("TASK_RUNTIME_MAILBOX_DROPPED", "mailbox worker dropped")
-        })?
+        })??;
+
+        // The concurrency permit represents an active task slot, not ACP
+        // process ownership. Keep the Ready session reusable, but release the
+        // slot once cancellation has been durably applied.
+        self.permits.lock().await.remove(&session_id);
+        Ok(())
     }
 
     async fn get_snapshot(

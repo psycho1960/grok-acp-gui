@@ -48,14 +48,24 @@ id_newtype!(RecoveryId);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    /// Created locally but not yet prepared for execution.
+    Draft,
     /// Initial state after creation; not yet bound to a Workspace.
     Preparing,
     /// Bound to a valid Workspace and actively executing.
     Running,
     /// Awaiting user permission resolution.
     WaitingPermission,
+    /// Session is alive and ready for another turn.
+    Idle,
+    /// The latest turn failed and can be retried.
+    Failed,
+    /// Work is complete and awaiting review.
+    ReadyForReview,
     /// Integration in progress (squash merge into target).
     Integrating,
+    /// Integration found conflicts that require user action.
+    Conflicted,
     /// Successfully merged and completed.
     Merged,
     /// User-archived; retained for reference.

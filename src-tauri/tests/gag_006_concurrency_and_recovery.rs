@@ -53,6 +53,7 @@ impl AgentRuntime for NopAgent {
     }
     async fn cancel(&self, _session_id: SessionId, _request_id: Option<u64>) {}
     async fn shutdown(&self, _session_id: SessionId, _reason: &str) {}
+    async fn shutdown_all(&self, _reason: &str) {}
     fn subscribe(&self) -> mpsc::Receiver<TimestampedEvent> {
         mpsc::channel(1).1
     }

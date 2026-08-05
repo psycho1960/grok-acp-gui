@@ -100,6 +100,92 @@ fn looks_like_secret(s: &str) -> bool {
     false
 }
 
+/// Redact credentials embedded in user-visible text before it is persisted
+/// or sent to the Renderer. This complements structured JSON redaction for
+/// common `KEY=value`, `key: value`, and `Bearer value` forms.
+pub fn redact_visible_text(text: &str) -> String {
+    if looks_like_secret(text) {
+        return "[redacted]".into();
+    }
+
+    let markers = [
+        "xai_api_key",
+        "api_key",
+        "apikey",
+        "authorization",
+        "password",
+        "passwd",
+        "credential",
+        "private_key",
+        "secret",
+        "token",
+        "cookie",
+    ];
+    let bearer_redacted = redact_marker_values(text, &["bearer"], false);
+    redact_marker_values(&bearer_redacted, &markers, true)
+}
+
+fn redact_marker_values(text: &str, markers: &[&str], require_separator: bool) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut output = String::with_capacity(text.len());
+    let mut search_cursor = 0;
+    let mut output_cursor = 0;
+    let mut replaced = false;
+
+    while search_cursor < text.len() {
+        let remaining = &lower[search_cursor..];
+        let Some((offset, marker)) = markers
+            .iter()
+            .filter_map(|marker| remaining.find(marker).map(|offset| (offset, *marker)))
+            .min_by_key(|(offset, marker)| (*offset, std::cmp::Reverse(marker.len())))
+        else {
+            break;
+        };
+        let marker_start = search_cursor + offset;
+        let mut position = marker_start + marker.len();
+        while text
+            .as_bytes()
+            .get(position)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            position += 1;
+        }
+        if require_separator {
+            if !matches!(text.as_bytes().get(position), Some(b'=') | Some(b':')) {
+                search_cursor = marker_start + marker.len();
+                continue;
+            }
+            position += 1;
+        }
+        while text
+            .as_bytes()
+            .get(position)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            position += 1;
+        }
+        if position >= text.len() {
+            break;
+        }
+        let value_end = text[position..]
+            .find(char::is_whitespace)
+            .map(|offset| position + offset)
+            .unwrap_or(text.len());
+        output.push_str(&text[output_cursor..position]);
+        output.push_str("[redacted]");
+        output_cursor = value_end;
+        search_cursor = value_end;
+        replaced = true;
+    }
+
+    if !replaced {
+        text.to_owned()
+    } else {
+        output.push_str(&text[output_cursor..]);
+        output
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DiagLog — structured log entry
 // ---------------------------------------------------------------------------

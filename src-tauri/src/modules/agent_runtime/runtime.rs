@@ -15,11 +15,15 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
 
-use crate::adapters::grok_acp::codec::{encode_notification, encode_request, AcpMessage};
+use crate::adapters::filesystem::WorkspaceFilesystem;
+use crate::adapters::grok_acp::codec::{
+    encode_notification, encode_request, encode_response_error, encode_response_result, AcpError,
+    AcpMessage, AcpRequest,
+};
 use crate::adapters::grok_acp::interpreter::{self, AcpSessionContext, InterpretationResult};
 use crate::adapters::grok_acp::transport::{AcpTransport, ProcessExit, TransportHandle};
 use crate::bridge::types::SessionId;
@@ -27,6 +31,7 @@ use crate::domain::error::{codes, DomainError};
 use crate::modules::agent_runtime::diagnostics::DiagLog;
 use crate::modules::agent_runtime::events::{
     AgentEvent, EventMeta, ProcessExitedPayload, SessionReadyPayload, TimestampedEvent,
+    TurnCancelledPayload,
 };
 use crate::modules::agent_runtime::requests::{ClientRequest, SendAck};
 use crate::modules::agent_runtime::state::{self, RuntimeState, RuntimeTransition};
@@ -58,9 +63,16 @@ struct SessionSlot {
     /// The process join handle (for shutdown).
     process: Option<tokio::task::JoinHandle<ProcessExit>>,
     /// Per-session interpretation context (kept for diagnostics / seq tracking).
-    interp_ctx: AcpSessionContext,
+    interp_ctx: Arc<StdMutex<AcpSessionContext>>,
+    /// JSON-RPC request ids are independent from event sequence numbers.
+    next_request_id: u64,
+    /// Session id allocated by the ACP agent via `session/new`.
+    acp_session_id: Option<String>,
     /// Resolved executable path (for the handle).
     executable_path: String,
+    /// Whether shutdown began while a turn was still in progress. Late
+    /// completion frames cannot turn that uncertain shutdown into success.
+    shutdown_interrupted_turn: bool,
 }
 
 impl SessionSlot {
@@ -69,8 +81,12 @@ impl SessionSlot {
             state: RuntimeState::Unavailable,
             outbound: None,
             process: None,
-            interp_ctx: AcpSessionContext::new(),
+            interp_ctx: Arc::new(StdMutex::new(AcpSessionContext::from_sequence(2))),
+            // 1..=3 are reserved for initialize/authenticate/session-new.
+            next_request_id: 3,
+            acp_session_id: None,
             executable_path,
+            shutdown_interrupted_turn: false,
         }
     }
 }
@@ -85,7 +101,7 @@ pub struct AgentRuntimeImpl<T: AcpTransport> {
     sessions: Mutex<HashMap<SessionId, SessionSlot>>,
     /// Subscribers receive all session events. Each subscriber has its
     /// own bounded channel.
-    event_subscribers: Mutex<Vec<mpsc::Sender<TimestampedEvent>>>,
+    event_subscribers: StdMutex<Vec<mpsc::Sender<TimestampedEvent>>>,
     /// Central channel that session reader tasks send events to.
     /// A forwarder task distributes these to subscribers.
     internal_event_tx: mpsc::Sender<SessionInternalEvent>,
@@ -101,7 +117,7 @@ impl<T: AcpTransport + 'static> AgentRuntimeImpl<T> {
         let runtime = Arc::new(Self {
             transport,
             sessions: Mutex::new(HashMap::new()),
-            event_subscribers: Mutex::new(Vec::new()),
+            event_subscribers: StdMutex::new(Vec::new()),
             internal_event_tx,
         });
 
@@ -114,14 +130,88 @@ impl<T: AcpTransport + 'static> AgentRuntimeImpl<T> {
     /// Spawn the central event forwarder that distributes events
     /// from session reader tasks to all subscribers.
     fn spawn_forwarder(self: Arc<Self>, rx: mpsc::Receiver<SessionInternalEvent>) {
+        let runtime = Arc::downgrade(&self);
         tauri::async_runtime::spawn(async move {
             let mut rx = rx;
-            while let Some(internal) = rx.recv().await {
-                let mut subs = self.event_subscribers.lock().await;
+            while let Some(mut internal) = rx.recv().await {
+                let Some(runtime) = runtime.upgrade() else {
+                    break;
+                };
+                if matches!(
+                    internal.event.event,
+                    AgentEvent::AssistantCompleted(_) | AgentEvent::RequestFailed(_)
+                ) {
+                    let _ = runtime
+                        .try_transition(&internal.session_id, RuntimeTransition::TurnCompleted)
+                        .await;
+                }
+                if matches!(internal.event.event, AgentEvent::ProcessExited(_)) {
+                    match runtime.get_state(&internal.session_id).await {
+                        Some(RuntimeState::Stopping) => {
+                            if let AgentEvent::ProcessExited(exit) = &mut internal.event.event {
+                                let interrupted_turn = runtime
+                                    .sessions
+                                    .lock()
+                                    .await
+                                    .get(&internal.session_id)
+                                    .is_some_and(|slot| slot.shutdown_interrupted_turn);
+                                exit.reason = if interrupted_turn {
+                                    "shutdown_interrupted"
+                                } else {
+                                    "clean"
+                                }
+                                .into();
+                            }
+                            let _ = runtime
+                                .try_transition(
+                                    &internal.session_id,
+                                    RuntimeTransition::ProcessExited,
+                                )
+                                .await;
+                        }
+                        Some(RuntimeState::Stopped) | None => {
+                            if let AgentEvent::ProcessExited(exit) = &mut internal.event.event {
+                                let interrupted_turn = runtime
+                                    .sessions
+                                    .lock()
+                                    .await
+                                    .get(&internal.session_id)
+                                    .is_some_and(|slot| slot.shutdown_interrupted_turn);
+                                exit.reason = if interrupted_turn {
+                                    "shutdown_interrupted"
+                                } else {
+                                    "clean"
+                                }
+                                .into();
+                            }
+                        }
+                        Some(_) => {
+                            let _ = runtime
+                                .try_transition(
+                                    &internal.session_id,
+                                    RuntimeTransition::Fail {
+                                        reason: "managed process exited unexpectedly".into(),
+                                    },
+                                )
+                                .await;
+                            let _ = runtime
+                                .try_transition(
+                                    &internal.session_id,
+                                    RuntimeTransition::CleanupComplete,
+                                )
+                                .await;
+                        }
+                    }
+                }
+                let mut subs = runtime
+                    .event_subscribers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let mut dead = Vec::new();
                 for (i, tx) in subs.iter().enumerate() {
-                    if tx.try_send(internal.event.clone()).is_err() {
-                        dead.push(i);
+                    match tx.try_send(internal.event.clone()) {
+                        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                        Err(mpsc::error::TrySendError::Closed(_)) => dead.push(i),
                     }
                 }
                 for i in dead.into_iter().rev() {
@@ -190,6 +280,10 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         workspace: WorkspaceContext,
         config: &RuntimeConfig,
     ) -> Result<RuntimeHandle, DomainError> {
+        super::config::validate_model_id(config.model.as_deref()).map_err(|message| {
+            DomainError::new(crate::domain::error::codes::RUNTIME_INVALID_MODEL, message)
+        })?;
+
         // Create or reset the session slot.
         {
             let mut sessions = self.sessions.lock().await;
@@ -241,6 +335,10 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             }
         }
 
+        let workspace_cwd = workspace.cwd.clone();
+        let workspace_filesystem = WorkspaceFilesystem::new(&workspace_cwd)
+            .map_err(|error| DomainError::new(codes::ACP_REQUEST_FAILED, error.safe_message()))?;
+
         // Spawn the transport.
         let TransportHandle {
             outbound,
@@ -249,7 +347,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             stderr,
         } = self
             .transport
-            .spawn(session_id.clone(), workspace)
+            .spawn(session_id.clone(), workspace, config)
             .await
             .map_err(|e| {
                 DomainError::new(
@@ -270,18 +368,28 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             let slot = sessions.get_mut(&session_id).unwrap();
             slot.outbound = Some(outbound.clone());
             slot.process = Some(process);
+            slot.shutdown_interrupted_turn = false;
         }
 
         // Perform the handshake BEFORE spawning the reader task.
         // This lets us intercept the `initialize` response directly.
-        match perform_handshake(&outbound, &mut inbound, config.handshake_timeout_secs).await {
+        match perform_handshake(
+            &outbound,
+            &mut inbound,
+            config.handshake_timeout_secs,
+            &workspace_cwd,
+        )
+        .await
+        {
             Ok(handshake_info) => {
                 self.try_transition(&session_id, RuntimeTransition::HandshakeComplete)
                     .await?;
 
+                let reader_acp_session_id = handshake_info.acp_session_id.clone();
+
                 // Emit session_ready event.
                 let event = TimestampedEvent {
-                    meta: EventMeta::new(session_id.clone(), 0),
+                    meta: EventMeta::new(session_id.clone(), 1),
                     event: AgentEvent::SessionReady(SessionReadyPayload {
                         protocol_version: handshake_info.protocol_version,
                         agent_name: handshake_info.agent_name,
@@ -293,12 +401,34 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                 self.emit_runtime_event(event).await;
 
                 // NOW spawn the inbound reader task for subsequent messages.
+                let interp_ctx = {
+                    let mut sessions = self.sessions.lock().await;
+                    let slot = sessions.get_mut(&session_id).unwrap();
+                    slot.acp_session_id = Some(handshake_info.acp_session_id);
+                    slot.interp_ctx.clone()
+                };
                 let internal_tx = self.internal_event_tx.clone();
                 let sid_reader = session_id.clone();
+                let reader_outbound = outbound.clone();
                 tokio::spawn(async move {
-                    let mut interp_ctx = AcpSessionContext::new();
                     while let Some(msg) = inbound.recv().await {
-                        match interpreter::interpret(&msg, &sid_reader, &mut interp_ctx) {
+                        if let AcpMessage::Request(request) = &msg {
+                            if let Some(response) = handle_filesystem_request(
+                                request,
+                                &reader_acp_session_id,
+                                &workspace_filesystem,
+                            ) {
+                                if reader_outbound.send(response).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+                        let interpreted = {
+                            let mut context = interp_ctx.lock().unwrap();
+                            interpreter::interpret(&msg, &sid_reader, &mut context)
+                        };
+                        match interpreted {
                             InterpretationResult::Events(events) => {
                                 for ev in events {
                                     if internal_tx
@@ -319,6 +449,20 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                                     format!("unknown ACP method: {}", method),
                                 )
                                 .emit();
+                                if let AcpMessage::Request(request) = &msg {
+                                    let error = AcpError {
+                                        code: crate::adapters::grok_acp::codec::error_codes::METHOD_NOT_FOUND,
+                                        message: "Method not supported".into(),
+                                        data: serde_json::Value::Null,
+                                    };
+                                    if reader_outbound
+                                        .send(encode_response_error(&request.id, &error))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
                             }
                             InterpretationResult::ProtocolError { message } => {
                                 DiagLog::error(
@@ -331,8 +475,14 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         }
                     }
                     // Inbound channel closed — process exited.
+                    let exit_sequence = {
+                        let mut context = interp_ctx.lock().unwrap();
+                        let sequence = context.next_sequence;
+                        context.next_sequence += 1;
+                        sequence
+                    };
                     let exit_event = TimestampedEvent {
-                        meta: EventMeta::new(sid_reader.clone(), interp_ctx.next_sequence),
+                        meta: EventMeta::new(sid_reader.clone(), exit_sequence),
                         event: AgentEvent::ProcessExited(ProcessExitedPayload {
                             code: None,
                             signal: None,
@@ -428,25 +578,30 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         };
 
         // Allocate a request ID.
-        let request_id = {
+        let (request_id, acp_session_id) = {
             let mut sessions = self.sessions.lock().await;
             let slot = sessions.get_mut(&session_id).unwrap();
-            slot.interp_ctx.next_sequence += 1;
-            slot.interp_ctx.current_request_id = Some(slot.interp_ctx.next_sequence);
-            slot.interp_ctx.next_sequence
+            slot.next_request_id += 1;
+            let request_id = slot.next_request_id;
+            let mut context = slot.interp_ctx.lock().unwrap();
+            context.current_request_id = Some(request_id);
+            context.suppress_turn_updates = false;
+            context.clear_error_hint();
+            let acp_session_id = slot.acp_session_id.clone().ok_or_else(|| {
+                DomainError::new(codes::ACP_HANDSHAKE_FAILED, "ACP session id is missing")
+            })?;
+            (request_id, acp_session_id)
         };
 
         let (method, params): (&str, serde_json::Value) = match &request {
             ClientRequest::Prompt(p) => {
-                let mut params = serde_json::json!({
-                    "message": p.message,
+                let params = serde_json::json!({
+                    "sessionId": acp_session_id,
+                    "prompt": [{
+                        "type": "text",
+                        "text": p.message,
+                    }],
                 });
-                if let Some(mode) = &p.mode {
-                    params["mode"] = serde_json::Value::String(mode.clone());
-                }
-                if let Some(model) = &p.model {
-                    params["model"] = serde_json::Value::String(model.clone());
-                }
                 ("session/prompt", params)
             }
             ClientRequest::Cancel => {
@@ -485,12 +640,40 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                     sessions.get(&session_id).and_then(|s| s.outbound.clone())
                 };
                 if let Some(tx) = outbound {
-                    let encoded = encode_notification("session/cancel", &serde_json::json!({}));
+                    let acp_session_id = {
+                        let sessions = self.sessions.lock().await;
+                        sessions
+                            .get(&session_id)
+                            .and_then(|slot| slot.acp_session_id.clone())
+                    };
+                    let encoded = encode_notification(
+                        "session/cancel",
+                        &serde_json::json!({ "sessionId": acp_session_id }),
+                    );
                     let _ = tx.send(encoded).await;
                 }
                 let _ = self
                     .try_transition(&session_id, RuntimeTransition::TurnCompleted)
                     .await;
+                let sequence = {
+                    let sessions = self.sessions.lock().await;
+                    sessions.get(&session_id).map(|slot| {
+                        let mut context = slot.interp_ctx.lock().unwrap();
+                        context.current_request_id = None;
+                        context.accumulated_text.clear();
+                        context.suppress_turn_updates = true;
+                        let sequence = context.next_sequence;
+                        context.next_sequence += 1;
+                        sequence
+                    })
+                };
+                if let Some(sequence) = sequence {
+                    self.emit_runtime_event(TimestampedEvent {
+                        meta: EventMeta::new(session_id.clone(), sequence),
+                        event: AgentEvent::TurnCancelled(TurnCancelledPayload::default()),
+                    })
+                    .await;
+                }
             }
             _ => {
                 DiagLog::info(
@@ -509,6 +692,23 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         let current = self.get_state(&session_id).await;
         if current.is_none() {
             return;
+        }
+
+        if let Some(slot) = self.sessions.lock().await.get_mut(&session_id) {
+            slot.shutdown_interrupted_turn = current == Some(RuntimeState::Busy);
+            if slot.shutdown_interrupted_turn {
+                // Once application shutdown begins, late buffered ACP chunks
+                // or the eventual prompt response cannot honestly complete
+                // the turn. Preserve already-published deltas and let startup
+                // recovery mark the still-running task as interrupted.
+                let mut context = slot
+                    .interp_ctx
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                context.current_request_id = None;
+                context.accumulated_text.clear();
+                context.suppress_turn_updates = true;
+            }
         }
 
         let _ = self
@@ -570,21 +770,19 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             .await;
     }
 
+    async fn shutdown_all(&self, reason: &str) {
+        let session_ids: Vec<_> = self.sessions.lock().await.keys().cloned().collect();
+        for session_id in session_ids {
+            self.shutdown(session_id, reason).await;
+        }
+    }
+
     fn subscribe(&self) -> mpsc::Receiver<TimestampedEvent> {
         let (tx, rx) = mpsc::channel(EVENT_CHANNEL_BUFFER);
-        // try_lock is acceptable here because subscribe() is called
-        // rarely and contention is minimal.
-        if let Ok(mut subs) = self.event_subscribers.try_lock() {
-            subs.push(tx);
-        } else {
-            // Fallback: log and return an empty channel.
-            // The caller will simply not receive events until they retry.
-            DiagLog::warn(
-                "agent_runtime",
-                "subscribe() called during contention — events may be missed",
-            )
-            .emit();
-        }
+        self.event_subscribers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(tx);
         rx
     }
 
@@ -605,6 +803,7 @@ struct HandshakeInfo {
     protocol_version: u32,
     agent_name: String,
     agent_version: String,
+    acp_session_id: String,
 }
 
 /// Perform the ACP handshake: send `initialize` and wait for the response.
@@ -612,19 +811,81 @@ struct HandshakeInfo {
 /// Reads the initialize response directly from the inbound channel
 /// (before the reader task is spawned).  Times out if no response
 /// arrives within `timeout_secs`.
+fn optional_u32_param(params: &serde_json::Value, name: &str) -> Result<Option<u32>, &'static str> {
+    let Some(value) = params.get(name) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .map(Some)
+        .ok_or("Invalid numeric file-read parameter")
+}
+
+fn handle_filesystem_request(
+    request: &AcpRequest,
+    expected_session_id: &str,
+    filesystem: &WorkspaceFilesystem,
+) -> Option<String> {
+    if request.method != "fs/read_text_file" {
+        return None;
+    }
+
+    let result = (|| {
+        let params = request
+            .params
+            .as_object()
+            .ok_or("File-read parameters must be an object")?;
+        let session_id = params
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("File-read session is missing")?;
+        if session_id != expected_session_id {
+            return Err("File-read session does not match");
+        }
+        let path = params
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .ok_or("File-read path is missing")?;
+        let line = optional_u32_param(&request.params, "line")?;
+        let limit = optional_u32_param(&request.params, "limit")?;
+        filesystem
+            .read_text_file(std::path::Path::new(path), line, limit)
+            .map(|content| serde_json::json!({ "content": content }))
+            .map_err(|error| error.safe_message())
+    })();
+
+    Some(match result {
+        Ok(result) => encode_response_result(&request.id, &result),
+        Err(message) => encode_response_error(
+            &request.id,
+            &AcpError {
+                code: crate::adapters::grok_acp::codec::error_codes::INVALID_PARAMS,
+                message: message.into(),
+                data: serde_json::Value::Null,
+            },
+        ),
+    })
+}
+
 async fn perform_handshake(
     outbound: &mpsc::Sender<String>,
     inbound: &mut mpsc::Receiver<AcpMessage>,
     timeout_secs: u64,
+    cwd: &std::path::Path,
 ) -> Result<HandshakeInfo, String> {
     let init_params = serde_json::json!({
         "protocolVersion": 1,
         "clientCapabilities": {
             "fs": {
                 "readTextFile": true,
-                "writeTextFile": true
+                "writeTextFile": false
             },
-            "terminal": true
+            "terminal": false
         }
     });
     let init_request = encode_request(1, "initialize", &init_params);
@@ -668,10 +929,66 @@ async fn perform_handshake(
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown")
                             .to_string();
+                        let auth_methods = result
+                            .get("authMethods")
+                            .and_then(|value| value.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        let has_method = |wanted: &str| {
+                            auth_methods.iter().any(|method| {
+                                method.get("id").and_then(|id| id.as_str()) == Some(wanted)
+                            })
+                        };
+                        let auth_method = if std::env::var_os("XAI_API_KEY").is_some()
+                            && has_method("xai.api_key")
+                        {
+                            "xai.api_key"
+                        } else if has_method("cached_token") {
+                            "cached_token"
+                        } else {
+                            return Err(
+                                "Grok authentication is required; run `grok login` first".into()
+                            );
+                        };
+
+                        request_response(
+                            outbound,
+                            inbound,
+                            2,
+                            "authenticate",
+                            serde_json::json!({
+                                "methodId": auth_method,
+                                "_meta": { "headless": true },
+                            }),
+                            deadline,
+                        )
+                        .await?;
+                        let session = request_response(
+                            outbound,
+                            inbound,
+                            3,
+                            "session/new",
+                            serde_json::json!({
+                                "cwd": cwd.to_string_lossy(),
+                                "mcpServers": [],
+                            }),
+                            deadline,
+                        )
+                        .await?;
+                        let acp_session_id = session
+                            .get("sessionId")
+                            .and_then(|value| value.as_str())
+                            .filter(|value| !value.is_empty())
+                            .ok_or_else(|| {
+                                "session/new response did not include sessionId".to_string()
+                            })?
+                            .to_string();
+
                         return Ok(HandshakeInfo {
                             protocol_version,
                             agent_name,
                             agent_version,
+                            acp_session_id,
                         });
                     }
                     AcpMessage::Unknown(_) => {
@@ -693,6 +1010,41 @@ async fn perform_handshake(
             Err(_) => {
                 return Err(format!("handshake timed out after {}s", timeout_secs));
             }
+        }
+    }
+}
+
+async fn request_response(
+    outbound: &mpsc::Sender<String>,
+    inbound: &mut mpsc::Receiver<AcpMessage>,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, String> {
+    outbound
+        .send(encode_request(id, method, &params))
+        .await
+        .map_err(|error| format!("failed to send {method}: {error}"))?;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("{method} timed out"));
+        }
+        match timeout(remaining, inbound.recv()).await {
+            Ok(Some(AcpMessage::Response(response))) if response.id == id => {
+                if let Some(error) = response.error {
+                    return Err(format!(
+                        "{method} returned error: [{}] {}",
+                        error.code, error.message
+                    ));
+                }
+                return Ok(response.result.unwrap_or(serde_json::Value::Null));
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => return Err(format!("process closed stdout while waiting for {method}")),
+            Err(_) => return Err(format!("{method} timed out")),
         }
     }
 }

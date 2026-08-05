@@ -32,6 +32,8 @@ pub type RequestId = u64;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// User message confirmed by the ACP session stream.
+    UserMessage(UserMessagePayload),
     /// Session is ready to accept requests (handshake completed).
     SessionReady(SessionReadyPayload),
     /// A streaming text delta from the assistant.
@@ -52,6 +54,8 @@ pub enum AgentEvent {
     ArtifactAnnounced(ArtifactAnnouncedPayload),
     /// A request failed.
     RequestFailed(RequestFailedPayload),
+    /// The current turn was cancelled by the user.
+    TurnCancelled(TurnCancelledPayload),
     /// The managed process exited (crash or clean shutdown).
     ProcessExited(ProcessExitedPayload),
 }
@@ -60,6 +64,7 @@ impl AgentEvent {
     /// Returns the event kind as a static string for logging / dispatch.
     pub fn kind_str(&self) -> &'static str {
         match self {
+            AgentEvent::UserMessage(_) => "user_message",
             AgentEvent::SessionReady(_) => "session_ready",
             AgentEvent::AssistantDelta(_) => "assistant_delta",
             AgentEvent::AssistantCompleted(_) => "assistant_completed",
@@ -70,9 +75,16 @@ impl AgentEvent {
             AgentEvent::PermissionRequested(_) => "permission_requested",
             AgentEvent::ArtifactAnnounced(_) => "artifact_announced",
             AgentEvent::RequestFailed(_) => "request_failed",
+            AgentEvent::TurnCancelled(_) => "turn_cancelled",
             AgentEvent::ProcessExited(_) => "process_exited",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMessagePayload {
+    pub text: String,
 }
 
 /// Common metadata attached to every `AgentEvent`.
@@ -177,6 +189,13 @@ pub struct ToolEventPayload {
     /// Human-readable status / progress summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_summary: Option<String>,
+    pub input_redacted: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub locations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +207,16 @@ pub struct ToolCompletedPayload {
     /// Display-safe summary of the result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub result_redacted: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnCancelledPayload {}
 
 /// ACP option ID is passed verbatim — never inferred from labels.
 #[derive(Debug, Clone, Serialize, Deserialize)]

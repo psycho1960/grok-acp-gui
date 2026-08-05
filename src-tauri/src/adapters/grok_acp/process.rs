@@ -57,6 +57,20 @@ const ENV_BLOCKLIST: &[&str] = &[
 /// The arguments passed to `grok` to start ACP stdio mode.
 const GROK_AGENT_ARGS: &[&str] = &["--no-auto-update", "agent", "stdio"];
 
+fn build_agent_args(model: Option<&str>) -> Result<Vec<&str>, TransportError> {
+    let mut args = GROK_AGENT_ARGS[..2].to_vec();
+    if let Some(model) = model {
+        crate::modules::agent_runtime::config::validate_model_id(Some(model)).map_err(
+            |message| TransportError::ProbeError {
+                message: message.into(),
+            },
+        )?;
+        args.extend(["--model", model]);
+    }
+    args.push(GROK_AGENT_ARGS[2]);
+    Ok(args)
+}
+
 /// Production grok ACP adapter.
 pub struct GrokAcpAdapter {
     config: RuntimeConfig,
@@ -194,6 +208,7 @@ impl AcpTransport for GrokAcpAdapter {
         &self,
         _session_id: SessionId,
         workspace: WorkspaceContext,
+        config: &RuntimeConfig,
     ) -> Result<TransportHandle, TransportError> {
         let exe = self.resolved_path.lock().unwrap().clone().ok_or_else(|| {
             TransportError::ProbeError {
@@ -203,7 +218,7 @@ impl AcpTransport for GrokAcpAdapter {
 
         // Build the command with argument vector — NO shell, NO string concat.
         let mut cmd = Command::new(&exe);
-        cmd.args(GROK_AGENT_ARGS);
+        cmd.args(build_agent_args(config.model.as_deref())?);
 
         // Set cwd — validated by the caller (workspace module).
         cmd.current_dir(&workspace.cwd);
@@ -212,6 +227,7 @@ impl AcpTransport for GrokAcpAdapter {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        cmd.kill_on_drop(true);
 
         // Apply env blocklist — pass all parent env EXCEPT known-sensitive keys.
         for (k, v) in filter_env() {
@@ -588,5 +604,30 @@ mod tests {
         for arg in GROK_AGENT_ARGS {
             assert!(!arg.contains(['|', ';', '&']));
         }
+    }
+
+    #[test]
+    fn explicit_model_is_passed_as_a_separate_agent_argument() {
+        let args = build_agent_args(Some("deepseek-v4-pro")).expect("valid model id");
+
+        assert_eq!(
+            args,
+            vec![
+                "--no-auto-update",
+                "agent",
+                "--model",
+                "deepseek-v4-pro",
+                "stdio",
+            ]
+        );
+    }
+
+    #[test]
+    fn option_like_model_id_is_rejected_before_process_spawn() {
+        let error = build_agent_args(Some("--always-approve"))
+            .expect_err("an option-like model id must fail closed");
+
+        assert!(matches!(error, TransportError::ProbeError { .. }));
+        assert!(!error.to_string().contains("--always-approve"));
     }
 }

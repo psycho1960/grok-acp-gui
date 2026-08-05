@@ -9,9 +9,18 @@
 //! and must NOT crash the process (GAG-005 §11).
 
 use crate::bridge::types::{CorrelationId, SessionId};
+use crate::modules::agent_runtime::diagnostics::redact_visible_text;
 use crate::modules::agent_runtime::events::*;
+use std::collections::HashMap;
+use std::time::Instant;
 
 use super::codec::{AcpMessage, AcpNotification, AcpRequest};
+
+#[derive(Debug, Clone)]
+struct NormalizedErrorHint {
+    code: &'static str,
+    message: &'static str,
+}
 
 /// Per-session state needed for interpretation.
 #[derive(Debug, Clone, Default)]
@@ -22,6 +31,10 @@ pub struct AcpSessionContext {
     pub accumulated_text: String,
     /// Next sequence number to assign.
     pub next_sequence: Sequence,
+    pub tool_started: HashMap<String, (String, Instant)>,
+    /// Ignore buffered updates after a terminal turn until the next send.
+    pub suppress_turn_updates: bool,
+    pending_error_hint: Option<NormalizedErrorHint>,
 }
 
 impl AcpSessionContext {
@@ -29,10 +42,21 @@ impl AcpSessionContext {
         Self::default()
     }
 
+    pub fn from_sequence(next_sequence: Sequence) -> Self {
+        Self {
+            next_sequence,
+            ..Self::default()
+        }
+    }
+
     fn next_seq(&mut self) -> Sequence {
         let s = self.next_sequence;
         self.next_sequence += 1;
         s
+    }
+
+    pub(crate) fn clear_error_hint(&mut self) {
+        self.pending_error_hint = None;
     }
 }
 
@@ -71,11 +95,34 @@ pub fn interpret(
             // Responses to client requests are acks or error carriers.
             if let Some(ref error) = resp.error {
                 let request_id = extract_id_as_u64(&resp.id).or(ctx.current_request_id);
+                let hint =
+                    normalize_error_hint(&error.data).or_else(|| ctx.pending_error_hint.take());
                 let event = AgentEvent::RequestFailed(RequestFailedPayload {
                     request_id,
-                    code: format!("ACP_{}", error.code),
-                    message: error.message.clone(),
+                    code: hint
+                        .as_ref()
+                        .map(|value| value.code.to_string())
+                        .unwrap_or_else(|| format!("ACP_{}", error.code)),
+                    message: hint
+                        .map(|value| value.message.to_string())
+                        .unwrap_or_else(|| redact_visible_text(&error.message)),
                 });
+                let meta = EventMeta::new(session_id.clone(), ctx.next_seq()).with_correlation(
+                    CorrelationId::new(format!("req-{}", request_id.unwrap_or(0))),
+                );
+                ctx.current_request_id = None;
+                ctx.accumulated_text.clear();
+                ctx.suppress_turn_updates = true;
+                InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
+            } else if extract_id_as_u64(&resp.id) == ctx.current_request_id {
+                let full_text = if ctx.accumulated_text.is_empty() {
+                    None
+                } else {
+                    Some(std::mem::take(&mut ctx.accumulated_text))
+                };
+                let request_id = ctx.current_request_id.take();
+                ctx.suppress_turn_updates = true;
+                let event = AgentEvent::AssistantCompleted(AssistantCompletedPayload { full_text });
                 let meta = EventMeta::new(session_id.clone(), ctx.next_seq()).with_correlation(
                     CorrelationId::new(format!("req-{}", request_id.unwrap_or(0))),
                 );
@@ -147,10 +194,24 @@ fn interpret_notification(
         "session/update" | "sessionUpdate" => {
             interpret_session_update(&notif.params, session_id, ctx)
         }
+        "_x.ai/session_notification" => {
+            if let Some(hint) = normalize_error_hint(&notif.params) {
+                ctx.pending_error_hint = Some(hint);
+            }
+            InterpretationResult::NoEvent
+        }
+        "_x.ai/sessions/changed"
+        | "_x.ai/queue/changed"
+        | "_x.ai/session/prompt_complete"
+        | "_x.ai/announcements/update"
+        | "_x.ai/mcp/init_progress"
+        | "_x.ai/mcp/server_status"
+        | "_x.ai/mcp_initialized" => InterpretationResult::NoEvent,
         "session/append" => {
             // Some ACP variants use session/append for text deltas.
             let text = extract_string_field(&notif.params, "text")
                 .or_else(|| extract_nested_string(&notif.params, &["content", "text"]))
+                .map(|text| redact_visible_text(&text))
                 .unwrap_or_default();
             if text.is_empty() {
                 return InterpretationResult::NoEvent;
@@ -208,23 +269,65 @@ fn interpret_session_update(
     session_id: &SessionId,
     ctx: &mut AcpSessionContext,
 ) -> InterpretationResult {
-    // ACP session/update params typically have a "type" or "kind" field.
-    let update_type = extract_string_field(params, "type")
+    let update = params.get("update").unwrap_or(params);
+    // ACP v1 uses `update.sessionUpdate`; legacy fixtures used type/kind.
+    let update_type = extract_string_field(update, "sessionUpdate")
+        .or_else(|| extract_string_field(update, "type"))
         .or_else(|| extract_string_field(params, "kind"))
         .unwrap_or_default();
 
+    // Session updates have no JSON-RPC request id. After local cancellation
+    // or failure, discard already-buffered turn chunks so a terminal turn
+    // cannot be revived in the timeline.
+    if ctx.suppress_turn_updates
+        && matches!(
+            update_type.as_str(),
+            "user_message_chunk"
+                | "agent_message_chunk"
+                | "assistantMessage"
+                | "assistant_message"
+                | "text"
+                | "delta"
+                | "toolCall"
+                | "tool_call"
+                | "toolCallStarted"
+                | "toolCallUpdate"
+                | "tool_call_update"
+                | "toolCallComplete"
+                | "tool_call_complete"
+        )
+    {
+        return InterpretationResult::NoEvent;
+    }
+
     match update_type.as_str() {
-        "assistantMessage" | "assistant_message" | "text" | "delta" => {
-            let text = extract_string_field(params, "content")
-                .or_else(|| extract_string_field(params, "text"))
-                .or_else(|| extract_nested_string(params, &["content", "text"]))
+        "agent_thought_chunk" | "available_commands_update" => InterpretationResult::NoEvent,
+
+        "user_message_chunk" => {
+            let text = extract_nested_string(update, &["content", "text"])
+                .or_else(|| extract_string_field(update, "text"))
+                .map(|text| redact_visible_text(&text))
+                .unwrap_or_default();
+            if text.is_empty() {
+                return InterpretationResult::NoEvent;
+            }
+            let event = AgentEvent::UserMessage(UserMessagePayload { text });
+            let meta = request_meta(session_id, ctx);
+            InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
+        }
+
+        "agent_message_chunk" | "assistantMessage" | "assistant_message" | "text" | "delta" => {
+            let text = extract_string_field(update, "content")
+                .or_else(|| extract_string_field(update, "text"))
+                .or_else(|| extract_nested_string(update, &["content", "text"]))
+                .map(|text| redact_visible_text(&text))
                 .unwrap_or_default();
             if text.is_empty() {
                 return InterpretationResult::NoEvent;
             }
             ctx.accumulated_text.push_str(&text);
             let event = AgentEvent::AssistantDelta(AssistantDeltaPayload { text });
-            let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
+            let meta = request_meta(session_id, ctx);
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
         }
 
@@ -241,32 +344,62 @@ fn interpret_session_update(
         }
 
         "toolCall" | "tool_call" | "toolCallStarted" => {
-            let tool_call = extract_tool_call(params);
+            let mut tool_call = extract_tool_call(update);
+            let started_at = crate::bridge::types::utc_now();
+            tool_call.started_at = Some(started_at.clone());
+            tool_call.input_summary = update
+                .get("rawInput")
+                .map(|value| summarize_structure(value, "参数"));
+            ctx.tool_started
+                .insert(tool_call.tool_call_id.clone(), (started_at, Instant::now()));
             let event = AgentEvent::ToolStarted(tool_call);
-            let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
+            let meta = request_meta(session_id, ctx);
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
         }
 
         "toolCallUpdate" | "tool_call_update" => {
-            let tool_call = extract_tool_call(params);
-            let event = AgentEvent::ToolUpdated(tool_call);
-            let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
+            let tool_call = extract_tool_call(update);
+            let terminal = tool_call
+                .status
+                .as_deref()
+                .is_some_and(|status| matches!(status, "completed" | "failed" | "cancelled"));
+            let event = if terminal {
+                let tool_call_id = tool_call.tool_call_id;
+                let duration_ms = tool_duration(ctx, &tool_call_id);
+                AgentEvent::ToolCompleted(ToolCompletedPayload {
+                    tool_call_id,
+                    outcome: tool_call.status.unwrap_or_else(|| "unknown".into()),
+                    summary: update
+                        .get("rawOutput")
+                        .map(|value| summarize_structure(value, "结果"))
+                        .or_else(|| Some("工具调用已结束".into())),
+                    ended_at: Some(crate::bridge::types::utc_now()),
+                    duration_ms,
+                    result_redacted: true,
+                })
+            } else {
+                AgentEvent::ToolUpdated(tool_call)
+            };
+            let meta = request_meta(session_id, ctx);
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
         }
 
         "toolCallComplete" | "tool_call_complete" => {
-            let tool_call_id = extract_tool_call_id(params);
-            let outcome = extract_string_field(params, "outcome")
-                .or_else(|| extract_string_field(params, "status"))
+            let tool_call_id = extract_tool_call_id(update);
+            let outcome = extract_string_field(update, "outcome")
+                .or_else(|| extract_string_field(update, "status"))
                 .unwrap_or_else(|| "unknown".into());
-            let summary = extract_string_field(params, "summary")
-                .or_else(|| extract_string_field(params, "content"));
+            let summary = extract_string_field(update, "summary")
+                .or_else(|| extract_string_field(update, "content"));
             let event = AgentEvent::ToolCompleted(ToolCompletedPayload {
+                duration_ms: tool_duration(ctx, &tool_call_id),
                 tool_call_id,
                 outcome,
                 summary,
+                ended_at: Some(crate::bridge::types::utc_now()),
+                result_redacted: true,
             });
-            let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
+            let meta = request_meta(session_id, ctx);
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
         }
 
@@ -289,6 +422,8 @@ fn interpret_session_update(
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
         }
 
+        "session_info_update" => InterpretationResult::NoEvent,
+
         _ => {
             // Unknown update type — surface as unknown, do NOT crash.
             InterpretationResult::Unknown {
@@ -307,6 +442,71 @@ fn extract_string_field(params: &serde_json::Value, field: &str) -> Option<Strin
         .get(field)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn find_numeric_field(value: &serde_json::Value, names: &[&str], depth: u8) -> Option<i64> {
+    if depth > 8 {
+        return None;
+    }
+    match value {
+        serde_json::Value::Object(fields) => {
+            for name in names {
+                if let Some(number) = fields.get(*name).and_then(|entry| entry.as_i64()) {
+                    return Some(number);
+                }
+            }
+            fields
+                .values()
+                .find_map(|entry| find_numeric_field(entry, names, depth + 1))
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|entry| find_numeric_field(entry, names, depth + 1)),
+        _ => None,
+    }
+}
+
+/// Convert only known account/service signals to fixed safe text. Arbitrary
+/// provider data is inspected but never copied into an AgentEvent or log.
+fn normalize_error_hint(value: &serde_json::Value) -> Option<NormalizedErrorHint> {
+    if value.is_null() {
+        return None;
+    }
+    let status = find_numeric_field(
+        value,
+        &["http_status", "httpStatus", "status_code", "statusCode"],
+        0,
+    );
+    let searchable = value.to_string().to_ascii_lowercase();
+
+    if status == Some(402)
+        || searchable.contains("usage balance exhausted")
+        || searchable.contains("spending-limit")
+        || searchable.contains("run out of credits")
+        || searchable.contains("ran out of credits")
+    {
+        return Some(NormalizedErrorHint {
+            code: "GROK_USAGE_EXHAUSTED",
+            message: "Grok Build usage balance exhausted. Add credits or upgrade your Grok subscription, then retry.",
+        });
+    }
+    if status == Some(429) || searchable.contains("rate limit") {
+        return Some(NormalizedErrorHint {
+            code: "GROK_RATE_LIMITED",
+            message: "Grok is temporarily rate limited. Wait and retry.",
+        });
+    }
+    if status == Some(401)
+        || searchable.contains("not authenticated")
+        || searchable.contains("authentication required")
+        || searchable.contains("login required")
+    {
+        return Some(NormalizedErrorHint {
+            code: "GROK_AUTH_REQUIRED",
+            message: "Grok authentication is required. Run 'grok login', then retry.",
+        });
+    }
+    None
 }
 
 fn extract_nested_string(params: &serde_json::Value, path: &[&str]) -> Option<String> {
@@ -341,7 +541,81 @@ fn extract_tool_call(params: &serde_json::Value) -> ToolEventPayload {
             .or_else(|| extract_string_field(source, "toolName"))
             .or_else(|| extract_string_field(source, "type")),
         status: extract_string_field(source, "status"),
+        started_at: None,
+        input_summary: None,
+        input_redacted: true,
+        locations: extract_locations(source),
     }
+}
+
+fn request_meta(session_id: &SessionId, ctx: &mut AcpSessionContext) -> EventMeta {
+    let request_id = ctx.current_request_id;
+    let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
+    match request_id {
+        Some(id) => meta.with_correlation(CorrelationId::new(format!("req-{id}"))),
+        None => meta,
+    }
+}
+
+fn extract_locations(source: &serde_json::Value) -> Vec<String> {
+    source
+        .get("locations")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|location| {
+            location
+                .get("path")
+                .and_then(|path| path.as_str())
+                .map(ToOwned::to_owned)
+        })
+        .take(8)
+        .collect()
+}
+
+fn summarize_structure(value: &serde_json::Value, label: &str) -> String {
+    match value {
+        serde_json::Value::Object(fields) => {
+            let mut names: Vec<_> = fields
+                .keys()
+                .filter(|name| !is_sensitive_name(name))
+                .take(8)
+                .cloned()
+                .collect();
+            names.sort();
+            if names.is_empty() {
+                format!("{label}对象（内容已隐藏）")
+            } else {
+                format!("{label}字段：{}", names.join(", "))
+            }
+        }
+        serde_json::Value::Array(items) => format!("{label}列表（{} 项，内容已隐藏）", items.len()),
+        serde_json::Value::String(text) => {
+            format!("{label}文本（{} 字符，内容已隐藏）", text.chars().count())
+        }
+        _ => format!("{label}已隐藏"),
+    }
+}
+
+fn is_sensitive_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    [
+        "token",
+        "secret",
+        "password",
+        "authorization",
+        "api_key",
+        "apikey",
+        "env",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn tool_duration(ctx: &mut AcpSessionContext, tool_call_id: &str) -> Option<u64> {
+    ctx.tool_started
+        .remove(tool_call_id)
+        .map(|(_, started)| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
 }
 
 fn extract_permission_options(params: &serde_json::Value) -> Vec<PermissionOptionDescriptor> {
@@ -514,6 +788,44 @@ mod tests {
     }
 
     #[test]
+    fn known_xai_mcp_status_notifications_are_ignored_without_consuming_sequence() {
+        let mut c = ctx();
+        for method in [
+            "_x.ai/mcp/init_progress",
+            "_x.ai/mcp/server_status",
+            "_x.ai/mcp_initialized",
+        ] {
+            let notif = AcpNotification {
+                jsonrpc: "2.0".into(),
+                method: method.into(),
+                params: json!({"detail": "provider-owned status"}),
+            };
+            assert!(matches!(
+                interpret(&AcpMessage::Notification(notif), &sid(), &mut c),
+                InterpretationResult::NoEvent
+            ));
+        }
+        assert_eq!(c.next_sequence, 0);
+    }
+
+    #[test]
+    fn non_user_visible_session_updates_are_ignored_without_consuming_sequence() {
+        let mut c = ctx();
+        for update_type in ["agent_thought_chunk", "available_commands_update"] {
+            let notif = AcpNotification {
+                jsonrpc: "2.0".into(),
+                method: "session/update".into(),
+                params: json!({"type": update_type, "content": {"text": "private"}}),
+            };
+            assert!(matches!(
+                interpret(&AcpMessage::Notification(notif), &sid(), &mut c),
+                InterpretationResult::NoEvent
+            ));
+        }
+        assert_eq!(c.next_sequence, 0);
+    }
+
+    #[test]
     fn interpret_unknown_session_update_type_does_not_crash() {
         let notif = AcpNotification {
             jsonrpc: "2.0".into(),
@@ -558,6 +870,78 @@ mod tests {
     }
 
     #[test]
+    fn response_error_data_normalizes_usage_exhaustion_without_echoing_raw_data() {
+        let resp = AcpResponse {
+            jsonrpc: "2.0".into(),
+            id: json!(42),
+            result: None,
+            error: Some(AcpError {
+                code: -32603,
+                message: "Internal error".into(),
+                data: json!({
+                    "http_status": 402,
+                    "message": "Grok Build usage balance exhausted",
+                    "token": "must-never-leak"
+                }),
+            }),
+        };
+        let mut c = ctx();
+        c.current_request_id = Some(42);
+        let result = interpret(&AcpMessage::Response(resp), &sid(), &mut c);
+        match result {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::RequestFailed(failure) => {
+                    assert_eq!(failure.code, "GROK_USAGE_EXHAUSTED");
+                    assert!(failure.message.contains("usage balance"));
+                    assert!(!failure.message.contains("must-never-leak"));
+                }
+                other => panic!("expected RequestFailed, got {other:?}"),
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vendor_error_notification_can_hint_a_following_generic_rpc_error() {
+        let notification = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "_x.ai/session_notification".into(),
+            params: json!({
+                "notification": {
+                    "kind": "error",
+                    "message": "personal-team-blocked:spending-limit"
+                }
+            }),
+        };
+        let mut c = ctx();
+        c.current_request_id = Some(42);
+        assert!(matches!(
+            interpret(&AcpMessage::Notification(notification), &sid(), &mut c),
+            InterpretationResult::NoEvent
+        ));
+
+        let response = AcpResponse {
+            jsonrpc: "2.0".into(),
+            id: json!(42),
+            result: None,
+            error: Some(AcpError {
+                code: -32603,
+                message: "Internal error".into(),
+                data: serde_json::Value::Null,
+            }),
+        };
+        match interpret(&AcpMessage::Response(response), &sid(), &mut c) {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::RequestFailed(failure) => {
+                    assert_eq!(failure.code, "GROK_USAGE_EXHAUSTED");
+                }
+                other => panic!("expected RequestFailed, got {other:?}"),
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn interpret_response_success_is_ack() {
         let resp = AcpResponse {
             jsonrpc: "2.0".into(),
@@ -579,6 +963,32 @@ mod tests {
         assert_eq!(s1, 0);
         assert_eq!(s2, 1);
         assert_eq!(s3, 2);
+    }
+
+    #[test]
+    fn visible_message_chunks_redact_credentials_before_becoming_events() {
+        let notif = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "XAI_API_KEY=super-secret-value Bearer abc.def.ghi" }
+                }
+            }),
+        };
+        let mut c = ctx();
+        let result = interpret(&AcpMessage::Notification(notif), &sid(), &mut c);
+        let InterpretationResult::Events(events) = result else {
+            panic!("expected message event");
+        };
+        let AgentEvent::AssistantDelta(delta) = &events[0].event else {
+            panic!("expected assistant delta");
+        };
+        assert!(delta.text.contains("[redacted]"));
+        assert!(!delta.text.contains("super-secret-value"));
+        assert!(!delta.text.contains("abc.def.ghi"));
     }
 
     #[test]

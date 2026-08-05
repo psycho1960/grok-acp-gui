@@ -21,7 +21,9 @@ pub mod runtime;
 pub mod state;
 
 // Re-export the most commonly used types at the module root.
-pub use config::{RuntimeConfig, RuntimeHandle, RuntimeProbeResult, WorkspaceContext};
+pub use config::{
+    configured_models, RuntimeConfig, RuntimeHandle, RuntimeProbeResult, WorkspaceContext,
+};
 pub use events::{AgentEvent, AssistantDeltaPayload, EventMeta, Sequence, TimestampedEvent};
 pub use requests::{ClientRequest, SendAck};
 pub use runtime::AgentRuntimeImpl;
@@ -93,6 +95,10 @@ pub trait AgentRuntime: Send + Sync {
     /// The process is first sent a graceful shutdown signal; if it does
     /// not exit within a timeout, it is killed.
     async fn shutdown(&self, session_id: SessionId, reason: &str);
+
+    /// Shut down every process managed by this runtime. Used by the desktop
+    /// host during its final exit event so no Grok child survives the app.
+    async fn shutdown_all(&self, reason: &str);
 
     /// Subscribe to the global event stream.  All sessions' events are
     /// multiplexed on this channel; filter by `meta.session_id`.
