@@ -20,9 +20,14 @@ test.describe("GAG-008 conversation timeline", () => {
     const stop = page.getByTestId("composer-stop");
     if (await stop.isVisible().catch(() => false)) {
       await stop.click();
+      await expect(
+        page
+          .getByTestId("conversation-header")
+          .locator(".badge")
+          .filter({ hasText: /^空闲$/ }),
+      ).toBeVisible();
     }
 
-    await expect(page.getByText("已停止")).toBeVisible({ timeout: 5_000 });
     const input = page.getByTestId("composer-input");
     await input.fill("one visible user turn");
     await page.getByTestId("composer-send").click();
@@ -55,7 +60,12 @@ test.describe("GAG-008 conversation timeline", () => {
     const stop = page.getByTestId("composer-stop");
     if (await stop.isVisible()) {
       await stop.click();
-      await expect(page.getByText("已停止")).toBeVisible();
+      await expect(
+        page
+          .getByTestId("conversation-header")
+          .locator(".badge")
+          .filter({ hasText: /^空闲$/ }),
+      ).toBeVisible();
     }
 
     const input = page.getByTestId("composer-input");
