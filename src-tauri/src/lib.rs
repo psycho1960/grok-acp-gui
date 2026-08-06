@@ -3,6 +3,7 @@ pub mod bridge;
 pub mod domain;
 pub mod modules {
     pub mod agent_runtime;
+    pub mod artifacts;
     pub mod persistence;
     pub mod task_runtime;
 }
@@ -14,6 +15,7 @@ pub mod adapters {
 
 use crate::adapters::grok_acp::GrokAcpAdapter;
 use crate::modules::agent_runtime::{AgentRuntime, AgentRuntimeImpl, RuntimeConfig};
+use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::{TaskRuntime, TaskRuntimeImpl};
 use bridge::dispatch::{self as br_dispatch, DesktopResult};
@@ -24,7 +26,9 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct AppState {
     pub repo: Arc<dyn Repository>,
     pub runtime: Arc<dyn AgentRuntime>,
+    pub vision_runtime: Arc<dyn AgentRuntime>,
     pub task_runtime: Arc<dyn TaskRuntime>,
+    pub artifacts: Arc<dyn ArtifactService>,
     pub db_init_error: Option<String>,
 }
 
@@ -72,14 +76,27 @@ async fn bootstrap(
 }
 
 #[tauri::command]
-fn execute(state: tauri::State<'_, AppState>, command: serde_json::Value) -> DesktopResult {
-    // Clone Arcs out of state to get 'static references for the async block.
+async fn execute(
+    state: tauri::State<'_, AppState>,
+    command: serde_json::Value,
+) -> Result<DesktopResult, String> {
+    // This must remain an async Tauri command. Image turns can wait for the
+    // isolated vision runtime, and blocking here would freeze the WebView's
+    // Windows message loop for the entire analysis timeout.
     let repo = state.inner().repo.clone();
     let runtime = state.inner().runtime.clone();
+    let vision_runtime = state.inner().vision_runtime.clone();
     let task_runtime = state.inner().task_runtime.clone();
-    tauri::async_runtime::block_on(async move {
-        br_dispatch::execute_impl(&*repo, &*runtime, &*task_runtime, command).await
-    })
+    let artifacts = state.inner().artifacts.clone();
+    Ok(br_dispatch::execute_impl_with_vision(
+        &*repo,
+        &*runtime,
+        &*vision_runtime,
+        &*task_runtime,
+        &*artifacts,
+        command,
+    )
+    .await)
 }
 
 pub fn run() {
@@ -96,6 +113,8 @@ pub fn run() {
                 eprintln!("WARNING: could not create data directory {:?}: {}", data_dir, e);
             }
             let db_path = data_dir.join("grok_acp_gui.db");
+            let artifacts: Arc<dyn ArtifactService> =
+                Arc::new(ManagedArtifactService::new(data_dir.join("artifacts")));
             let mut db_init_error: Option<String> = None;
             let repo: Arc<dyn Repository> = match adapters::sqlite::SqliteRepository::open(&db_path) {
                 Ok(r) => {
@@ -141,6 +160,11 @@ pub fn run() {
             let config = RuntimeConfig::default();
             let adapter = GrokAcpAdapter::new(config);
             let runtime_impl = AgentRuntimeImpl::new(adapter);
+            // Visual preprocessing has its own runtime so temporary Luna
+            // events never enter the task/session persistence stream.
+            let vision_runtime: Arc<dyn AgentRuntime> = AgentRuntimeImpl::new(
+                GrokAcpAdapter::new(RuntimeConfig::default()),
+            );
 
             // --- Task runtime (GAG-006): task/session isolation, ordering,
             // persistence, and task-scoped event publication. ---
@@ -160,7 +184,9 @@ pub fn run() {
             app.manage(AppState {
                 repo,
                 runtime,
+                vision_runtime,
                 task_runtime,
+                artifacts,
                 db_init_error,
             });
             Ok(())
@@ -172,9 +198,10 @@ pub fn run() {
         if matches!(event, tauri::RunEvent::Exit) {
             let runtime = app_handle
                 .try_state::<AppState>()
-                .map(|state| state.runtime.clone());
-            if let Some(runtime) = runtime {
+                .map(|state| (state.runtime.clone(), state.vision_runtime.clone()));
+            if let Some((runtime, vision_runtime)) = runtime {
                 tauri::async_runtime::block_on(runtime.shutdown_all("application exit"));
+                tauri::async_runtime::block_on(vision_runtime.shutdown_all("application exit"));
             }
         }
     });

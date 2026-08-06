@@ -132,6 +132,7 @@ pub trait Repository: Send + Sync {
 
     fn create_attachment(&self, att: &AttachmentRecord) -> RepoResult<()>;
     fn get_attachment(&self, id: &str) -> RepoResult<AttachmentRecord>;
+    fn find_attachment_by_sha256(&self, sha256: &str) -> RepoResult<Option<AttachmentRecord>>;
     fn list_attachments_by_task(&self, task_id: &str) -> RepoResult<Vec<AttachmentRecord>>;
 
     // ------------------------------------------------------------------

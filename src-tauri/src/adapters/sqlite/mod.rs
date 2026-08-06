@@ -976,6 +976,17 @@ impl Repository for SqliteRepository {
         .map_err(|e| db_error("get_attachment", &e))
     }
 
+    fn find_attachment_by_sha256(&self, sha256: &str) -> RepoResult<Option<AttachmentRecord>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, task_id, sha256, mime, bytes, cache_path, source_name, created_at FROM attachments WHERE sha256 = ?1",
+            params![sha256],
+            row_to_attachment,
+        )
+        .optional()
+        .map_err(|e| db_error("find_attachment_by_sha256", &e))
+    }
+
     fn list_attachments_by_task(&self, task_id: &str) -> RepoResult<Vec<AttachmentRecord>> {
         let conn = self.lock()?;
         let mut stmt = conn

@@ -161,6 +161,8 @@ GAG-009 将 `permission.resolve` 固定为 `{ taskId, sessionId, requestId, corr
 
 `permission.requested` 仅发送脱敏后的结构化操作视图：类别、可执行文件、脱敏参数、cwd、读写路径、风险、过期时间以及 ACP 原始 option ID/显式 kind。缺失或未知 kind 可以显示但不可授权，禁止从 label 猜测语义。`plan.updated` 的 proposed 载荷包含 request/correlation/version、摘要、步骤和原始选项；新版本把旧卡标记为 superseded。
 
+`artifact.import` 接收用户通过原生选择器明确选择的源路径，返回 `{ artifacts: ArtifactDescriptor[] }`；Descriptor 仅含 `artifactId`、展示名、MIME、字节数和状态，不含源路径、缓存路径或图片正文。`turn.send.attachments` 只接受这些受管 Artifact ID，Bridge 不接受 Renderer 传入 base64。
+
 GAG-008 的规范化会话载荷如下：用户与 Assistant 文本使用 `message.delta` 的 `{ role, text }`；工具生命周期同样使用 `message.delta`，载荷为 `{ toolCall }`，其中只允许显示 `toolCallId`、标题、种类、状态、位置、脱敏后的输入/结果摘要、起止时间和耗时，不得包含 ACP `rawInput`/`rawOutput`。Turn 正常完成发布 `task.state(status="idle", detail.completed=true)`；用户停止发布 `task.state(status="idle", detail.reason="cancelled")`；请求失败发布 `activity.updated({ kind: "error", code, detail, retryable })` 并把 Renderer 会话终止为可恢复的 `error`；进程异常退出发布并持久化 `task.state(status="interrupted")`，包括空闲但仍可复用的 ACP 子进程异常退出；只有运行时已进入受管 shutdown 的 clean exit 才保留 idle。`task.open` 返回持久化后的 `{ taskId, sessionId?, title, status, cursor, events, attempt }`，Renderer 必须先应用该快照再接收增量事件。为避免长回复的数千个流式 chunk 使快照失真或超限，后端读取完整 append-only 会话日志，把连续 Assistant delta 压缩成保留原始末尾序号的单个安全显示事件；因此快照内事件序号允许稀疏，`cursor` 才是快照与后续实时增量之间的权威连续性边界。
 
 ## 6. 信任边界与权限
@@ -195,6 +197,8 @@ flowchart LR
 9. 应用最终退出事件同步调用 `AgentRuntime.shutdown_all`；每个 session 先关闭 stdin 并等待宽限期，超时则中止 process monitor，由 `kill_on_drop` 终止 Child。Runtime 内部转发任务只持有 Weak 引用，不得形成阻止清理的 Arc 循环；Windows Job Object/等价的进程树约束仍是生产 Adapter 的安全要求。
 
 事件规范化：ACP option ID 原样保留；未知 update 存为 `activity.updated(kind="unknown")`；stderr 不进入协议解析器。
+
+Agent 发起的 ACP v1 `session/request_permission` 必须保留原始 JSON-RPC `id`。用户选择后，Runtime 对同一 `id` 返回 JSON-RPC response：`{ outcome: { outcome: "selected", optionId } }`；不得另发 `resolvePermission`/`resolvePlan` 方法。旧式 notification 可以安全展示，但因没有可响应的 JSON-RPC `id`，批准必须 fail-closed。
 
 ## 8. Plan 与权限状态机
 
@@ -276,6 +280,7 @@ Migration `0003_permissions_and_plans.sql` 只保存 hash、脱敏摘要和决�
 - WebView 通过受限自定义 asset protocol 读取已登记 Artifact ID，不能传任意路径。
 - 图片跨 IPC 传 metadata/ID，不反复传 Base64；发送 ACP 时由后端读取并编码。
 - 恢复会话时验证缓存存在和 hash；缺失以明确状态返回。
+- 用户显式添加图片时，后端先把受管缓存中的图片作为 ACP image content block 发送到独立 `gpt-5.6-luna` Runtime；Luna 只返回 OCR/视觉描述文本。随后主任务 Runtime（例如 `deepseek-v4-pro`）仅收到原始用户文本与标记为 untrusted 的视觉文本，不接收原图。视觉 Runtime 与主任务 Runtime 隔离，事件不写入主会话历史；Luna 失败或超时则整次发送 fail-closed，不静默绕过视觉预处理。
 
 ## 13. 错误模型与日志
 

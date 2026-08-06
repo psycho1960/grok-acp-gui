@@ -11,6 +11,8 @@
 
 use std::time::Duration;
 
+use base64::Engine as _;
+
 use grok_acp_gui_lib::adapters::grok_acp::GrokAcpAdapter;
 use grok_acp_gui_lib::adapters::sqlite::SqliteRepository;
 use grok_acp_gui_lib::bridge::dispatch::{execute_impl, DesktopResult};
@@ -51,6 +53,74 @@ fn should_run() -> bool {
     std::env::var("GROK_REAL_INTEGRATION")
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn real_luna_accepts_standard_image_content_and_returns_text() {
+    if !should_run() {
+        eprintln!("Skipping: GROK_REAL_INTEGRATION not set");
+        return;
+    }
+    let mut config = real_config();
+    config.model = Some("gpt-5.6-luna".into());
+    let runtime = AgentRuntimeImpl::new(GrokAcpAdapter::new(config.clone()));
+    assert!(runtime.probe(&config).await.available);
+    let session_id = SessionId::new("real-grok-luna-image");
+    runtime
+        .start(session_id.clone(), workspace(), &config)
+        .await
+        .expect("Luna session should start");
+    let mut events = runtime.subscribe();
+    let png = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        .unwrap();
+    runtime
+        .send(
+            session_id.clone(),
+            ClientRequest::Prompt(
+                grok_acp_gui_lib::modules::agent_runtime::requests::PromptRequest {
+                    message: "Describe this image briefly. Return text only and do not use tools."
+                        .into(),
+                    attachments: vec![
+                        grok_acp_gui_lib::modules::agent_runtime::requests::PromptImage {
+                            display_name: "one-pixel.png".into(),
+                            mime_type: "image/png".into(),
+                            base64_data: base64::engine::general_purpose::STANDARD.encode(png),
+                        },
+                    ],
+                    mode: None,
+                    model: None,
+                    reasoning: Some("medium".into()),
+                },
+            ),
+        )
+        .await
+        .expect("image prompt should be accepted");
+
+    let response = tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            if event.meta.session_id != session_id {
+                continue;
+            }
+            match event.event {
+                AgentEvent::AssistantCompleted(done) => {
+                    return Ok(done.full_text.unwrap_or_default())
+                }
+                AgentEvent::RequestFailed(failure) => {
+                    return Err(format!("{}: {}", failure.code, failure.message));
+                }
+                _ => {}
+            }
+        }
+        Err("event stream closed".to_string())
+    })
+    .await
+    .expect("Luna image turn timed out")
+    .expect("Luna image turn failed");
+    runtime
+        .shutdown(session_id, "image contract verified")
+        .await;
+    assert!(!response.trim().is_empty(), "Luna must return visual text");
 }
 
 // ---------------------------------------------------------------------------
