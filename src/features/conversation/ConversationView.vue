@@ -4,6 +4,8 @@ import EmptyState from "../../shared/ui/EmptyState.vue";
 import ErrorState from "../../shared/ui/ErrorState.vue";
 import Skeleton from "../../shared/ui/Skeleton.vue";
 import type { DesktopBridge, TaskId } from "../../bridge/types";
+import { pickImages } from "../../bridge/image-picker";
+import { subscribeImageDrops } from "../../bridge/image-drop";
 import { useConversationStore } from "./conversation-store";
 import Composer from "./Composer.vue";
 import ConversationHeader from "./ConversationHeader.vue";
@@ -18,6 +20,10 @@ const props = defineProps<{
   snapshot?: SessionTimelineSnapshot | null;
   focusSeq?: number | null;
 }>();
+
+const composerRegion = ref<HTMLElement | null>(null);
+const nativeDropActive = ref(false);
+let unsubscribeImageDrops: (() => void) | null = null;
 
 const store = useConversationStore();
 const listRef = ref<InstanceType<typeof TimelineVirtualList> | null>(null);
@@ -104,6 +110,52 @@ async function onCancel(): Promise<void> {
 async function onResume(): Promise<void> {
   await store.resumeSession();
 }
+
+async function onAddAttachments(): Promise<void> {
+  const selected = await pickImages();
+  if (selected.error) {
+    store.sendError = selected.error;
+    return;
+  }
+  await store.importAttachmentPaths(selected.paths);
+}
+
+function isInsideComposer(clientX: number, clientY: number): boolean {
+  const bounds = composerRegion.value?.getBoundingClientRect();
+  return Boolean(
+    bounds &&
+      clientX >= bounds.left &&
+      clientX <= bounds.right &&
+      clientY >= bounds.top &&
+      clientY <= bounds.bottom,
+  );
+}
+
+async function onDroppedAttachments(paths: string[]): Promise<void> {
+  nativeDropActive.value = false;
+  await store.importAttachmentPaths(paths);
+}
+
+onMounted(async () => {
+  try {
+    unsubscribeImageDrops = await subscribeImageDrops((event) => {
+      if (event.type === "leave") {
+        nativeDropActive.value = false;
+        return;
+      }
+      const inside = isInsideComposer(event.clientX, event.clientY);
+      nativeDropActive.value = inside && store.composerCapabilities.canSend;
+      if (event.type === "drop" && inside) void onDroppedAttachments(event.paths);
+    });
+  } catch {
+    // The native listener is optional in browser tests; the picker remains available.
+  }
+});
+
+onBeforeUnmount(() => {
+  unsubscribeImageDrops?.();
+  unsubscribeImageDrops = null;
+});
 </script>
 
 <template>
@@ -155,15 +207,23 @@ async function onResume(): Promise<void> {
       </TimelineVirtualList>
     </div>
 
-    <Composer
-      :model-value="store.draft"
-      :capabilities="store.composerCapabilities"
-      :send-error="store.sendError"
-      :send-pending="store.sendPending"
-      @update:model-value="store.setDraft"
-      @send="onSend"
-      @cancel="onCancel"
-    />
+    <div ref="composerRegion">
+      <Composer
+        :model-value="store.draft"
+        :capabilities="store.composerCapabilities"
+        :send-error="store.sendError"
+        :send-pending="store.sendPending"
+        :attachment-pending="store.attachmentPending"
+        :attachments="store.attachments"
+        :drop-active="nativeDropActive"
+        @update:model-value="store.setDraft"
+        @send="onSend"
+        @cancel="onCancel"
+        @add-attachments="onAddAttachments"
+        @drop-attachments="onDroppedAttachments"
+        @remove-attachment="store.removeAttachment"
+      />
+    </div>
   </section>
 </template>
 

@@ -8,6 +8,7 @@ import type {
   TurnSendResult,
   TypedDesktopEvent,
   Unsubscribe,
+  ArtifactImportResult,
 } from "../../bridge/types";
 
 export type ConversationFacadeEvent =
@@ -23,6 +24,7 @@ export interface ConversationFacade {
   cancelTurn(taskId: TaskId): Promise<DesktopResult>;
   resumeSession(taskId: TaskId): Promise<DesktopResult>;
   openTask(taskId: TaskId): Promise<DesktopResult>;
+  importArtifacts(taskId: TaskId, paths: string[]): Promise<DesktopResult<ArtifactImportResult>>;
   resolvePermission(payload: import("../../bridge/types").PermissionResolvePayload): Promise<DesktopResult>;
   resolvePlan(payload: import("../../bridge/types").PlanResolvePayload): Promise<DesktopResult>;
   subscribe(
@@ -60,6 +62,13 @@ export function createConversationFacade(
         type: "task.open",
         payload: { taskId },
       });
+    },
+
+    async importArtifacts(taskId, paths) {
+      return bridge.execute({
+        type: "artifact.import",
+        payload: { taskId, paths },
+      }) as Promise<DesktopResult<ArtifactImportResult>>;
     },
 
     async resolvePermission(payload) {

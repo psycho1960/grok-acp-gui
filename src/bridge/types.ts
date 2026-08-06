@@ -322,6 +322,14 @@ export interface ArtifactImportPayload {
   paths: string[];
 }
 
+export interface ArtifactDescriptor {
+  artifactId: string;
+  displayName: string;
+  mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" | string;
+  bytes: number;
+  state: "ready" | "rejected" | "failed" | string;
+}
+
 export interface ArtifactSavePayload {
   taskId: TaskId;
   artifactIds: string[];
@@ -555,6 +563,10 @@ export interface TurnSendResult {
   seq?: number;
 }
 
+export interface ArtifactImportResult {
+  artifacts: ArtifactDescriptor[];
+}
+
 export interface WorkspaceInspectResult {
   repoRoot: string;
   branch: string;
@@ -639,6 +651,9 @@ export const ErrorCodes = {
   INTEGRATION_DIRTY: "INTEGRATION_DIRTY",
   ARTIFACT_TOO_LARGE: "ARTIFACT_TOO_LARGE",
   ARTIFACT_INVALID_FORMAT: "ARTIFACT_INVALID_FORMAT",
+  ARTIFACT_NOT_FOUND: "ARTIFACT_NOT_FOUND",
+  ARTIFACT_CACHE_MISSING: "ARTIFACT_CACHE_MISSING",
+  ARTIFACT_VISION_FAILED: "ARTIFACT_VISION_FAILED",
   DB_MIGRATION_FAILED: "DB_MIGRATION_FAILED",
   DB_QUERY_FAILED: "DB_QUERY_FAILED",
   BRIDGE_UNSUPPORTED_COMMAND: "BRIDGE_UNSUPPORTED_COMMAND",

@@ -2,6 +2,9 @@ export { createDesktopBridge } from "./client";
 export { createFakeDesktopBridge, fakeError } from "./fake-bridge";
 export type { FakeBridgeOptions } from "./fake-bridge";
 export { pickDirectory } from "./folder-picker";
+export { pickImages } from "./image-picker";
+export { subscribeImageDrops } from "./image-drop";
+export type { ImageDropEvent } from "./image-drop";
 export type {
   DesktopBridge,
   DesktopCommand,
@@ -29,6 +32,8 @@ export type {
   PermissionResolvePayload,
   PlanResolvePayload,
   ArtifactImportPayload,
+  ArtifactDescriptor,
+  ArtifactImportResult,
   ArtifactSavePayload,
   WorkspaceInspectPayload,
   WorktreeAdoptPayload,

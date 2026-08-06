@@ -121,6 +121,8 @@ export interface TimelineItemBase {
 export interface UserMessageItem extends TimelineItemBase {
   kind: "user";
   text: string;
+  /** Immutable snapshot moved out of the Composer when this turn is sent. */
+  attachments?: ComposerAttachment[];
   pending?: boolean;
   failed?: boolean;
   errorMessage?: string;
@@ -216,6 +218,14 @@ export interface ComposerCapabilities {
   canCancel: boolean;
   disabledReason?: string;
   bridgeOnline: boolean;
+}
+
+export interface ComposerAttachment {
+  artifactId: string;
+  displayName: string;
+  mimeType: string;
+  bytes: number;
+  state: "ready" | "rejected" | "failed" | string;
 }
 
 export interface ComposerView {
