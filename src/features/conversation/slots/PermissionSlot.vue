@@ -26,8 +26,15 @@ const orderedOptions = computed(() =>
 function isReject(kind?: string): boolean {
   return kind === "reject" || kind === "deny" || kind === "reject_once" || kind === "reject_always" || kind === "cancel";
 }
+function isAllow(kind?: string): boolean {
+  return kind === "allow_once" || kind === "approve_once" || kind === "allow_always" || kind === "allow_scope" || kind === "approve_scope";
+}
 function isKnown(kind?: string): boolean {
-  return isReject(kind) || kind === "allow_once" || kind === "approve_once" || kind === "allow_always" || kind === "allow_scope" || kind === "approve_scope";
+  return isReject(kind) || isAllow(kind);
+}
+/** Operations the backend cannot classify are never authorizable. */
+function optionBlocked(opt: { kind?: string }): boolean {
+  return props.slotData.operation.category === "unknown" && isAllow(opt.kind);
 }
 function choose(optionId: string): void {
   if (!inactive.value) emit("resolve", optionId);
@@ -87,13 +94,14 @@ onBeforeUnmount(() => {
         <Button
           :variant="isReject(opt.kind) ? 'secondary' : 'primary'"
           :state="slotData.decisionState === 'submitting' && slotData.selectedOptionId === opt.optionId ? 'loading' : 'default'"
-          :disabled="inactive || !isKnown(opt.kind)"
+          :disabled="inactive || !isKnown(opt.kind) || optionBlocked(opt)"
           :data-safe-default="isReject(opt.kind) || undefined"
           @click="choose(opt.optionId)"
         >
           {{ opt.name }}
         </Button>
         <span v-if="!isKnown(opt.kind)" class="unknown">语义未知，已阻止</span>
+        <span v-else-if="optionBlocked(opt)" class="unknown">无法安全分类，已阻止</span>
       </li>
     </ul>
   </section>

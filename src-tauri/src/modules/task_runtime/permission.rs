@@ -151,6 +151,20 @@ impl OperationDescriptor {
         if !path_is_within(&cwd, &root) {
             return Err(unknown("operation cwd escapes its workspace"));
         }
+        // Git path-type global options (-C, --git-dir, --work-tree) may point
+        // outside the workspace; they must satisfy the same containment rule.
+        if self.kind == OperationKind::Git {
+            for value in git_path_option_values(&self.args) {
+                let normalized = if Path::new(&value).is_absolute() {
+                    normalize_path(&value)?
+                } else {
+                    normalize_path(&format!("{}/{}", cwd, value))?
+                };
+                if !path_is_within(&normalized, &root) {
+                    return Err(unknown("git option path escapes its workspace"));
+                }
+            }
+        }
         for path in self.read_paths.iter().chain(self.write_paths.iter()) {
             let normalized = if Path::new(path).is_absolute() {
                 normalize_path(path)?
@@ -204,14 +218,67 @@ fn classify_process(executable: Option<&str>, args: &[String]) -> OperationCateg
         return OperationCategory::Unknown;
     }
     match name.as_str() {
-        "rg" | "fd" | "where" => OperationCategory::ReadOnly,
+        // `rg --pre <command>` spawns a subprocess; treat it as unknown.
+        "rg" => {
+            if args.iter().any(|arg| {
+                let value = arg.to_ascii_lowercase();
+                value == "--pre" || value.starts_with("--pre=")
+            }) {
+                return OperationCategory::Unknown;
+            }
+            OperationCategory::ReadOnly
+        }
+        // `fd --exec/-x/--exec-batch/-X <command>` spawns subprocesses.
+        "fd" => {
+            if args.iter().any(|arg| {
+                let value = arg.to_ascii_lowercase();
+                matches!(value.as_str(), "-x" | "--exec" | "-X" | "--exec-batch")
+                    || value.starts_with("--exec=")
+                    || value.starts_with("--exec-batch=")
+            }) {
+                return OperationCategory::Unknown;
+            }
+            OperationCategory::ReadOnly
+        }
+        "where" => OperationCategory::ReadOnly,
         "rm" | "rmdir" | "del" | "erase" | "remove-item" => OperationCategory::Destructive,
         _ => OperationCategory::Unknown,
     }
 }
 
+/// Collects values of Git path-type global options for containment checks.
+fn git_path_option_values(args: &[String]) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let lower = arg.to_ascii_lowercase();
+        if matches!(lower.as_str(), "-c" | "--git-dir" | "--work-tree") {
+            if let Some(value) = iter.next() {
+                values.push(value.clone());
+            }
+        } else if let Some(value) = lower.strip_prefix("--git-dir=") {
+            values.push(value.to_string());
+        } else if let Some(value) = lower.strip_prefix("--work-tree=") {
+            values.push(value.to_string());
+        }
+    }
+    values
+}
+
 fn classify_git(executable: Option<&str>, args: &[String]) -> OperationCategory {
     if executable_name(executable).as_deref() != Some("git") || args.is_empty() {
+        return OperationCategory::Unknown;
+    }
+    // Any git invocation that writes a file or spawns an external program is
+    // never read-only, regardless of the subcommand.
+    if args.iter().any(|arg| {
+        let value = arg.to_ascii_lowercase();
+        value == "--ext-diff"
+            || value == "--textconv"
+            || value == "--output"
+            || value == "-o"
+            || value.starts_with("--output=")
+    }) {
         return OperationCategory::Unknown;
     }
     let mut command = None;
@@ -508,5 +575,92 @@ mod tests {
         let mut op = git(&["status"]);
         op.read_paths.push("../secret".into());
         assert!(op.validate_within("C:/repo").is_err());
+    }
+
+    fn process(name: &str, args: &[&str]) -> OperationDescriptor {
+        OperationDescriptor {
+            kind: OperationKind::Process,
+            executable: Some(name.into()),
+            args: args.iter().map(|v| (*v).into()).collect(),
+            cwd: "C:/repo".into(),
+            read_paths: vec![],
+            write_paths: vec![],
+        }
+    }
+
+    #[test]
+    fn read_only_tools_cannot_spawn_subprocesses() {
+        // `rg --pre <command>` and `fd --exec/-x <command>` execute programs.
+        assert_eq!(
+            process("rg.exe", &["--pre", "sh -c evil"]).category(),
+            OperationCategory::Unknown
+        );
+        assert_eq!(
+            process("rg.exe", &["--pre=python evil.py", "pattern"]).category(),
+            OperationCategory::Unknown
+        );
+        assert_eq!(
+            process("fd.exe", &["--exec", "rm"]).category(),
+            OperationCategory::Unknown
+        );
+        assert_eq!(
+            process("fd.exe", &["-x", "git", "checkout"]).category(),
+            OperationCategory::Unknown
+        );
+        // Plain read-only invocations stay allowed.
+        assert_eq!(
+            process("rg.exe", &["--files", "src"]).category(),
+            OperationCategory::ReadOnly
+        );
+        assert_eq!(
+            process("fd.exe", &["-e", "rs", "src"]).category(),
+            OperationCategory::ReadOnly
+        );
+    }
+
+    #[test]
+    fn git_read_only_commands_cannot_write_or_spawn() {
+        assert_eq!(
+            git(&["diff", "--output=evil.txt"]).category(),
+            OperationCategory::Unknown
+        );
+        assert_eq!(
+            git(&["diff", "--output", "evil.txt"]).category(),
+            OperationCategory::Unknown
+        );
+        assert_eq!(
+            git(&["diff", "--ext-diff", "HEAD"]).category(),
+            OperationCategory::Unknown
+        );
+        assert_eq!(
+            git(&["log", "--textconv"]).category(),
+            OperationCategory::Unknown
+        );
+        assert_eq!(
+            git(&["diff", "HEAD"]).category(),
+            OperationCategory::ReadOnly
+        );
+    }
+
+    #[test]
+    fn git_path_options_must_stay_inside_the_workspace() {
+        // -C outside the workspace fails containment.
+        assert!(git(&["-C", "D:/elsewhere", "status"])
+            .validate_within("C:/repo")
+            .is_err());
+        // --git-dir=value and --work-tree=value forms are covered too.
+        assert!(git(&["--git-dir=C:/elsewhere/.git", "status"])
+            .validate_within("C:/repo")
+            .is_err());
+        assert!(git(&["--work-tree", "D:/elsewhere", "status"])
+            .validate_within("C:/repo")
+            .is_err());
+        // In-workspace values are fine.
+        assert!(git(&["-C", "C:/repo/sub", "status"])
+            .validate_within("C:/repo")
+            .is_ok());
+        assert!(git(&["--git-dir=C:/repo/.git", "status"])
+            .validate_within("C:/repo")
+            .is_ok());
     }
 }

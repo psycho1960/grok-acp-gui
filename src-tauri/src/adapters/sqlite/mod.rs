@@ -175,15 +175,20 @@ fn row_to_setting(row: &rusqlite::Row) -> rusqlite::Result<Settings> {
     })
 }
 
-fn permission_state(value: &str) -> PermissionState {
+fn permission_state(value: &str) -> rusqlite::Result<PermissionState> {
     match value {
-        "approved_once" => PermissionState::ApprovedOnce,
-        "approved_scope" => PermissionState::ApprovedScope,
-        "denied" => PermissionState::Denied,
-        "expired" => PermissionState::Expired,
-        "cancelled" => PermissionState::Cancelled,
-        "consumed" => PermissionState::Consumed,
-        _ => PermissionState::Requested,
+        "requested" => Ok(PermissionState::Requested),
+        "approved_once" => Ok(PermissionState::ApprovedOnce),
+        "approved_scope" => Ok(PermissionState::ApprovedScope),
+        "denied" => Ok(PermissionState::Denied),
+        "expired" => Ok(PermissionState::Expired),
+        "cancelled" => Ok(PermissionState::Cancelled),
+        "consumed" => Ok(PermissionState::Consumed),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("unknown permission state '{other}'").into(),
+        )),
     }
 }
 
@@ -199,12 +204,17 @@ fn permission_state_str(value: PermissionState) -> &'static str {
     }
 }
 
-fn operation_category(value: &str) -> OperationCategory {
+fn operation_category(value: &str) -> rusqlite::Result<OperationCategory> {
     match value {
-        "read_only" => OperationCategory::ReadOnly,
-        "write" => OperationCategory::Write,
-        "destructive" => OperationCategory::Destructive,
-        _ => OperationCategory::Unknown,
+        "read_only" => Ok(OperationCategory::ReadOnly),
+        "write" => Ok(OperationCategory::Write),
+        "destructive" => Ok(OperationCategory::Destructive),
+        "unknown" => Ok(OperationCategory::Unknown),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("unknown operation category '{other}'").into(),
+        )),
     }
 }
 
@@ -217,17 +227,22 @@ fn operation_category_str(value: OperationCategory) -> &'static str {
     }
 }
 
-fn plan_state(value: &str) -> PlanState {
+fn plan_state(value: &str) -> rusqlite::Result<PlanState> {
     match value {
-        "draft" => PlanState::Draft,
-        "approved" => PlanState::Approved,
-        "rejected" => PlanState::Rejected,
-        "revision_requested" => PlanState::RevisionRequested,
-        "superseded" => PlanState::Superseded,
-        "executing" => PlanState::Executing,
-        "completed" => PlanState::Completed,
-        "failed" => PlanState::Failed,
-        _ => PlanState::Proposed,
+        "draft" => Ok(PlanState::Draft),
+        "proposed" => Ok(PlanState::Proposed),
+        "approved" => Ok(PlanState::Approved),
+        "rejected" => Ok(PlanState::Rejected),
+        "revision_requested" => Ok(PlanState::RevisionRequested),
+        "superseded" => Ok(PlanState::Superseded),
+        "executing" => Ok(PlanState::Executing),
+        "completed" => Ok(PlanState::Completed),
+        "failed" => Ok(PlanState::Failed),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("unknown plan state '{other}'").into(),
+        )),
     }
 }
 
@@ -255,10 +270,10 @@ fn row_to_permission(row: &rusqlite::Row) -> rusqlite::Result<PermissionRecord> 
         workspace: row.get(4)?,
         plan_version: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
         operation_digest: row.get(6)?,
-        category: operation_category(&row.get::<_, String>(7)?),
+        category: operation_category(&row.get::<_, String>(7)?)?,
         summary_redacted: row.get(8)?,
         options: serde_json::from_str(&options_json).unwrap_or_default(),
-        state: permission_state(&row.get::<_, String>(10)?),
+        state: permission_state(&row.get::<_, String>(10)?)?,
         expires_at_epoch_seconds: row.get::<_, i64>(11)? as u64,
         decided_option_id: row.get(12)?,
         consumed_at: row.get(13)?,
@@ -277,7 +292,7 @@ fn row_to_plan(row: &rusqlite::Row) -> rusqlite::Result<PlanRecord> {
         workspace: row.get(4)?,
         version: row.get::<_, i64>(5)? as u64,
         plan_hash: row.get(6)?,
-        state: plan_state(&row.get::<_, String>(7)?),
+        state: plan_state(&row.get::<_, String>(7)?)?,
         summary_redacted: row.get(8)?,
         options: serde_json::from_str(&options_json).unwrap_or_default(),
         decided_option_id: row.get(10)?,

@@ -256,9 +256,7 @@ impl MailboxWorker {
         stored_payload: &mut serde_json::Value,
     ) -> Result<(), DomainError> {
         use crate::modules::agent_runtime::AgentEvent;
-        use crate::modules::task_runtime::permission::{
-            OperationCategory, PermissionOption, PermissionRecord, PermissionState,
-        };
+        use crate::modules::task_runtime::permission::{PermissionRecord, PermissionState};
         use crate::modules::task_runtime::plan::{PlanOption, PlanRecord, PlanState};
         use sha2::{Digest, Sha256};
 
@@ -303,10 +301,14 @@ impl MailboxWorker {
             AgentEvent::PermissionRequested(payload) => {
                 let plan_version = self.repo.latest_plan_version(&self.task_id.0)?;
                 let descriptor = payload.operation.as_ref().and_then(operation_from_agent);
-                let category = descriptor
-                    .as_ref()
-                    .map(|value| value.category())
-                    .unwrap_or(OperationCategory::Unknown);
+                // The full containment check is the same one ExecutionGuard
+                // applies at I/O time. An operation that fails it (unknown
+                // category, missing cwd, escaped paths, git -C outside the
+                // workspace) is recorded as Unknown and cannot be approved.
+                let category = match descriptor.as_ref() {
+                    Some(value) if value.validate_within(&workspace).is_ok() => value.category(),
+                    _ => crate::modules::task_runtime::permission::OperationCategory::Unknown,
+                };
                 let digest = descriptor
                     .as_ref()
                     .and_then(|value| value.digest().ok())
@@ -316,15 +318,10 @@ impl MailboxWorker {
                         hash.update(payload.request_id.as_bytes());
                         format!("{:x}", hash.finalize())
                     });
-                let options: Vec<PermissionOption> = payload
-                    .options
-                    .iter()
-                    .map(|option| PermissionOption {
-                        option_id: option.option_id.clone(),
-                        label: option.name.clone(),
-                        action: permission_action(option.kind.as_deref()),
-                    })
-                    .collect();
+                // Unknown operations must fail closed: allow actions are
+                // stripped so no option can authorize them. Rejecting remains
+                // available because denial is always safe.
+                let options = restrict_options_for_category(&payload.options, category);
                 let expires_at_epoch_seconds = epoch_seconds().saturating_add(300);
                 self.repo.create_permission(&PermissionRecord {
                     request_id: payload.request_id.clone(),
@@ -441,6 +438,33 @@ fn permission_action(
     }
 }
 
+/// Fail-closed projection for unclassifiable operations: allow actions are
+/// stripped (Unknown), denial stays available because it is always safe.
+fn restrict_options_for_category(
+    options: &[crate::modules::agent_runtime::events::PermissionOptionDescriptor],
+    category: crate::modules::task_runtime::permission::OperationCategory,
+) -> Vec<crate::modules::task_runtime::permission::PermissionOption> {
+    use crate::modules::task_runtime::permission::PermissionOptionAction;
+    use crate::modules::task_runtime::permission::{OperationCategory, PermissionOption};
+    options
+        .iter()
+        .map(|option| {
+            let action = permission_action(option.kind.as_deref());
+            PermissionOption {
+                option_id: option.option_id.clone(),
+                label: option.name.clone(),
+                action: if category == OperationCategory::Unknown
+                    && action != PermissionOptionAction::Deny
+                {
+                    PermissionOptionAction::Unknown
+                } else {
+                    action
+                },
+            }
+        })
+        .collect()
+}
+
 fn plan_action(kind: Option<&str>) -> crate::modules::task_runtime::plan::PlanOptionAction {
     use crate::modules::task_runtime::plan::PlanOptionAction::*;
     match kind.map(|value| value.to_ascii_lowercase()).as_deref() {
@@ -496,19 +520,52 @@ fn permission_summary(
 
 fn safe_arg(arg: &str) -> String {
     let lower = arg.to_ascii_lowercase();
+    // Keyword scan catches both `--flag=value` forms and bare values. The
+    // list covers credentials commonly embedded in command lines; anything
+    // that cannot be proven safe is redacted.
     if [
         "token",
         "secret",
         "password",
+        "passwd",
         "authorization",
+        "auth",
         "api_key",
         "apikey",
+        "api-key",
+        "x-api-key",
+        "bearer",
+        "jwt",
+        "cookie",
+        "client_secret",
+        "client-secret",
+        "access_key",
+        "access-key",
+        "private_key",
+        "private-key",
+        "credential",
+        "session_key",
+        "session-key",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
     {
-        "[redacted]".into()
-    } else if arg.chars().count() > 160 {
+        return "[redacted]".into();
+    }
+    // JWT-style payloads start with a recognizable header.
+    if lower.starts_with("eyj") || lower.starts_with("ey0") {
+        return "[redacted]".into();
+    }
+    // High-entropy value without path separators is treated as a credential.
+    if arg.chars().count() >= 32
+        && !arg.contains('/')
+        && !arg.contains('\\')
+        && arg.chars().any(|ch| ch.is_ascii_digit())
+        && arg.chars().any(|ch| ch.is_ascii_alphabetic())
+    {
+        return "[redacted]".into();
+    }
+    if arg.chars().count() > 160 {
         format!("{}…", arg.chars().take(157).collect::<String>())
     } else {
         arg.to_string()
@@ -531,6 +588,13 @@ fn safe_args(args: &[String]) -> Vec<String> {
                 "--authorization",
                 "--api-key",
                 "--apikey",
+                "--header",
+                "-H",
+                "--cookie",
+                "--cookie-jar",
+                "--access-token",
+                "--bearer",
+                "--jwt",
             ]
             .iter()
             .any(|flag| lower == *flag)
@@ -763,6 +827,7 @@ pub fn map_stored_events_to_bridge_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modules::task_runtime::permission::OperationCategory;
 
     #[test]
     fn has_side_effects_classification() {
@@ -773,6 +838,39 @@ mod tests {
         assert!(!has_side_effects_kind("assistant_delta"));
         assert!(!has_side_effects_kind("session_ready"));
         assert!(!has_side_effects_kind("process_exited"));
+    }
+
+    #[test]
+    fn unknown_operations_strip_allow_actions_but_keep_denial() {
+        use crate::modules::agent_runtime::events::PermissionOptionDescriptor;
+        use crate::modules::task_runtime::permission::PermissionOptionAction;
+        let options = vec![
+            PermissionOptionDescriptor {
+                option_id: "allow-1".into(),
+                name: "Allow once".into(),
+                kind: Some("allow_once".into()),
+            },
+            PermissionOptionDescriptor {
+                option_id: "allow-scope-1".into(),
+                name: "Allow always".into(),
+                kind: Some("allow_always".into()),
+            },
+            PermissionOptionDescriptor {
+                option_id: "reject-1".into(),
+                name: "Reject".into(),
+                kind: Some("reject_once".into()),
+            },
+        ];
+        let restricted = restrict_options_for_category(&options, OperationCategory::Unknown);
+        assert_eq!(restricted[0].action, PermissionOptionAction::Unknown);
+        assert_eq!(restricted[1].action, PermissionOptionAction::Unknown);
+        assert_eq!(restricted[2].action, PermissionOptionAction::Deny);
+        // A classifiable write keeps its allow-once action.
+        let write_restricted = restrict_options_for_category(&options, OperationCategory::Write);
+        assert_eq!(
+            write_restricted[0].action,
+            PermissionOptionAction::AllowOnce
+        );
     }
 
     #[test]
@@ -826,6 +924,35 @@ mod tests {
         assert!(!serialized.contains("super-secret-value"));
         assert!(!serialized.contains("also-secret"));
         assert!(serialized.contains("[redacted]"));
+    }
+
+    #[test]
+    fn redaction_covers_headers_bearer_jwt_and_high_entropy_values() {
+        let operation = crate::modules::agent_runtime::events::PermissionOperationDescriptor {
+            operation_kind: "process".into(),
+            executable: Some("curl.exe".into()),
+            args: vec![
+                "-H".into(),
+                "X-API-Key: sk-live-secret-key-123456".into(),
+                "--header".into(),
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature".into(),
+                "https://example.com".into(),
+            ],
+            cwd: Some("C:/repo".into()),
+            read_paths: vec![],
+            write_paths: vec![],
+        };
+        let view = safe_operation_view(
+            Some(&operation),
+            crate::modules::task_runtime::permission::OperationCategory::Unknown,
+        );
+        let serialized = view.to_string();
+        assert!(!serialized.contains("sk-live-secret-key-123456"));
+        assert!(!serialized.contains("eyJhbGciOiJIUzI1NiJ9"));
+        assert!(!serialized.contains("payload.signature"));
+        assert!(serialized.contains("[redacted]"));
+        // The URL survives redaction because it is not a credential.
+        assert!(serialized.contains("https://example.com"));
     }
 
     #[test]

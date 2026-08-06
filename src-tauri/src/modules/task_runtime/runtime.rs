@@ -548,6 +548,17 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
                 "Permission option has no explicit ACP action",
             ));
         }
+        // Fail closed: operations that cannot be safely classified (missing
+        // cwd, escaped paths, unknown category) are never authorizable. Only
+        // denial remains available because rejection is always safe.
+        if pending.category == crate::modules::task_runtime::permission::OperationCategory::Unknown
+            && action != PermissionOptionAction::Deny
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_DENIED,
+                "Operation cannot be classified safely; approval is blocked",
+            ));
+        }
         if action == PermissionOptionAction::AllowScope
             && pending.category
                 != crate::modules::task_runtime::permission::OperationCategory::ReadOnly
@@ -555,6 +566,20 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             return Err(DomainError::new(
                 crate::domain::error::codes::PERMISSION_DENIED,
                 "Persistent approval is restricted to exact read-only operations",
+            ));
+        }
+        // Expiry must be checked before the ACP option is sent: an expired
+        // request must never reach the agent as an approval. The resolution
+        // mutex serializes this check with the send, leaving no window for a
+        // concurrent decision to slip in.
+        let now_epoch_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if pending.expires_at_epoch_seconds < now_epoch_seconds {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_EXPIRED,
+                "Permission request expired before it could be resolved",
             ));
         }
         let binding = self
@@ -597,10 +622,7 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             expected_plan_version,
             option_id: request.option_id,
             decided_at,
-            decided_at_epoch_seconds: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            decided_at_epoch_seconds: now_epoch_seconds,
         })?;
         self.repo
             .update_task_status(&request.task_id.0, "running", None)?;

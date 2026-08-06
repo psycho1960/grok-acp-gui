@@ -668,25 +668,22 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                 return Ok(SendAck { request_id });
             }
             ClientRequest::ResolvePermission(r) => {
-                let rpc_id = {
+                let (pending, rpc_id) = {
                     let sessions = self.sessions.lock().await;
-                    let pending = sessions
-                        .get(&session_id)
-                        .ok_or_else(|| {
-                            DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
-                        })?
-                        .pending_permission_requests
-                        .clone();
+                    let slot = sessions.get(&session_id).ok_or_else(|| {
+                        DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
+                    })?;
+                    let pending = slot.pending_permission_requests.clone();
                     let rpc_id = pending.lock().unwrap().remove(&r.request_id);
-                    rpc_id
-                }
-                .ok_or_else(|| {
+                    (pending, rpc_id)
+                };
+                let rpc_id = rpc_id.ok_or_else(|| {
                     DomainError::new(
                         codes::ACP_REQUEST_FAILED,
                         "permission request is no longer pending at the ACP transport",
                     )
                 })?;
-                encode_response_result(
+                let encoded = encode_response_result(
                     &rpc_id,
                     &serde_json::json!({
                         "outcome": {
@@ -694,28 +691,35 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                             "optionId": r.option_id,
                         }
                     }),
-                )
+                );
+                // Only a successful write may keep the pending entry removed;
+                // on failure restore it so the resolution can be retried.
+                if outbound.send(encoded).await.is_err() {
+                    pending.lock().unwrap().insert(r.request_id.clone(), rpc_id);
+                    return Err(DomainError::new(
+                        codes::RUNTIME_PROCESS_DIED,
+                        "failed to send to process",
+                    ));
+                }
+                return Ok(SendAck { request_id });
             }
             ClientRequest::ResolvePlan(r) => {
-                let rpc_id = {
+                let (pending, rpc_id) = {
                     let sessions = self.sessions.lock().await;
-                    let pending = sessions
-                        .get(&session_id)
-                        .ok_or_else(|| {
-                            DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
-                        })?
-                        .pending_plan_requests
-                        .clone();
+                    let slot = sessions.get(&session_id).ok_or_else(|| {
+                        DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
+                    })?;
+                    let pending = slot.pending_plan_requests.clone();
                     let rpc_id = pending.lock().unwrap().remove(&r.request_id);
-                    rpc_id
-                }
-                .ok_or_else(|| {
+                    (pending, rpc_id)
+                };
+                let rpc_id = rpc_id.ok_or_else(|| {
                     DomainError::new(
                         codes::ACP_REQUEST_FAILED,
                         "Plan request is no longer pending at the ACP transport",
                     )
                 })?;
-                encode_response_result(
+                let encoded = encode_response_result(
                     &rpc_id,
                     &serde_json::json!({
                         "outcome": {
@@ -723,7 +727,15 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                             "optionId": r.option_id,
                         }
                     }),
-                )
+                );
+                if outbound.send(encoded).await.is_err() {
+                    pending.lock().unwrap().insert(r.request_id.clone(), rpc_id);
+                    return Err(DomainError::new(
+                        codes::RUNTIME_PROCESS_DIED,
+                        "failed to send to process",
+                    ));
+                }
+                return Ok(SendAck { request_id });
             }
         };
         outbound.send(encoded).await.map_err(|_| {
