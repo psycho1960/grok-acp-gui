@@ -29,9 +29,10 @@ pub enum ClientRequest {
 pub struct PromptRequest {
     /// The user's message text.
     pub message: String,
-    /// Attachment IDs managed by the artifacts module (optional).
+    /// Image content resolved by MOD-ARTIFACTS. This type never crosses the
+    /// DesktopBridge; base64 is created only inside the Rust trust boundary.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub attachments: Vec<String>,
+    pub attachments: Vec<PromptImage>,
     /// Mode override (e.g. "code", "ask"). When `None`, uses session default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
@@ -76,7 +77,11 @@ mod tests {
     fn prompt_request_round_trip() {
         let req = ClientRequest::Prompt(PromptRequest {
             message: "fix the bug".into(),
-            attachments: vec!["att-1".into()],
+            attachments: vec![PromptImage {
+                display_name: "screen.png".into(),
+                mime_type: "image/png".into(),
+                base64_data: "cG5n".into(),
+            }],
             mode: Some("code".into()),
             model: None,
             reasoning: Some("high".into()),
@@ -100,4 +105,11 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"kind\":\"cancel\""));
     }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptImage {
+    pub display_name: String,
+    pub mime_type: String,
+    pub base64_data: String,
 }
