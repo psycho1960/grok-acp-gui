@@ -16,7 +16,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
 
 use crate::adapters::filesystem::WorkspaceFilesystem;
@@ -62,12 +62,23 @@ struct SessionSlot {
     outbound: Option<mpsc::Sender<String>>,
     /// The process join handle (for shutdown).
     process: Option<tokio::task::JoinHandle<ProcessExit>>,
+    /// Stops the inbound reader so it releases its outbound sender clone;
+    /// only then can dropping SessionSlot::outbound close child stdin.
+    reader_shutdown: Option<oneshot::Sender<()>>,
+    reader_task: Option<tokio::task::JoinHandle<()>>,
     /// Per-session interpretation context (kept for diagnostics / seq tracking).
     interp_ctx: Arc<StdMutex<AcpSessionContext>>,
     /// JSON-RPC request ids are independent from event sequence numbers.
     next_request_id: u64,
     /// Session id allocated by the ACP agent via `session/new`.
     acp_session_id: Option<String>,
+    /// Agent-to-client JSON-RPC request ids awaiting a permission response.
+    /// Keys are the stable request ids exposed to the task runtime; values are
+    /// the raw JSON-RPC ids that must be echoed in the response envelope.
+    pending_permission_requests: Arc<StdMutex<HashMap<String, serde_json::Value>>>,
+    /// Legacy Plan proposals may also arrive as JSON-RPC requests. They use
+    /// the same response shape and correlation rule as permission requests.
+    pending_plan_requests: Arc<StdMutex<HashMap<String, serde_json::Value>>>,
     /// Resolved executable path (for the handle).
     executable_path: String,
     /// Whether shutdown began while a turn was still in progress. Late
@@ -81,10 +92,14 @@ impl SessionSlot {
             state: RuntimeState::Unavailable,
             outbound: None,
             process: None,
+            reader_shutdown: None,
+            reader_task: None,
             interp_ctx: Arc::new(StdMutex::new(AcpSessionContext::from_sequence(2))),
             // 1..=3 are reserved for initialize/authenticate/session-new.
             next_request_id: 3,
             acp_session_id: None,
+            pending_permission_requests: Arc::new(StdMutex::new(HashMap::new())),
+            pending_plan_requests: Arc::new(StdMutex::new(HashMap::new())),
             executable_path,
             shutdown_interrupted_turn: false,
         }
@@ -401,17 +416,32 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                 self.emit_runtime_event(event).await;
 
                 // NOW spawn the inbound reader task for subsequent messages.
-                let interp_ctx = {
+                let (interp_ctx, pending_permission_requests, pending_plan_requests) = {
                     let mut sessions = self.sessions.lock().await;
                     let slot = sessions.get_mut(&session_id).unwrap();
                     slot.acp_session_id = Some(handshake_info.acp_session_id);
-                    slot.interp_ctx.clone()
+                    (
+                        slot.interp_ctx.clone(),
+                        slot.pending_permission_requests.clone(),
+                        slot.pending_plan_requests.clone(),
+                    )
                 };
                 let internal_tx = self.internal_event_tx.clone();
                 let sid_reader = session_id.clone();
                 let reader_outbound = outbound.clone();
-                tokio::spawn(async move {
-                    while let Some(msg) = inbound.recv().await {
+                let (reader_shutdown_tx, mut reader_shutdown_rx) = oneshot::channel();
+                if let Some(slot) = self.sessions.lock().await.get_mut(&session_id) {
+                    slot.reader_shutdown = Some(reader_shutdown_tx);
+                }
+                let reader_task = tokio::spawn(async move {
+                    loop {
+                        let msg = tokio::select! {
+                            _ = &mut reader_shutdown_rx => break,
+                            message = inbound.recv() => match message {
+                                Some(message) => message,
+                                None => break,
+                            },
+                        };
                         if let AcpMessage::Request(request) = &msg {
                             if let Some(response) = handle_filesystem_request(
                                 request,
@@ -422,6 +452,17 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                                     break;
                                 }
                                 continue;
+                            }
+                            if let Some(request_id) = interpreter::permission_request_id(request) {
+                                pending_permission_requests
+                                    .lock()
+                                    .unwrap()
+                                    .insert(request_id, request.id.clone());
+                            } else if let Some(request_id) = interpreter::plan_request_id(request) {
+                                pending_plan_requests
+                                    .lock()
+                                    .unwrap()
+                                    .insert(request_id, request.id.clone());
                             }
                         }
                         let interpreted = {
@@ -474,6 +515,8 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                             InterpretationResult::Ack | InterpretationResult::NoEvent => {}
                         }
                     }
+                    pending_permission_requests.lock().unwrap().clear();
+                    pending_plan_requests.lock().unwrap().clear();
                     // Inbound channel closed — process exited.
                     let exit_sequence = {
                         let mut context = interp_ctx.lock().unwrap();
@@ -496,6 +539,9 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         })
                         .await;
                 });
+                if let Some(slot) = self.sessions.lock().await.get_mut(&session_id) {
+                    slot.reader_task = Some(reader_task);
+                }
 
                 let exec_path = {
                     let sessions = self.sessions.lock().await;
@@ -607,7 +653,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             (request_id, acp_session_id)
         };
 
-        let (method, params): (&str, serde_json::Value) = match &request {
+        let encoded = match &request {
             ClientRequest::Prompt(p) => {
                 let params = serde_json::json!({
                     "sessionId": acp_session_id,
@@ -616,28 +662,70 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         "text": p.message,
                     }],
                 });
-                ("session/prompt", params)
+                encode_request(request_id, "session/prompt", &params)
             }
             ClientRequest::Cancel => {
                 return Ok(SendAck { request_id });
             }
             ClientRequest::ResolvePermission(r) => {
-                let params = serde_json::json!({
-                    "requestId": r.request_id,
-                    "optionId": r.option_id,
-                });
-                ("resolvePermission", params)
+                let rpc_id = {
+                    let sessions = self.sessions.lock().await;
+                    let pending = sessions
+                        .get(&session_id)
+                        .ok_or_else(|| {
+                            DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
+                        })?
+                        .pending_permission_requests
+                        .clone();
+                    let rpc_id = pending.lock().unwrap().remove(&r.request_id);
+                    rpc_id
+                }
+                .ok_or_else(|| {
+                    DomainError::new(
+                        codes::ACP_REQUEST_FAILED,
+                        "permission request is no longer pending at the ACP transport",
+                    )
+                })?;
+                encode_response_result(
+                    &rpc_id,
+                    &serde_json::json!({
+                        "outcome": {
+                            "outcome": "selected",
+                            "optionId": r.option_id,
+                        }
+                    }),
+                )
             }
             ClientRequest::ResolvePlan(r) => {
-                let params = serde_json::json!({
-                    "requestId": r.request_id,
-                    "optionId": r.option_id,
-                });
-                ("resolvePlan", params)
+                let rpc_id = {
+                    let sessions = self.sessions.lock().await;
+                    let pending = sessions
+                        .get(&session_id)
+                        .ok_or_else(|| {
+                            DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
+                        })?
+                        .pending_plan_requests
+                        .clone();
+                    let rpc_id = pending.lock().unwrap().remove(&r.request_id);
+                    rpc_id
+                }
+                .ok_or_else(|| {
+                    DomainError::new(
+                        codes::ACP_REQUEST_FAILED,
+                        "Plan request is no longer pending at the ACP transport",
+                    )
+                })?;
+                encode_response_result(
+                    &rpc_id,
+                    &serde_json::json!({
+                        "outcome": {
+                            "outcome": "selected",
+                            "optionId": r.option_id,
+                        }
+                    }),
+                )
             }
         };
-
-        let encoded = encode_request(request_id, method, &params);
         outbound.send(encoded).await.map_err(|_| {
             DomainError::new(codes::RUNTIME_PROCESS_DIED, "failed to send to process")
         })?;
@@ -735,6 +823,33 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         )
         .emit();
 
+        // Stop the reader first. It owns an outbound sender clone; without
+        // this signal, taking SessionSlot::outbound below cannot close stdin
+        // and every graceful shutdown waits for the kill timeout.
+        let reader_shutdown = {
+            let mut sessions = self.sessions.lock().await;
+            sessions
+                .get_mut(&session_id)
+                .and_then(|slot| slot.reader_shutdown.take())
+        };
+        if let Some(stop_reader) = reader_shutdown {
+            let _ = stop_reader.send(());
+        }
+        let reader_task = {
+            let mut sessions = self.sessions.lock().await;
+            sessions
+                .get_mut(&session_id)
+                .and_then(|slot| slot.reader_task.take())
+        };
+        if let Some(mut reader_task) = reader_task {
+            if timeout(Duration::from_secs(1), &mut reader_task)
+                .await
+                .is_err()
+            {
+                reader_task.abort();
+            }
+        }
+
         // Close the outbound channel (drops the sender → stdin EOF).
         let outbound = {
             let mut sessions = self.sessions.lock().await;
@@ -785,7 +900,16 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
     }
 
     async fn shutdown_all(&self, reason: &str) {
-        let session_ids: Vec<_> = self.sessions.lock().await.keys().cloned().collect();
+        let session_ids: Vec<_> = self
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, slot)| {
+                slot.outbound.is_some() || slot.process.is_some() || slot.reader_task.is_some()
+            })
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
         for session_id in session_ids {
             self.shutdown(session_id, reason).await;
         }

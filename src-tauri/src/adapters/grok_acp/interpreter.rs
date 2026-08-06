@@ -141,13 +141,11 @@ fn interpret_request(
     ctx: &mut AcpSessionContext,
 ) -> InterpretationResult {
     match req.method.as_str() {
-        "requestPermission" => {
+        "session/request_permission" | "requestPermission" => {
             let params = &req.params;
             let tool_call = extract_tool_call(params);
             let options = extract_permission_options(params);
-            let request_id = extract_string_field(params, "requestId")
-                .or_else(|| extract_string_field(params, "id"))
-                .unwrap_or_else(|| req.id.as_str().unwrap_or("").to_string());
+            let request_id = permission_request_id(req).unwrap_or_default();
 
             let event = AgentEvent::PermissionRequested(PermissionRequestedPayload {
                 request_id,
@@ -185,6 +183,40 @@ fn interpret_request(
             method: req.method.clone(),
         },
     }
+}
+
+/// Stable application-level key for an agent-to-client permission request.
+///
+/// ACP's authoritative correlation token is the JSON-RPC request `id`. Some
+/// older Grok fixtures also supplied a separate `requestId`; keep accepting it
+/// for display/persistence while the runtime retains the raw JSON-RPC `id` for
+/// the eventual response.
+pub(crate) fn permission_request_id(req: &AcpRequest) -> Option<String> {
+    if !matches!(
+        req.method.as_str(),
+        "session/request_permission" | "requestPermission"
+    ) {
+        return None;
+    }
+    extract_string_field(&req.params, "requestId")
+        .or_else(|| extract_string_field(&req.params, "id"))
+        .or_else(|| json_rpc_id_key(&req.id))
+}
+
+pub(crate) fn plan_request_id(req: &AcpRequest) -> Option<String> {
+    if req.method != "updatePlan" {
+        return None;
+    }
+    extract_string_field(&req.params, "requestId")
+        .or_else(|| extract_string_field(&req.params, "id"))
+        .or_else(|| json_rpc_id_key(&req.id))
+}
+
+fn json_rpc_id_key(id: &serde_json::Value) -> Option<String> {
+    id.as_str()
+        .map(str::to_string)
+        .or_else(|| id.as_i64().map(|value| value.to_string()))
+        .or_else(|| id.as_u64().map(|value| value.to_string()))
 }
 
 fn interpret_notification(
@@ -801,7 +833,7 @@ mod tests {
         let req = AcpRequest {
             jsonrpc: "2.0".into(),
             id: json!(10),
-            method: "requestPermission".into(),
+            method: "session/request_permission".into(),
             params: json!({
                 "requestId": "perm-abc",
                 "toolCall": {
@@ -824,6 +856,36 @@ mod tests {
                     assert_eq!(p.options.len(), 2);
                     assert_eq!(p.options[0].option_id, "opt-allow-once");
                     assert_eq!(p.options[1].option_id, "opt-reject");
+                }
+                other => panic!("expected PermissionRequested, got {:?}", other),
+            },
+            other => panic!("expected Events, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn standard_permission_request_uses_json_rpc_id_when_request_id_is_absent() {
+        let req = AcpRequest {
+            jsonrpc: "2.0".into(),
+            id: json!("server-permission-7"),
+            method: "session/request_permission".into(),
+            params: json!({
+                "sessionId": "agent-session",
+                "toolCall": { "toolCallId": "tc-7", "title": "Write file" },
+                "options": [{ "optionId": "reject", "name": "Reject", "kind": "reject_once" }]
+            }),
+        };
+
+        assert_eq!(
+            permission_request_id(&req).as_deref(),
+            Some("server-permission-7")
+        );
+        let mut c = ctx();
+        let result = interpret(&AcpMessage::Request(req), &sid(), &mut c);
+        match result {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::PermissionRequested(permission) => {
+                    assert_eq!(permission.request_id, "server-permission-7");
                 }
                 other => panic!("expected PermissionRequested, got {:?}", other),
             },

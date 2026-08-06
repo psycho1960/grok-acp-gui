@@ -49,8 +49,10 @@ function logErr(msg) {
 // --- Scenario handlers ---
 
 let requestCounter = 0;
+let serverRequestCounter = 1000;
 let authenticated = false;
 let activeSessionId = null;
+let pendingPermissionResponseId = null;
 
 function handleInitialize(id) {
   if (SCENARIO === 'timeout') {
@@ -135,20 +137,24 @@ function handlePrompt(id, params) {
     return;
   }
   if (SCENARIO === 'permission') {
-    // Send a requestPermission before responding.
+    // ACP v1: permission is an agent-to-client JSON-RPC request. The client
+    // must answer this exact id with result.outcome; there is no
+    // resolvePermission method.
     const permId = `perm-${++requestCounter}`;
-    sendNotification('requestPermission', {
+    pendingPermissionResponseId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: pendingPermissionResponseId, method: 'session/request_permission', params: {
       requestId: permId,
+      sessionId: activeSessionId,
       toolCall: {
         toolCallId: `tc-${requestCounter}`,
         title: 'Run bash command',
         kind: 'bash',
       },
       options: [
-        { optionId: 'opt-allow-once', name: 'Allow once' },
-        { optionId: 'opt-reject', name: 'Reject' },
+        { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
       ],
-    });
+    }});
   }
 
   if (SCENARIO === 'plan') {
@@ -170,7 +176,13 @@ function handlePrompt(id, params) {
   }
 
   // Stream assistant deltas.
-  const words = ['Hello', ' from', ' fake', ' ACP', ' agent!'];
+  const hasImage = params.prompt.some((block) => block?.type === 'image');
+  const text = params.prompt.find((block) => block?.type === 'text')?.text || '';
+  const words = hasImage
+    ? ['VISUAL_CONTEXT_OK']
+    : text.includes('<attachment_visual_context')
+      ? ['MAIN_TEXT_ONLY_OK']
+      : ['Hello', ' from', ' fake', ' ACP', ' agent!'];
   let delay = SCENARIO === 'slow' ? 200 : 10;
   const step = SCENARIO === 'slow' ? 100 : 10;
   for (const word of words) {
@@ -226,10 +238,6 @@ function handleCancel(id) {
   sendResponse(id, { cancelled: true });
 }
 
-function handleResolvePermission(id) {
-  sendResponse(id, { resolved: true });
-}
-
 function handleResolvePlan(id) {
   sendResponse(id, { resolved: true });
 }
@@ -268,6 +276,19 @@ rl.on('line', (line) => {
     return;
   }
 
+  // Handle responses to agent-to-client requests first.
+  if (msg.id !== undefined && !msg.method) {
+    if (msg.id === pendingPermissionResponseId) {
+      const selected = msg.result?.outcome;
+      if (selected?.outcome !== 'selected' || typeof selected.optionId !== 'string') {
+        logErr('invalid permission response outcome');
+        process.exitCode = 3;
+      }
+      pendingPermissionResponseId = null;
+    }
+    return;
+  }
+
   // Handle as request (has id) or notification (no id).
   if (msg.id !== undefined && msg.method) {
     switch (msg.method) {
@@ -285,9 +306,6 @@ rl.on('line', (line) => {
         break;
       case 'session/cancel':
         handleCancel(msg.id);
-        break;
-      case 'resolvePermission':
-        handleResolvePermission(msg.id);
         break;
       case 'resolvePlan':
         handleResolvePlan(msg.id);
