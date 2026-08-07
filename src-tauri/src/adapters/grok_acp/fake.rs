@@ -32,6 +32,7 @@ pub enum FakeScenario {
     UnknownMethod,
     Permission,
     Plan,
+    PlanPermission,
 }
 
 impl FakeScenario {
@@ -47,6 +48,7 @@ impl FakeScenario {
             FakeScenario::UnknownMethod => "unknown-method",
             FakeScenario::Permission => "permission",
             FakeScenario::Plan => "plan",
+            FakeScenario::PlanPermission => "plan-permission",
         }
     }
 }

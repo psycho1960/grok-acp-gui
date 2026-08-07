@@ -134,7 +134,19 @@ impl OperationDescriptor {
             OperationKind::FileDelete if self.write_paths.is_empty() => OperationCategory::Unknown,
             OperationKind::FileDelete => OperationCategory::Destructive,
             OperationKind::Git => classify_git(self.executable.as_deref(), &self.args),
-            OperationKind::Process => classify_process(self.executable.as_deref(), &self.args),
+            OperationKind::Process => {
+                let category = classify_process(self.executable.as_deref(), &self.args);
+                // A destructive process is approvable only when the adapter
+                // supplied every target in `write_paths`.  Parsing arbitrary
+                // command-line syntax here is unsafe, and omitting those
+                // paths would let an out-of-workspace target evade the
+                // containment check below.
+                if category == OperationCategory::Destructive && self.write_paths.is_empty() {
+                    OperationCategory::Unknown
+                } else {
+                    category
+                }
+            }
         }
     }
 
@@ -575,6 +587,18 @@ mod tests {
         let mut op = git(&["status"]);
         op.read_paths.push("../secret".into());
         assert!(op.validate_within("C:/repo").is_err());
+    }
+
+    #[test]
+    fn destructive_process_requires_declared_contained_targets() {
+        let outside = process("rm.exe", &["D:/outside/victim.txt"]);
+        assert_eq!(outside.category(), OperationCategory::Unknown);
+        assert!(outside.validate_within("C:/repo").is_err());
+
+        let mut inside = process("rm.exe", &["victim.txt"]);
+        inside.write_paths.push("victim.txt".into());
+        assert_eq!(inside.category(), OperationCategory::Destructive);
+        assert!(inside.validate_within("C:/repo").is_ok());
     }
 
     fn process(name: &str, args: &[&str]) -> OperationDescriptor {

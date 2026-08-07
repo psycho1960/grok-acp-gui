@@ -710,28 +710,79 @@ fn extract_permission_operation(
                 .get("toolCall")
                 .and_then(|tool| tool.get("operation"))
         })
-        .or_else(|| params.get("toolCall").and_then(|tool| tool.get("input")))?;
+        .or_else(|| params.get("toolCall").and_then(|tool| tool.get("input")))
+        // ACP v1 puts the tool input in `toolCall.rawInput`.  Treat it as
+        // structured input, never as a shell string, so standard permission
+        // requests can retain their explicit allow/deny options.
+        .or_else(|| params.get("toolCall").and_then(|tool| tool.get("rawInput")))?;
+    let raw_command = source.get("command").and_then(|value| value.as_str());
+    let parsed_command = raw_command.and_then(parse_safe_command);
     let operation_kind = source
         .get("operationKind")
         .or_else(|| source.get("kind"))
         .or_else(|| source.get("type"))
-        .and_then(|value| value.as_str())?
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            params
+                .get("toolCall")
+                .and_then(|tool| tool.get("kind"))
+                .and_then(|value| value.as_str())
+        })?
         .to_string();
+    let operation_kind = if operation_kind.eq_ignore_ascii_case("bash")
+        || operation_kind.eq_ignore_ascii_case("shell")
+    {
+        parsed_command
+            .as_ref()
+            .map_or(operation_kind, |(executable, _)| {
+                if executable.eq_ignore_ascii_case("git") {
+                    "git".into()
+                } else {
+                    "process".into()
+                }
+            })
+    } else {
+        operation_kind
+    };
     Some(PermissionOperationDescriptor {
         operation_kind,
         executable: source
             .get("executable")
-            .or_else(|| source.get("command"))
             .and_then(|value| value.as_str())
-            .map(str::to_string),
-        args: string_array(source.get("args")),
+            .map(str::to_string)
+            .or_else(|| {
+                parsed_command
+                    .as_ref()
+                    .map(|(executable, _)| executable.clone())
+            }),
+        args: if source.get("args").is_some() {
+            string_array(source.get("args"))
+        } else {
+            parsed_command.map(|(_, args)| args).unwrap_or_default()
+        },
         cwd: source
             .get("cwd")
+            .or_else(|| params.get("cwd"))
             .and_then(|value| value.as_str())
             .map(str::to_string),
         read_paths: string_array(source.get("readPaths")),
         write_paths: string_array(source.get("writePaths")),
     })
+}
+
+/// Minimal parser for ACP's standard `rawInput.command`: shell operators and
+/// quoting are rejected, leaving only an executable plus literal argv tokens.
+fn parse_safe_command(raw: &str) -> Option<(String, Vec<String>)> {
+    if raw.trim().is_empty()
+        || raw
+            .chars()
+            .any(|ch| matches!(ch, '|' | '>' | '<' | ';' | '&' | '`' | '$' | '\'' | '"'))
+    {
+        return None;
+    }
+    let mut tokens = raw.split_whitespace();
+    let executable = tokens.next()?.to_string();
+    Some((executable, tokens.map(str::to_string).collect()))
 }
 
 // ---------------------------------------------------------------------------

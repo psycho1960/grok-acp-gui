@@ -42,11 +42,19 @@ pub struct SessionMailbox {
 
 impl SessionMailbox {
     /// Create a new mailbox and spawn its worker task.
+    ///
+    /// `permission_timeout` controls how long a pending permission request
+    /// may stay unresolved before the worker auto-rejects it with the ACP
+    /// deny option. Production uses 300s; tests inject short durations so
+    /// the timeout path is exercised without waiting in real time.
     pub fn new(
         task_id: TaskId,
         session_id: SessionId,
         repo: std::sync::Arc<dyn crate::modules::persistence::Repository>,
         event_broadcaster: tokio::sync::broadcast::Sender<crate::bridge::events::DesktopEvent>,
+        agent_runtime: std::sync::Arc<dyn crate::modules::agent_runtime::AgentRuntime>,
+        approval_resolution: std::sync::Arc<tokio::sync::Mutex<()>>,
+        permission_timeout: std::time::Duration,
     ) -> Self {
         let (tx, rx) = mpsc::channel(MAILBOX_CAPACITY);
 
@@ -62,6 +70,9 @@ impl SessionMailbox {
             session_id,
             repo,
             event_broadcaster,
+            agent_runtime,
+            approval_resolution,
+            permission_timeout,
             rx,
         };
         tokio::spawn(worker.run());
@@ -95,6 +106,9 @@ struct MailboxWorker {
     session_id: SessionId, // reserved for future reconnection logic
     repo: std::sync::Arc<dyn crate::modules::persistence::Repository>,
     event_broadcaster: tokio::sync::broadcast::Sender<crate::bridge::events::DesktopEvent>,
+    agent_runtime: std::sync::Arc<dyn crate::modules::agent_runtime::AgentRuntime>,
+    approval_resolution: std::sync::Arc<tokio::sync::Mutex<()>>,
+    permission_timeout: std::time::Duration,
     rx: mpsc::Receiver<SessionCommand>,
 }
 
@@ -247,7 +261,46 @@ impl MailboxWorker {
             let _ = self.event_broadcaster.send(bridge_event);
         }
 
+        if let crate::modules::agent_runtime::AgentEvent::PermissionRequested(payload) =
+            &event.event
+        {
+            self.schedule_permission_timeout(payload.request_id.clone(), session_id);
+        }
+
         Ok(())
+    }
+
+    fn schedule_permission_timeout(&self, request_id: String, session_id: SessionId) {
+        let repo = self.repo.clone();
+        let runtime = self.agent_runtime.clone();
+        let resolution = self.approval_resolution.clone();
+        let task_id = self.task_id.clone();
+        let timeout = self.permission_timeout;
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            let _guard = resolution.lock().await;
+            let Ok(Some(pending)) = repo.expire_permission(&request_id, &session_id.0) else {
+                return;
+            };
+            if let Some(deny) = pending.options.iter().find(|option| {
+                option.action
+                    == crate::modules::task_runtime::permission::PermissionOptionAction::Deny
+            }) {
+                let _ = runtime
+                    .send(
+                        session_id,
+                        crate::modules::agent_runtime::ClientRequest::ResolvePermission(
+                            crate::modules::agent_runtime::requests::ResolvePermissionRequest {
+                                request_id,
+                                option_id: deny.option_id.clone(),
+                            },
+                        ),
+                    )
+                    .await;
+            }
+            let _ =
+                repo.update_task_status(&task_id.0, "idle", Some("permission request timed out"));
+        });
     }
 
     fn register_approval_request(
@@ -300,7 +353,10 @@ impl MailboxWorker {
         match &event.event {
             AgentEvent::PermissionRequested(payload) => {
                 let plan_version = self.repo.latest_plan_version(&self.task_id.0)?;
-                let descriptor = payload.operation.as_ref().and_then(operation_from_agent);
+                let descriptor = payload
+                    .operation
+                    .as_ref()
+                    .and_then(|operation| operation_from_agent(operation, &workspace));
                 // The full containment check is the same one ExecutionGuard
                 // applies at I/O time. An operation that fails it (unknown
                 // category, missing cwd, escaped paths, git -C outside the
@@ -479,6 +535,7 @@ fn plan_action(kind: Option<&str>) -> crate::modules::task_runtime::plan::PlanOp
 
 fn operation_from_agent(
     source: &crate::modules::agent_runtime::events::PermissionOperationDescriptor,
+    workspace: &str,
 ) -> Option<crate::modules::task_runtime::permission::OperationDescriptor> {
     use crate::modules::task_runtime::permission::{OperationDescriptor, OperationKind};
     let kind = match source.operation_kind.to_ascii_lowercase().as_str() {
@@ -489,11 +546,21 @@ fn operation_from_agent(
         "file_delete" | "delete" => OperationKind::FileDelete,
         _ => return None,
     };
+    // ACP v1 `toolCall.rawInput` carries no cwd: the agent process runs in
+    // the workspace directory guaranteed by the session binding, so a
+    // missing cwd means the operation executes in the workspace itself.
+    // Defaulting it to the workspace keeps standard rawInput requests
+    // classifiable while containment still uses the same root.
+    let cwd = source
+        .cwd
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| workspace.to_string());
     Some(OperationDescriptor {
         kind,
         executable: source.executable.clone(),
         args: source.args.clone(),
-        cwd: source.cwd.clone()?,
+        cwd,
         read_paths: source.read_paths.clone(),
         write_paths: source.write_paths.clone(),
     })
@@ -589,7 +656,7 @@ fn safe_args(args: &[String]) -> Vec<String> {
                 "--api-key",
                 "--apikey",
                 "--header",
-                "-H",
+                "-h",
                 "--cookie",
                 "--cookie-jar",
                 "--access-token",
@@ -953,6 +1020,14 @@ mod tests {
         assert!(serialized.contains("[redacted]"));
         // The URL survives redaction because it is not a credential.
         assert!(serialized.contains("https://example.com"));
+    }
+
+    #[test]
+    fn short_custom_header_value_after_short_flag_is_redacted() {
+        assert_eq!(
+            safe_args(&["-H".into(), "X-Custom-Key: abcdef".into()]),
+            vec!["-H", "[redacted]"]
+        );
     }
 
     #[test]

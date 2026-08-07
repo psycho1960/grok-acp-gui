@@ -3,7 +3,7 @@
 -- arguments are not stored; only SHA-256 operation/plan digests and redacted summaries.
 
 CREATE TABLE plans (
-    request_id          TEXT NOT NULL PRIMARY KEY,
+    request_id          TEXT NOT NULL,
     task_id             TEXT NOT NULL,
     session_id          TEXT NOT NULL,
     correlation_id      TEXT NOT NULL,
@@ -16,6 +16,7 @@ CREATE TABLE plans (
     decided_option_id   TEXT,
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
+    PRIMARY KEY (session_id, request_id),
     UNIQUE(task_id, version),
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE RESTRICT
 );
@@ -24,7 +25,7 @@ CREATE INDEX idx_plans_session_version ON plans(session_id, version);
 CREATE INDEX idx_plans_task_state ON plans(task_id, state);
 
 CREATE TABLE permission_decisions (
-    request_id          TEXT NOT NULL PRIMARY KEY,
+    request_id          TEXT NOT NULL,
     task_id             TEXT NOT NULL,
     session_id          TEXT NOT NULL,
     correlation_id      TEXT NOT NULL,
@@ -41,6 +42,7 @@ CREATE TABLE permission_decisions (
     consumed_at         TEXT,
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL,
+    PRIMARY KEY (session_id, request_id),
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE RESTRICT
 );
 

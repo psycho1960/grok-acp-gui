@@ -34,6 +34,9 @@ use crate::modules::task_runtime::TaskRuntime;
 /// Default maximum concurrent tasks (configurable via settings).
 const DEFAULT_MAX_CONCURRENT: u32 = 4;
 
+/// Default permission request timeout (300 seconds).
+const DEFAULT_PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Maximum event window for snapshots.
 const SNAPSHOT_EVENT_LIMIT: u32 = 500;
 
@@ -49,6 +52,9 @@ pub struct TaskRuntimeImpl<A: AgentRuntime> {
     semaphore: Arc<Semaphore>,
     /// Maximum permits on the semaphore.
     max_concurrent: u32,
+    /// How long a pending permission may stay unresolved before the mailbox
+    /// worker auto-rejects it with the ACP deny option.
+    permission_timeout: std::time::Duration,
     /// Per-session mailboxes, keyed by session_id.
     mailboxes: Mutex<HashMap<SessionId, SessionMailbox>>,
     /// Per-process generation offset used when a persisted session is
@@ -59,7 +65,7 @@ pub struct TaskRuntimeImpl<A: AgentRuntime> {
     permits: Mutex<HashMap<SessionId, tokio::sync::OwnedSemaphorePermit>>,
     /// Serializes ACP resolution submission with the corresponding database
     /// transition, preventing double-clicks from sending the same option twice.
-    approval_resolution: Mutex<()>,
+    approval_resolution: Arc<Mutex<()>>,
     /// Bridge event broadcaster (Renderer subscribes to this).
     event_broadcaster: tokio::sync::broadcast::Sender<crate::bridge::events::DesktopEvent>,
 }
@@ -76,6 +82,23 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
         agent_runtime: Arc<A>,
         max_concurrent: u32,
     ) -> Self {
+        Self::with_concurrency_and_permission_timeout(
+            repo,
+            agent_runtime,
+            max_concurrent,
+            DEFAULT_PERMISSION_TIMEOUT,
+        )
+    }
+
+    /// Create a new TaskRuntime with a specific concurrency limit and
+    /// permission timeout. Tests inject short timeouts so the auto-reject
+    /// path is exercised without waiting 300 seconds in real time.
+    pub fn with_concurrency_and_permission_timeout(
+        repo: Arc<dyn Repository>,
+        agent_runtime: Arc<A>,
+        max_concurrent: u32,
+        permission_timeout: std::time::Duration,
+    ) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             repo,
@@ -83,10 +106,11 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
             forwarding_started: AtomicBool::new(false),
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             max_concurrent,
+            permission_timeout,
             mailboxes: Mutex::new(HashMap::new()),
             sequence_offsets: Mutex::new(HashMap::new()),
             permits: Mutex::new(HashMap::new()),
-            approval_resolution: Mutex::new(()),
+            approval_resolution: Arc::new(Mutex::new(())),
             event_broadcaster: event_tx,
         }
     }
@@ -106,6 +130,9 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
             session_id.clone(),
             self.repo.clone(),
             self.event_broadcaster.clone(),
+            self.agent_runtime.clone(),
+            self.approval_resolution.clone(),
+            self.permission_timeout,
         );
         mailboxes.insert(session_id.clone(), mb.clone());
         mb
@@ -517,7 +544,9 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         };
 
         let _resolution = self.approval_resolution.lock().await;
-        let pending = self.repo.get_permission(&request.request_id)?;
+        let pending = self
+            .repo
+            .get_permission(&request.request_id, &request.session_id.0)?;
         let expected_plan_version =
             (request.expected_version != 0).then_some(request.expected_version);
         if pending.task_id != request.task_id
@@ -530,12 +559,6 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
                 "Permission request context or Plan version changed",
             ));
         }
-        if pending.state != PermissionState::Requested {
-            return Err(DomainError::new(
-                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
-                "Permission request is no longer pending",
-            ));
-        }
         let action = pending
             .options
             .iter()
@@ -546,6 +569,32 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             return Err(DomainError::new(
                 crate::domain::error::codes::PERMISSION_DENIED,
                 "Permission option has no explicit ACP action",
+            ));
+        }
+        // The Plan gate comes before every other state check: while the
+        // current Plan is not approved for this permission's version, no
+        // allow-type option may be forwarded — including on records that a
+        // newer Plan already expired. Denial remains available because
+        // rejection is always safe.
+        if action != PermissionOptionAction::Deny
+            && self.repo.get_task(&request.task_id.0)?.mode.as_deref() == Some("plan")
+        {
+            let active_plan = self.repo.latest_plan(&request.task_id.0)?;
+            let approved = active_plan.as_ref().is_some_and(|plan| {
+                plan.state == crate::modules::task_runtime::plan::PlanState::Approved
+                    && Some(plan.version) == pending.plan_version
+            });
+            if !approved {
+                return Err(DomainError::new(
+                    crate::domain::error::codes::PLAN_NOT_APPROVED,
+                    "Plan is not approved for this permission request",
+                ));
+            }
+        }
+        if pending.state != PermissionState::Requested {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Permission request is no longer pending",
             ));
         }
         // Fail closed: operations that cannot be safely classified (missing
@@ -638,7 +687,9 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         use crate::modules::task_runtime::plan::{PlanDecision, PlanOptionAction, PlanState};
 
         let _resolution = self.approval_resolution.lock().await;
-        let pending = self.repo.get_plan(&request.request_id)?;
+        let pending = self
+            .repo
+            .get_plan(&request.request_id, &request.session_id.0)?;
         if pending.task_id != request.task_id
             || pending.session_id != request.session_id
             || pending.correlation_id != request.correlation_id

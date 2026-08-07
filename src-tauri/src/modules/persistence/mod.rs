@@ -157,13 +157,21 @@ pub trait Repository: Send + Sync {
     // ------------------------------------------------------------------
 
     fn create_plan(&self, plan: &PlanRecord) -> RepoResult<()>;
-    fn get_plan(&self, request_id: &str) -> RepoResult<PlanRecord>;
+    fn get_plan(&self, request_id: &str, session_id: &str) -> RepoResult<PlanRecord>;
     fn latest_plan_version(&self, task_id: &str) -> RepoResult<Option<u64>>;
+    fn latest_plan(&self, task_id: &str) -> RepoResult<Option<PlanRecord>>;
     fn decide_plan(&self, decision: &PlanDecision) -> RepoResult<PlanRecord>;
 
     fn create_permission(&self, permission: &PermissionRecord) -> RepoResult<()>;
-    fn get_permission(&self, request_id: &str) -> RepoResult<PermissionRecord>;
+    fn get_permission(&self, request_id: &str, session_id: &str) -> RepoResult<PermissionRecord>;
     fn decide_permission(&self, decision: &PermissionDecision) -> RepoResult<PermissionRecord>;
+    /// Atomically expires one still-pending request. Used by the backend
+    /// timeout worker before it returns the ACP denial option.
+    fn expire_permission(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> RepoResult<Option<PermissionRecord>>;
     fn expire_session_permissions(&self, session_id: &str, reason: &str) -> RepoResult<u32>;
     fn consume_permission(
         &self,

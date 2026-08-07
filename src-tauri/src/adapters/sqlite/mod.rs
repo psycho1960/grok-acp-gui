@@ -1414,11 +1414,11 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    fn get_plan(&self, request_id: &str) -> RepoResult<PlanRecord> {
+    fn get_plan(&self, request_id: &str, session_id: &str) -> RepoResult<PlanRecord> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE request_id=?1",
-            params![request_id],
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE request_id=?1 AND session_id=?2",
+            params![request_id, session_id],
             row_to_plan,
         )
         .map_err(|e| db_error("get_plan", &e))
@@ -1435,6 +1435,17 @@ impl Repository for SqliteRepository {
         .map_err(|e| db_error("latest_plan_version", &e))
     }
 
+    fn latest_plan(&self, task_id: &str) -> RepoResult<Option<PlanRecord>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE task_id=?1 ORDER BY version DESC LIMIT 1",
+            params![task_id],
+            row_to_plan,
+        )
+        .optional()
+        .map_err(|e| db_error("latest_plan", &e))
+    }
+
     fn decide_plan(&self, decision: &PlanDecision) -> RepoResult<PlanRecord> {
         let mut conn = self.lock()?;
         let tx = conn
@@ -1442,8 +1453,8 @@ impl Repository for SqliteRepository {
             .map_err(|e| db_error("decide_plan transaction", &e))?;
         let mut plan = tx
             .query_row(
-                "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE request_id=?1",
-                params![decision.request_id],
+                "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE request_id=?1 AND session_id=?2",
+                params![decision.request_id, decision.session_id.0],
                 row_to_plan,
             )
             .map_err(|e| db_error("decide_plan load", &e))?;
@@ -1489,12 +1500,13 @@ impl Repository for SqliteRepository {
         let changed = tx
             .execute(
                 "UPDATE plans SET state=?1,decided_option_id=?2,updated_at=?3
-             WHERE request_id=?4 AND version=?5 AND state='proposed'",
+             WHERE request_id=?4 AND session_id=?5 AND version=?6 AND state='proposed'",
                 params![
                     plan_state_str(plan.state),
                     decision.option_id,
                     decision.decided_at,
                     decision.request_id,
+                    decision.session_id.0,
                     decision.expected_version as i64
                 ],
             )
@@ -1537,11 +1549,11 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    fn get_permission(&self, request_id: &str) -> RepoResult<PermissionRecord> {
+    fn get_permission(&self, request_id: &str, session_id: &str) -> RepoResult<PermissionRecord> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1",
-            params![request_id], row_to_permission,
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1 AND session_id=?2",
+            params![request_id, session_id], row_to_permission,
         ).map_err(|e| db_error("get_permission", &e))
     }
 
@@ -1551,8 +1563,8 @@ impl Repository for SqliteRepository {
             .transaction()
             .map_err(|e| db_error("decide_permission transaction", &e))?;
         let mut permission = tx.query_row(
-            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1",
-            params![decision.request_id], row_to_permission,
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1 AND session_id=?2",
+            params![decision.request_id, decision.session_id.0], row_to_permission,
         ).map_err(|e| db_error("decide_permission load", &e))?;
         if permission.task_id != decision.task_id
             || permission.session_id != decision.session_id
@@ -1572,7 +1584,7 @@ impl Repository for SqliteRepository {
             ));
         }
         if permission.expires_at_epoch_seconds < decision.decided_at_epoch_seconds {
-            tx.execute("UPDATE permission_decisions SET state='expired',updated_at=?1 WHERE request_id=?2 AND state='requested'", params![decision.decided_at, decision.request_id])
+            tx.execute("UPDATE permission_decisions SET state='expired',updated_at=?1 WHERE request_id=?2 AND session_id=?3 AND state='requested'", params![decision.decided_at, decision.request_id, decision.session_id.0])
                 .map_err(|e| db_error("decide_permission expire", &e))?;
             tx.commit()
                 .map_err(|e| db_error("decide_permission expire commit", &e))?;
@@ -1609,10 +1621,10 @@ impl Repository for SqliteRepository {
             }
         };
         let changed = tx.execute(
-            "UPDATE permission_decisions SET state=?1,decided_option_id=?2,scope_json=?3,updated_at=?4 WHERE request_id=?5 AND state='requested'",
+            "UPDATE permission_decisions SET state=?1,decided_option_id=?2,scope_json=?3,updated_at=?4 WHERE request_id=?5 AND session_id=?6 AND state='requested'",
             params![permission_state_str(permission.state), decision.option_id,
                 if permission.state == PermissionState::ApprovedScope { Some(format!("{{\"operationDigest\":\"{}\"}}", permission.operation_digest)) } else { None },
-                decision.decided_at, decision.request_id],
+                decision.decided_at, decision.request_id, decision.session_id.0],
         ).map_err(|e| db_error("decide_permission update", &e))?;
         if changed != 1 {
             return Err(DomainError::new(
@@ -1631,6 +1643,32 @@ impl Repository for SqliteRepository {
         tx.commit()
             .map_err(|e| db_error("decide_permission commit", &e))?;
         Ok(permission)
+    }
+
+    fn expire_permission(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> RepoResult<Option<PermissionRecord>> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("expire_permission transaction", &e))?;
+        let permission = tx.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1 AND session_id=?2 AND state='requested'",
+            params![request_id, session_id],
+            row_to_permission,
+        ).optional().map_err(|e| db_error("expire_permission load", &e))?;
+        let Some(permission) = permission else {
+            return Ok(None);
+        };
+        tx.execute(
+            "UPDATE permission_decisions SET state='expired', updated_at=?1 WHERE request_id=?2 AND session_id=?3 AND state='requested'",
+            params![utc_now(), request_id, session_id],
+        ).map_err(|e| db_error("expire_permission update", &e))?;
+        tx.commit()
+            .map_err(|e| db_error("expire_permission commit", &e))?;
+        Ok(Some(permission))
     }
 
     fn expire_session_permissions(&self, session_id: &str, _reason: &str) -> RepoResult<u32> {
@@ -1680,8 +1718,8 @@ impl Repository for SqliteRepository {
         };
         if expires_at < now_epoch_seconds as i64 {
             tx.execute(
-                "UPDATE permission_decisions SET state='expired',updated_at=?1 WHERE request_id=?2",
-                params![utc_now(), request_id],
+                "UPDATE permission_decisions SET state='expired',updated_at=?1 WHERE request_id=?2 AND session_id=?3",
+                params![utc_now(), request_id, context.session_id.0],
             )
             .map_err(|e| db_error("consume_permission expire", &e))?;
             tx.commit()
