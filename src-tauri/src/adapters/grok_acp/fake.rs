@@ -33,6 +33,7 @@ pub enum FakeScenario {
     Permission,
     Plan,
     PlanPermission,
+    ProcessWrite,
 }
 
 impl FakeScenario {
@@ -49,6 +50,7 @@ impl FakeScenario {
             FakeScenario::Permission => "permission",
             FakeScenario::Plan => "plan",
             FakeScenario::PlanPermission => "plan-permission",
+            FakeScenario::ProcessWrite => "process-write",
         }
     }
 }

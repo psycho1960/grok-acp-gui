@@ -16,6 +16,13 @@
 //   - "plan-permission": sends updatePlan first, then a standard ACP v1
 //                        requestPermission whose toolCall.rawInput carries
 //                        a plain command (no private "operation" field)
+//   - "process-write":  sends a standard ACP v1 requestPermission whose
+//                        toolCall.rawInput.command is a non-git Process
+//                        (e.g. "npm install pkg") — no private "operation",
+//                        no platform PathOptions. The single-purpose
+//                        permission request lets the agent notice the
+//                        request immediately so the test can verify
+//                        adapter→TaskRuntime fail-closed for Process.
 //
 // Usage:
 //   FAKE_ACP_SCENARIO=normal node agent.mjs
@@ -170,6 +177,32 @@ function handlePrompt(id, params) {
       ],
     }});
     // The agent cannot continue the turn until the client responds.
+    pendingGates.push('permission');
+  }
+
+  if (SCENARIO === 'process-write') {
+    // Standard ACP v1 process write request: rawInput.command is a non-git
+    // executable (npm install). No private "operation" field, no PathOptions.
+    // The adapter must classify this as OperationCategory::Process, then
+    // ExecutionGuard must fail-closed (no cwd → validate_within rejects →
+    // allow actions are stripped). The agent only emits the request and
+    // waits for the resolution before continuing.
+    const permId = `perm-${++requestCounter}`;
+    pendingPermissionResponseId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: pendingPermissionResponseId, method: 'session/request_permission', params: {
+      requestId: permId,
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: `tc-${requestCounter}`,
+        title: 'Install npm package',
+        kind: 'bash',
+        rawInput: { command: 'npm install vitest' },
+      },
+      options: [
+        { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    }});
     pendingGates.push('permission');
   }
 

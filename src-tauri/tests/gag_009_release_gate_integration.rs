@@ -47,7 +47,8 @@ use grok_acp_gui_lib::modules::agent_runtime::requests::{ClientRequest, PromptRe
 use grok_acp_gui_lib::modules::agent_runtime::{AgentRuntime, AgentRuntimeImpl, RuntimeState};
 use grok_acp_gui_lib::modules::persistence::Repository;
 use grok_acp_gui_lib::modules::task_runtime::permission::{
-    OperationCategory, PermissionRecord, PermissionResolutionRequest, PermissionState,
+    OperationCategory, PermissionOptionAction, PermissionRecord, PermissionResolutionRequest,
+    PermissionState,
 };
 use grok_acp_gui_lib::modules::task_runtime::plan::{PlanRecord, PlanResolutionRequest, PlanState};
 use grok_acp_gui_lib::modules::task_runtime::{TaskRuntime, TaskRuntimeImpl};
@@ -662,6 +663,175 @@ async fn p1_07_permission_timeout_auto_rejects_and_recovers() {
 // ---------------------------------------------------------------------------
 // RG-009-X-03: repeated resolve after decision never sends twice
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn p1_02_process_raw_input_fail_closed_in_adapter_to_task_runtime() {
+    // B-1: a standard ACP v1 toolCall.rawInput whose command is a non-git
+    // Process (e.g. "npm install") must be classified as a Process descriptor
+    // by the interpreter, then fail-closed by adapter→TaskRuntime because
+    // it carries no cwd (and no PathOptions): validate_within rejects →
+    // category = Unknown → allow actions are stripped.
+    let env = setup(FakeScenario::ProcessWrite, "code", Duration::from_secs(300)).await;
+    boot_and_prompt(&env).await;
+    let permission = wait_for(|| pending_permission(&env, "perm-2")).await;
+
+    // Classification: extract_permission_operation sees kind="bash" +
+    // rawInput.command="npm install vitest" → executable="npm", argv=[...] →
+    // operation_kind="process". But the descriptor carries no cwd/src and
+    // validate_within rejects → category is Unknown.
+    assert_eq!(
+        permission.category,
+        OperationCategory::Unknown,
+        "Process without cwd / paths must fail-closed to Unknown"
+    );
+
+    // Adapter strips allow actions so the only resolvable option is deny.
+    let allow_options: Vec<_> = permission
+        .options
+        .iter()
+        .filter(|opt| matches!(opt.action, PermissionOptionAction::AllowOnce))
+        .collect();
+    let deny_options: Vec<_> = permission
+        .options
+        .iter()
+        .filter(|opt| matches!(opt.action, PermissionOptionAction::Deny))
+        .collect();
+    assert_eq!(
+        allow_options.len(),
+        0,
+        "Unknown category must strip allow actions"
+    );
+    assert_eq!(
+        deny_options.len(),
+        1,
+        "deny option must remain as the only resolvable choice"
+    );
+
+    // Resolve allow-once: fails closed ("Operation cannot be classified
+    // safely; approval is blocked").
+    let denied = permission_resolve(&env, &permission, "opt-allow-once").await;
+    assert!(denied.is_err(), "allow-once must be rejected on Unknown");
+    assert_eq!(denied.unwrap_err().code, "PERMISSION_DENIED");
+
+    // Permission stays pending (allow wasn't applied).
+    assert_eq!(
+        pending_permission(&env, "perm-2").unwrap().state,
+        PermissionState::Requested
+    );
+
+    // Resolve deny: succeeds and clears the request.
+    let denied2 = permission_resolve(&env, &permission, "opt-reject").await;
+    assert_eq!(denied2.unwrap(), PermissionState::Denied);
+    assert_eq!(
+        pending_permission(&env, "perm-2").unwrap().state,
+        PermissionState::Denied
+    );
+
+    // Fake ACP must not have received an allow response.
+    assert_never_sent(&env, "opt-allow-once").await;
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn p1_04_two_parallel_tasks_plan_permission_acp_responses_isolated() {
+    // B-3: two concurrent tasks each receiving a Plan+permission request
+    // must have isolated events, DB state, and ACP responses — neither
+    // resolve must touch the other's plan/permission.
+    let env_a = setup(
+        FakeScenario::PlanPermission,
+        "plan",
+        Duration::from_secs(300),
+    )
+    .await;
+    let env_b = setup(
+        FakeScenario::PlanPermission,
+        "plan",
+        Duration::from_secs(300),
+    )
+    .await;
+    let ea = env_a.task_runtime.clone();
+    let eb = env_b.task_runtime.clone();
+    let sa = env_a.session_id.clone();
+    let sb = env_b.session_id.clone();
+
+    // Boot and prompt both tasks concurrently.
+    tokio::join!(
+        async {
+            boot_and_prompt(&env_a).await;
+        },
+        async {
+            boot_and_prompt(&env_b).await;
+        }
+    );
+
+    // Each task receives its own plan and permission on its own session.
+    let plan_a = wait_for(|| pending_plan(&env_a, "plan-2")).await;
+    let plan_b = wait_for(|| pending_plan(&env_b, "plan-2")).await;
+    let permission_a = wait_for(|| pending_permission(&env_a, "perm-3")).await;
+    let permission_b = wait_for(|| pending_permission(&env_b, "perm-3")).await;
+
+    assert_ne!(
+        env_a.session_id, env_b.session_id,
+        "test setup must produce two distinct sessions"
+    );
+
+    // Resolve plan+permission on env_a — must not touch env_b's plan/permission.
+    plan_resolve(&env_a, &plan_a, "opt-approve").await.unwrap();
+    permission_resolve(&env_a, &permission_a, "opt-allow-once")
+        .await
+        .unwrap();
+
+    let plan_b_state = env_b.repo.get_plan("plan-2", &sb.0).unwrap().state;
+    let permission_b_state = pending_permission(&env_b, "perm-3").unwrap().state;
+    assert_eq!(
+        plan_b_state,
+        PlanState::Proposed,
+        "env_a's plan resolution must not affect env_b's plan"
+    );
+    assert_eq!(
+        permission_b_state,
+        PermissionState::Requested,
+        "env_a's permission resolution must not affect env_b's permission"
+    );
+
+    // Resolve env_b independently.
+    plan_resolve(&env_b, &plan_b, "opt-approve").await.unwrap();
+    permission_resolve(&env_b, &permission_b, "opt-allow-once")
+        .await
+        .unwrap();
+
+    // Both tasks now finished their AllowOnce round-trip.
+    assert_eq!(
+        pending_permission(&env_a, "perm-3").unwrap().state,
+        PermissionState::ApprovedOnce
+    );
+    assert_eq!(
+        pending_permission(&env_b, "perm-3").unwrap().state,
+        PermissionState::ApprovedOnce
+    );
+
+    // After both tasks finished, each env's outbound log contains exactly
+    // one opt-allow-once response — the responses are isolated per env
+    // (proving the Fake ACP subprocess tap for each env captures only its
+    // own subprocess's output).
+    wait_for_response(&env_a, "opt-allow-once").await;
+    wait_for_response(&env_b, "opt-allow-once").await;
+    assert_eq!(
+        responses_with_option(&env_a, "opt-allow-once").len(),
+        1,
+        "env_a must have exactly one opt-allow-once response"
+    );
+    assert_eq!(
+        responses_with_option(&env_b, "opt-allow-once").len(),
+        1,
+        "env_b must have exactly one opt-allow-once response"
+    );
+
+    let _ = (ea, eb, sa);
+    shutdown(&env_a).await;
+    shutdown(&env_b).await;
+}
 
 #[tokio::test]
 async fn rg_x_03_duplicate_resolve_after_decision_sends_once() {
