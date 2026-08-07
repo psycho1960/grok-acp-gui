@@ -250,7 +250,7 @@ fn plan_approve_then_permission_consume_passes_acp_option_id_through_unchanged()
     })
     .unwrap();
     assert_eq!(
-        repo.get_plan("plan-1").unwrap().state,
+        repo.get_plan("plan-1", "s1").unwrap().state,
         PlanState::Approved,
         "Plan v1 must be Approved after decision"
     );
@@ -288,7 +288,7 @@ fn plan_approve_then_permission_consume_passes_acp_option_id_through_unchanged()
     .unwrap();
 
     // Verify the recorded decision preserved the raw ACP option ID
-    let stored = repo.get_permission("perm-1").unwrap();
+    let stored = repo.get_permission("perm-1", "s1").unwrap();
     assert_eq!(
         stored.decided_option_id.as_deref(),
         Some(acp_choice.as_str()),
@@ -349,14 +349,17 @@ fn plan_v2_supersedes_v1_approval_e2e() {
         decided_at: utc_now(),
     })
     .unwrap();
-    assert_eq!(repo.get_plan("plan-1").unwrap().state, PlanState::Approved);
+    assert_eq!(
+        repo.get_plan("plan-1", "s1").unwrap().state,
+        PlanState::Approved
+    );
 
     // Now v2 arrives
     let mut plan2 = make_plan("plan-2", 2);
     plan2.workspace = root.to_string_lossy().to_string();
     repo.create_plan(&plan2).unwrap();
     assert_eq!(
-        repo.get_plan("plan-1").unwrap().state,
+        repo.get_plan("plan-1", "s1").unwrap().state,
         PlanState::Superseded,
         "Plan v1 must auto-supersede when v2 is created"
     );

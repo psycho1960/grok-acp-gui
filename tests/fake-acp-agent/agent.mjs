@@ -13,6 +13,9 @@
 //   - "unknown-method": responds to initialize but sends unknown notifications
 //   - "permission": sends a requestPermission after the first prompt
 //   - "plan":       sends an updatePlan after the first prompt
+//   - "plan-permission": sends updatePlan first, then a standard ACP v1
+//                        requestPermission whose toolCall.rawInput carries
+//                        a plain command (no private "operation" field)
 //
 // Usage:
 //   FAKE_ACP_SCENARIO=normal node agent.mjs
@@ -53,6 +56,16 @@ let serverRequestCounter = 1000;
 let authenticated = false;
 let activeSessionId = null;
 let pendingPermissionResponseId = null;
+let pendingPlanResponseId = null;
+// Decision gates: the turn resumes only after every agent-to-client
+// request (permission/plan) the scenario emitted has been answered.
+const pendingGates = [];
+const resolvedGates = new Set();
+let pendingPrompt = null;
+
+function allGatesResolved() {
+  return pendingGates.length > 0 && pendingGates.every((gate) => resolvedGates.has(gate));
+}
 
 function handleInitialize(id) {
   if (SCENARIO === 'timeout') {
@@ -149,25 +162,71 @@ function handlePrompt(id, params) {
         toolCallId: `tc-${requestCounter}`,
         title: 'Run bash command',
         kind: 'bash',
+        rawInput: { command: 'git commit -m test' },
       },
       options: [
         { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },
         { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
       ],
     }});
+    // The agent cannot continue the turn until the client responds.
+    pendingGates.push('permission');
+  }
+
+  if (SCENARIO === 'plan-permission') {
+    // Plan decision first: same agent-to-client request shape as the
+    // permission decision below. Named kinds must stay explicit so the
+    // production interpreter can map approve/reject/revise without
+    // guessing semantics from labels.
+    const planId = `plan-${++requestCounter}`;
+    pendingPlanResponseId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: pendingPlanResponseId, method: 'updatePlan', params: {
+      requestId: planId,
+      summary: 'I will commit a fixture change and edit another file.',
+      options: [
+        { optionId: 'opt-approve', name: 'Approve', kind: 'approve' },
+        { optionId: 'opt-revise', name: 'Request changes', kind: 'revision_requested' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject' },
+      ],
+    }});
+    // Then a standard ACP v1 write request: rawInput.command only, with no
+    // project-private "operation" field. The client must classify it as a
+    // git write and preserve the original allow option id.
+    const permId = `perm-${++requestCounter}`;
+    pendingPermissionResponseId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: pendingPermissionResponseId, method: 'session/request_permission', params: {
+      requestId: permId,
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: `tc-${requestCounter}`,
+        title: 'Run git commit',
+        kind: 'bash',
+        rawInput: { command: 'git commit -m test' },
+      },
+      options: [
+        { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    }});
+    // The turn resumes only after BOTH decisions are answered.
+    pendingGates.push('plan', 'permission');
   }
 
   if (SCENARIO === 'plan') {
-    // Send an updatePlan.
+    // Plan decisions are agent-to-client JSON-RPC responses, just like
+    // permission decisions.  A notification has no response id and cannot
+    // implement approve/revise/reject.
     const planId = `plan-${++requestCounter}`;
-    sendNotification('updatePlan', {
+    pendingPlanResponseId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: pendingPlanResponseId, method: 'updatePlan', params: {
       requestId: planId,
       summary: 'I will create a file and edit another.',
       options: [
-        { optionId: 'opt-approve', name: 'Approve' },
-        { optionId: 'opt-reject', name: 'Reject' },
+        { optionId: 'opt-approve', name: 'Approve', kind: 'approve' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject' },
       ],
-    });
+    }});
+    pendingGates.push('plan');
   }
 
   if (SCENARIO === 'unknown-method') {
@@ -175,7 +234,16 @@ function handlePrompt(id, params) {
     sendNotification('some/future/method', { foo: 'bar' });
   }
 
-  // Stream assistant deltas.
+  if (pendingGates.length === 0) {
+    streamAndFinish(id, params);
+  } else {
+    // Remember the prompt so the turn can finish once all gates resolve.
+    pendingPrompt = { id, params };
+  }
+}
+
+// Stream the assistant delta, a tool call, and the end_turn response.
+function streamAndFinish(id, params) {
   const hasImage = params.prompt.some((block) => block?.type === 'image');
   const text = params.prompt.find((block) => block?.type === 'text')?.text || '';
   const words = hasImage
@@ -285,6 +353,21 @@ rl.on('line', (line) => {
         process.exitCode = 3;
       }
       pendingPermissionResponseId = null;
+      resolvedGates.add('permission');
+    }
+    if (msg.id === pendingPlanResponseId) {
+      const selected = msg.result?.outcome;
+      if (selected?.outcome !== 'selected' || typeof selected.optionId !== 'string') {
+        logErr('invalid plan response outcome');
+        process.exitCode = 3;
+      }
+      pendingPlanResponseId = null;
+      resolvedGates.add('plan');
+    }
+    if (allGatesResolved() && pendingPrompt) {
+      const { id: promptId, params: promptParams } = pendingPrompt;
+      pendingPrompt = null;
+      streamAndFinish(promptId, promptParams);
     }
     return;
   }

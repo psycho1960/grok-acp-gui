@@ -80,6 +80,20 @@ describe("GAG-009 permission and Plan UI", () => {
     expect(await first).toBe(true);
   });
 
+  it("renders redacted summaries instead of secret values", () => {
+    const event = fixturePermission(1);
+    const state = applyEvents(createEmptyConversationState(event.taskId), [event]);
+    const item = state.items[0];
+    if (!item || item.kind !== "permission") throw new Error("permission fixture missing");
+    const wrapper = mount(PermissionSlot, { props: { slotData: item.slot }, attachTo: document.body });
+    // Backend sends redacted summaries; the card must show the marker and
+    // must never leak the test secret or a raw credential-shaped value.
+    expect(wrapper.text()).toContain("[redacted]");
+    expect(wrapper.text()).not.toContain("GAG009_TEST_SECRET_NEVER_LOG");
+    expect(wrapper.text()).not.toMatch(/sk-[a-zA-Z0-9]{16,}|Bearer\s+[^\s]+/);
+    wrapper.unmount();
+  });
+
   it("keeps multiple pending requests isolated and rejects an expired one locally", async () => {
     const execute = vi.fn().mockResolvedValue({ success: "true", data: {} });
     const store = useConversationStore();

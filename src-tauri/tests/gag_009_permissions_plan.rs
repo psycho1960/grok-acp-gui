@@ -133,6 +133,56 @@ fn permission_is_bound_to_context_and_consumed_once() {
 }
 
 #[test]
+fn raw_request_ids_are_isolated_by_session() {
+    let repo = repository();
+    let now = utc_now();
+    repo.create_task(&Task {
+        id: TaskId::new("task-2"),
+        project_id: ProjectId::new("project-1"),
+        title: "second".into(),
+        status: TaskStatus::WaitingPermission,
+        workspace_kind: WorkspaceKind::Worktree,
+        mode: Some("plan".into()),
+        model: None,
+        reasoning: None,
+        created_at: now.clone(),
+        updated_at: now,
+        interrupt_reason: None,
+        interrupted_at: None,
+        attempt_count: 1,
+    })
+    .unwrap();
+    repo.create_binding(&SessionBinding {
+        task_id: TaskId::new("task-2"),
+        session_id: SessionId::new("session-2"),
+        cwd: Some("C:/repo".into()),
+        last_seq: 0,
+        state: SessionState::Active,
+        attempt_number: 1,
+    })
+    .unwrap();
+    repo.create_permission(&permission(None, 500)).unwrap();
+    let mut second = permission(None, 500);
+    second.task_id = TaskId::new("task-2");
+    second.session_id = SessionId::new("session-2");
+    repo.create_permission(&second).unwrap();
+    assert_eq!(
+        repo.get_permission("permission-1", "session-1")
+            .unwrap()
+            .task_id
+            .0,
+        "task-1"
+    );
+    assert_eq!(
+        repo.get_permission("permission-1", "session-2")
+            .unwrap()
+            .task_id
+            .0,
+        "task-2"
+    );
+}
+
+#[test]
 fn new_plan_version_supersedes_old_plan_and_approvals() {
     let repo = repository();
     let make_plan = |request: &str, version: u64| PlanRecord {
@@ -171,11 +221,13 @@ fn new_plan_version_supersedes_old_plan_and_approvals() {
 
     repo.create_plan(&make_plan("plan-2", 2)).unwrap();
     assert_eq!(
-        repo.get_plan("plan-1").unwrap().state,
+        repo.get_plan("plan-1", "session-1").unwrap().state,
         PlanState::Superseded
     );
     assert_eq!(
-        repo.get_permission("permission-1").unwrap().state,
+        repo.get_permission("permission-1", "session-1")
+            .unwrap()
+            .state,
         PermissionState::Expired
     );
     let stale = repo.decide_plan(&PlanDecision {
@@ -210,7 +262,9 @@ fn unknown_and_expired_options_fail_closed() {
     };
     assert!(repo.decide_permission(&decision).is_err());
     assert_eq!(
-        repo.get_permission("permission-1").unwrap().state,
+        repo.get_permission("permission-1", "session-1")
+            .unwrap()
+            .state,
         PermissionState::Expired
     );
 }
@@ -233,7 +287,9 @@ fn startup_recovery_expires_one_shot_approval() {
     .unwrap();
     repo.recover_interrupted_tasks("crash").unwrap();
     assert_eq!(
-        repo.get_permission("permission-1").unwrap().state,
+        repo.get_permission("permission-1", "session-1")
+            .unwrap()
+            .state,
         PermissionState::Expired
     );
 }
