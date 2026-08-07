@@ -734,6 +734,76 @@ async fn p1_02_process_raw_input_fail_closed_in_adapter_to_task_runtime() {
 }
 
 #[tokio::test]
+async fn p1_02_process_raw_input_workspace_escape_rejected() {
+    // P1-02 reproduction: a destructive Process command whose argv
+    // targets an explicit workspace-external path must still fail-closed.
+    // Even though the argv contains an out-of-workspace target, the
+    // descriptor carries no cwd / write_paths, so `validate_within`
+    // rejects → OperationCategory::Unknown → allow actions are stripped.
+    let env = setup(
+        FakeScenario::ProcessEscape,
+        "code",
+        Duration::from_secs(300),
+    )
+    .await;
+    boot_and_prompt(&env).await;
+    let permission = wait_for(|| pending_permission(&env, "perm-2")).await;
+
+    // The interpreter's permission_summary field intentionally hides argv
+    // (only `target_count` is disclosed), so the escape path must be
+    // verified via the inbound log instead — proving the Fake ACP truly
+    // sent the escape rawInput and the adapter dispatched it.
+    let log = env.log.lock().unwrap();
+    let inbound_dumped_escape = log.iter().any(|line| {
+        line.starts_with("inbound ") && line.contains("D:/outside/victim.txt")
+    });
+    assert!(
+        inbound_dumped_escape,
+        "inbound rawInput must carry the workspace-external escape path"
+    );
+    drop(log);
+
+    // Classification must still fail-closed.
+    assert_eq!(
+        permission.category,
+        OperationCategory::Unknown,
+        "Process escape must fail-closed to Unknown"
+    );
+
+    let allow_count = permission
+        .options
+        .iter()
+        .filter(|opt| matches!(opt.action, PermissionOptionAction::AllowOnce))
+        .count();
+    let deny_count = permission
+        .options
+        .iter()
+        .filter(|opt| matches!(opt.action, PermissionOptionAction::Deny))
+        .count();
+    assert_eq!(
+        allow_count, 0,
+        "Unknown category must strip allow options even for escape argv"
+    );
+    assert_eq!(
+        deny_count, 1,
+        "deny option must remain as the only resolvable choice"
+    );
+
+    // Resolve allow-once is rejected with PERMISSION_DENIED; deny succeeds.
+    let denied = permission_resolve(&env, &permission, "opt-allow-once").await;
+    assert!(denied.is_err());
+    assert_eq!(denied.unwrap_err().code, "PERMISSION_DENIED");
+
+    let denied2 = permission_resolve(&env, &permission, "opt-reject").await;
+    assert_eq!(denied2.unwrap(), PermissionState::Denied);
+
+    // No allow response reaches the Fake ACP.
+    assert_never_sent(&env, "opt-allow-once").await;
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
 async fn p1_04_two_parallel_tasks_plan_permission_acp_responses_isolated() {
     // B-3: two concurrent tasks each receiving a Plan+permission request
     // must have isolated events, DB state, and ACP responses — neither

@@ -23,6 +23,11 @@
 //                        permission request lets the agent notice the
 //                        request immediately so the test can verify
 //                        adapter→TaskRuntime fail-closed for Process.
+//   - "process-escape": sends a destructive command that explicitly
+//                        targets a workspace-external path. Reproduces
+//                        the P1-02 cwd-escape scenario: rawInput.command
+//                        carries an out-of-workspace target, no cwd, no
+//                        write_paths. Adapter must fail-closed regardless.
 //
 // Usage:
 //   FAKE_ACP_SCENARIO=normal node agent.mjs
@@ -177,6 +182,30 @@ function handlePrompt(id, params) {
       ],
     }});
     // The agent cannot continue the turn until the client responds.
+    pendingGates.push('permission');
+  }
+
+  if (SCENARIO === 'process-escape') {
+    // Destructive command targeting an explicit workspace-external path.
+    // Matches the P1-02 cwd-escape failure mode: rawInput.command points
+    // outside the workspace, no cwd/write_paths supplied. The adapter
+    // must still fail-closed (no let-through allow_once).
+    const permId = `perm-${++requestCounter}`;
+    pendingPermissionResponseId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: pendingPermissionResponseId, method: 'session/request_permission', params: {
+      requestId: permId,
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: `tc-${requestCounter}`,
+        title: 'Remove file outside workspace',
+        kind: 'bash',
+        rawInput: { command: 'rm.exe D:/outside/victim.txt' },
+      },
+      options: [
+        { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    }});
     pendingGates.push('permission');
   }
 
