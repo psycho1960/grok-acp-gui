@@ -28,7 +28,7 @@ describe("GAG-009 permission and Plan UI", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.text()).toContain("将修改工作区");
     expect(wrapper.text()).toContain("src/app.ts");
-    expect(document.activeElement?.textContent).toContain("Reject");
+    expect(document.activeElement?.textContent).toContain("拒绝");
     wrapper.unmount();
   });
 
@@ -125,7 +125,7 @@ describe("GAG-009 permission and Plan UI", () => {
     });
     (document.activeElement as HTMLElement | null)?.blur();
     window.dispatchEvent(new KeyboardEvent("keydown", { key: ".", ctrlKey: true }));
-    expect(document.activeElement?.textContent).toContain("Reject");
+    expect(document.activeElement?.textContent).toContain("拒绝");
     wrapper.unmount();
   });
 });

@@ -119,6 +119,7 @@ describe("DesktopCommand round-trip", () => {
       "permission.resolve",
       "plan.resolve",
       "artifact.import",
+      "artifact.import.blob",
       "artifact.save",
       "workspace.inspect",
       "worktree.adopt",
@@ -130,9 +131,32 @@ describe("DesktopCommand round-trip", () => {
       "recovery.restore",
       "recovery.delete",
     ];
-    expect(allTypes).toHaveLength(24);
+    expect(allTypes).toHaveLength(25);
     // No duplicates
-    expect(new Set(allTypes).size).toBe(24);
+    expect(new Set(allTypes).size).toBe(25);
+  });
+
+  it("parses artifact.import.blob with base64 clipboard images", () => {
+    const cmd = {
+      type: "artifact.import.blob",
+      payload: {
+        taskId: "task-1" as TaskId,
+        blobs: [{ displayName: "截图.png", base64Data: "iVBORw0KGgo=" }],
+      },
+    } satisfies DesktopCommand;
+    expect(cmd.type).toBe("artifact.import.blob");
+    expect(cmd.payload.blobs[0].displayName).toBe("截图.png");
+  });
+
+  it("parses session.configure settings", () => {
+    const cmd = {
+      type: "session.configure",
+      payload: {
+        taskId: "task-1" as TaskId,
+        settings: { model: "deepseek", reasoning: "max" },
+      },
+    } satisfies DesktopCommand;
+    expect(cmd.payload.settings.model).toBe("deepseek");
   });
 });
 
@@ -159,8 +183,29 @@ describe("DesktopEvent round-trip", () => {
 
   it("all event type constants are defined", () => {
     const eventTypes = Object.values(EventTypes);
-    expect(eventTypes).toHaveLength(11);
-    expect(new Set(eventTypes).size).toBe(11);
+    expect(eventTypes).toHaveLength(12);
+    expect(new Set(eventTypes).size).toBe(12);
+  });
+
+  it("session.commands.updated event mirrors the Rust SlashCommandInfo DTO", () => {
+    const ev: TypedDesktopEvent = {
+      type: EventTypes.SESSION_COMMANDS_UPDATED,
+      taskId: "task-1" as TaskId,
+      sessionId: "sess-1" as SessionId,
+      seq: 3,
+      timestamp: "2026-01-01T00:00:00Z",
+      payload: {
+        commands: [
+          { name: "init", description: "初始化一个新项目", acceptsInput: false },
+          { name: "plan", description: "为变更制定计划", acceptsInput: true },
+        ],
+      },
+    };
+    expect(ev.type).toBe("session.commands.updated");
+    const commands = ev.payload.commands;
+    expect(commands[0].name).toBe("init");
+    expect(commands[0].acceptsInput).toBe(false);
+    expect(commands[1].acceptsInput).toBe(true);
   });
 
   it("all error code constants are defined", () => {

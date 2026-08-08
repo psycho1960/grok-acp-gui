@@ -337,7 +337,7 @@ describe("GAG-007 CreateTaskDialog model reasoning", () => {
 
     await model.get("select").setValue("deep");
     expect((reasoning.get("select").element as HTMLSelectElement).value).toBe("max");
-    expect(reasoning.get("select").text()).toContain("Max");
+    expect(reasoning.get("select").text()).toContain("最高");
     wrapper.unmount();
   });
 });

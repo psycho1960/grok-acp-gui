@@ -31,7 +31,7 @@ test.describe("GAG-007 first-use closed loop (shell)", () => {
     await expect(page.getByTestId("topbar-workspace")).toContainText("D:/work/demo-app");
     await expect(page.getByText("No workspace selected")).toHaveCount(0);
     await expect(page.getByTestId("create-task-form")).toBeVisible();
-    await expect(page.getByTestId("create-task-model").locator("select")).toContainText("Grok");
+    await expect(page.getByTestId("create-task-model").locator("select")).toContainText("grok-4.5");
     await page
       .getByTestId("create-task-prompt")
       .locator("textarea")
