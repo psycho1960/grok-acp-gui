@@ -10,6 +10,7 @@
 //   - "crash-after-prompt": exits after accepting the first prompt
 //   - "bad-frame":  writes a non-JSON line to stdout
 //   - "stderr-flood": writes thousands of lines to stderr
+//   - "set-mode-error": rejects every session/set_mode request
 //   - "unknown-method": responds to initialize but sends unknown notifications
 //   - "permission": sends a requestPermission after the first prompt
 //   - "plan":       sends an updatePlan after the first prompt
@@ -165,6 +166,10 @@ function handleSetMode(id, params) {
   const allowed = new Set(['default', 'plan', 'code', 'ask']);
   if (params?.sessionId !== activeSessionId || !allowed.has(params?.modeId)) {
     sendError(id, -32602, 'sessionId and an advertised modeId are required');
+    return;
+  }
+  if (SCENARIO === 'set-mode-error') {
+    sendError(id, -32000, 'mode change rejected by fake agent');
     return;
   }
   activeMode = params.modeId;

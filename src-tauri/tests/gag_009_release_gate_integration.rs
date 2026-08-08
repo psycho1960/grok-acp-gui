@@ -1115,6 +1115,62 @@ async fn p1_plan_mode_is_set_from_session_new_before_first_prompt() {
 }
 
 #[tokio::test]
+async fn p1_agent_mode_maps_to_default_acp_mode_before_prompt() {
+    let env = setup(FakeScenario::Normal, "agent", Duration::from_secs(300)).await;
+    boot_and_prompt_with_mode(&env, "agent").await;
+
+    wait_for(|| {
+        outbound_requests(&env)
+            .iter()
+            .position(|request| request["method"] == "session/prompt")
+    })
+    .await;
+    let requests = outbound_requests(&env);
+    assert!(requests.iter().any(|request| {
+        request["method"] == "session/set_mode" && request["params"]["modeId"] == "default"
+    }));
+    assert!(requests
+        .iter()
+        .any(|request| request["method"] == "session/prompt"));
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn p1_plan_prompt_waits_for_successful_mode_selection() {
+    let env = setup(FakeScenario::SetModeError, "plan", Duration::from_secs(300)).await;
+    env.task_runtime
+        .enqueue_task(env.task_id.clone(), env.session_id.clone())
+        .await
+        .expect("enqueue");
+    env.task_runtime
+        .start_session(env.task_id.clone(), env.session_id.clone())
+        .await
+        .expect("start session");
+
+    let error = env
+        .agent_runtime
+        .send(
+            env.session_id.clone(),
+            ClientRequest::Prompt(PromptRequest {
+                message: "make a plan".into(),
+                attachments: vec![],
+                mode: Some("plan".into()),
+                model: None,
+                reasoning: None,
+            }),
+        )
+        .await
+        .expect_err("a rejected mode change must reject the Plan prompt");
+    assert_eq!(error.code, codes::ACP_REQUEST_FAILED);
+    assert!(!outbound_requests(&env)
+        .iter()
+        .any(|request| request["method"] == "session/prompt"));
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
 async fn p1_04_two_parallel_tasks_plan_permission_acp_responses_isolated() {
     // B-3: two concurrent tasks each receiving a Plan+permission request
     // must have isolated events, DB state, and ACP responses — neither

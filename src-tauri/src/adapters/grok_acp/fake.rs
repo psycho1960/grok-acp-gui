@@ -39,6 +39,7 @@ pub enum FakeScenario {
     SecretDisplayFields,
     DuplicatePermission,
     DuplicatePlan,
+    SetModeError,
 }
 
 impl FakeScenario {
@@ -61,6 +62,7 @@ impl FakeScenario {
             FakeScenario::SecretDisplayFields => "secret-display-fields",
             FakeScenario::DuplicatePermission => "duplicate-permission",
             FakeScenario::DuplicatePlan => "duplicate-plan",
+            FakeScenario::SetModeError => "set-mode-error",
         }
     }
 }
