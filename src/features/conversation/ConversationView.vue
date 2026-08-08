@@ -10,6 +10,7 @@ import Composer from "./Composer.vue";
 import ConversationHeader from "./ConversationHeader.vue";
 import TimelineItemView from "./TimelineItemView.vue";
 import TimelineVirtualList from "./TimelineVirtualList.vue";
+import ArtifactPanel from "./ArtifactPanel.vue";
 import type { SessionTimelineSnapshot } from "./types";
 
 const props = defineProps<{
@@ -22,6 +23,7 @@ const props = defineProps<{
 
 const store = useConversationStore();
 const listRef = ref<InstanceType<typeof TimelineVirtualList> | null>(null);
+const artifactPanel = ref<InstanceType<typeof ArtifactPanel> | null>(null);
 
 const sessionKey = computed(
   () => String(store.sessionId ?? store.taskId ?? props.taskId ?? "none"),
@@ -115,6 +117,10 @@ async function onAddAttachments(): Promise<void> {
 async function onDropAttachments(paths: string[]): Promise<void> {
   await store.importAttachmentPaths(paths);
 }
+
+function onOpenArtifact(artifactId: string): void {
+  artifactPanel.value?.openArtifact(artifactId);
+}
 </script>
 
 <template>
@@ -130,40 +136,49 @@ async function onDropAttachments(paths: string[]): Promise<void> {
       @resume="onResume"
     />
 
-    <div class="body">
-      <div v-if="store.loadState === 'loading'" class="state-pad">
-        <Skeleton />
-        <Skeleton />
+    <div class="content-layout">
+      <div class="body">
+        <div v-if="store.loadState === 'loading'" class="state-pad">
+          <Skeleton />
+          <Skeleton />
+        </div>
+        <ErrorState
+          v-else-if="store.loadState === 'error'"
+          title="会话加载失败"
+          :detail="store.errorMessage ?? '未知错误'"
+        />
+        <EmptyState
+          v-else-if="store.items.length === 0"
+          title="还没有消息"
+          detail="在下方输入并发送，开始与 Agent 对话。"
+        />
+        <TimelineVirtualList
+          v-else
+          ref="listRef"
+          :items="store.items"
+          :session-key="sessionKey"
+          :focus-seq="props.focusSeq ?? store.focusEventSeq"
+          :item-height="128"
+        >
+          <template #default="{ item }">
+            <TimelineItemView
+              :item="item"
+              :focused="item.id === focusedId"
+              @toggle-tool="store.toggleTool"
+              @toggle-thinking="store.toggleThinking"
+              @resolve-permission="store.resolvePermission"
+              @resolve-plan="store.resolvePlan"
+              @open-artifact="onOpenArtifact"
+            />
+          </template>
+        </TimelineVirtualList>
       </div>
-      <ErrorState
-        v-else-if="store.loadState === 'error'"
-        title="会话加载失败"
-        :detail="store.errorMessage ?? '未知错误'"
+      <ArtifactPanel
+        ref="artifactPanel"
+        :bridge="props.bridge"
+        :task-id="store.taskId"
+        :refresh-key="store.artifactRevision"
       />
-      <EmptyState
-        v-else-if="store.items.length === 0"
-        title="还没有消息"
-        detail="在下方输入并发送，开始与 Agent 对话。"
-      />
-      <TimelineVirtualList
-        v-else
-        ref="listRef"
-        :items="store.items"
-        :session-key="sessionKey"
-        :focus-seq="props.focusSeq ?? store.focusEventSeq"
-        :item-height="128"
-      >
-        <template #default="{ item }">
-          <TimelineItemView
-            :item="item"
-            :focused="item.id === focusedId"
-            @toggle-tool="store.toggleTool"
-            @toggle-thinking="store.toggleThinking"
-            @resolve-permission="store.resolvePermission"
-            @resolve-plan="store.resolvePlan"
-          />
-        </template>
-      </TimelineVirtualList>
     </div>
 
     <Composer
@@ -191,6 +206,7 @@ async function onDropAttachments(paths: string[]): Promise<void> {
   min-height: 0;
   background: var(--ctp-base);
 }
+.content-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); min-height: 0; overflow: hidden; }
 .body {
   min-height: 0;
   overflow: hidden;
@@ -200,4 +216,5 @@ async function onDropAttachments(paths: string[]): Promise<void> {
   gap: var(--space-2);
   padding: var(--space-4);
 }
+@media (max-width: 860px) { .content-layout { grid-template-columns: 1fr; grid-template-rows: minmax(220px, 1fr) auto; } }
 </style>

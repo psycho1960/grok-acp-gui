@@ -17,6 +17,7 @@ const emit = defineEmits<{
   toggleThinking: [id: string];
   resolvePermission: [itemId: string, optionId: string];
   resolvePlan: [itemId: string, optionId: string];
+  openArtifact: [artifactId: string];
 }>();
 
 function formatTime(iso: string): string {
@@ -114,7 +115,7 @@ function formatTime(iso: string): string {
     </template>
 
     <template v-else-if="item.kind === 'artifact'">
-      <ArtifactSlot :slot-data="item.slot" />
+      <ArtifactSlot :slot-data="item.slot" @open="emit('openArtifact', $event)" />
     </template>
 
     <template v-else-if="item.kind === 'error'">

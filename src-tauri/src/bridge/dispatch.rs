@@ -351,6 +351,9 @@ async fn dispatch(
         DesktopCommand::PlanResolve(payload) => plan_resolve(task_runtime, payload).await,
 
         DesktopCommand::ArtifactImport(payload) => artifact_import(repo, payload),
+        DesktopCommand::ArtifactList(payload) => artifact_list(repo, payload),
+        DesktopCommand::ArtifactPreview(payload) => artifact_preview(repo, payload),
+        DesktopCommand::ArtifactReveal(payload) => artifact_reveal(repo, payload),
         DesktopCommand::ArtifactSave(_) => not_implemented("artifact.save"),
 
         DesktopCommand::WorkspaceInspect(payload) => workspace_inspect(payload),
@@ -377,6 +380,46 @@ fn artifact_import(
 
     match ManagedArtifactService::new().import_images(repo, &payload.task_id, &payload.paths) {
         Ok(artifacts) => DesktopResult::ok(serde_json::json!({ "artifacts": artifacts })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn artifact_list(
+    repo: &dyn Repository,
+    payload: &super::commands::ArtifactListPayload,
+) -> DesktopResult {
+    use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
+    match ManagedArtifactService::new().list(repo, &payload.task_id) {
+        Ok(artifacts) => DesktopResult::ok(serde_json::json!({ "artifacts": artifacts })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn artifact_preview(
+    repo: &dyn Repository,
+    payload: &super::commands::ArtifactIdPayload,
+) -> DesktopResult {
+    use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
+    match ManagedArtifactService::new().resolve_images(
+        repo,
+        &payload.task_id,
+        std::slice::from_ref(&payload.artifact_id),
+    ) {
+        Ok(images) => DesktopResult::ok(serde_json::json!({
+            "url": format!("http://grok-artifact.localhost/{}/{}", payload.task_id.0, payload.artifact_id),
+            "artifact": images[0].descriptor,
+        })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn artifact_reveal(
+    repo: &dyn Repository,
+    payload: &super::commands::ArtifactIdPayload,
+) -> DesktopResult {
+    use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
+    match ManagedArtifactService::new().reveal(repo, &payload.task_id, &payload.artifact_id) {
+        Ok(()) => DesktopResult::ok(serde_json::json!({ "revealed": true })),
         Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }
@@ -1165,6 +1208,7 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
                 artifact_id: p.artifact_id,
                 mime_type: p.mime_type,
                 display_name: p.display_name,
+                state: "quarantined".into(),
             };
             Some(
                 super::events::SessionEvent::new(

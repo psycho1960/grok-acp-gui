@@ -453,10 +453,13 @@ fn interpret_session_update(
             let display_name = extract_string_field(params, "displayName")
                 .or_else(|| extract_string_field(params, "name"))
                 .unwrap_or_else(|| "artifact".into());
+            let relative_path = extract_string_field(params, "relativePath")
+                .or_else(|| extract_string_field(params, "path"));
             let event = AgentEvent::ArtifactAnnounced(ArtifactAnnouncedPayload {
                 artifact_id,
                 mime_type,
                 display_name,
+                relative_path,
             });
             let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
@@ -1374,7 +1377,8 @@ mod tests {
                 "type": "artifact",
                 "artifactId": "art-1",
                 "mimeType": "image/png",
-                "displayName": "screenshot.png"
+                "displayName": "screenshot.png",
+                "relativePath": "output/screenshot.png"
             }),
         };
         let mut c = ctx();
@@ -1385,6 +1389,7 @@ mod tests {
                     assert_eq!(a.artifact_id, "art-1");
                     assert_eq!(a.mime_type, "image/png");
                     assert_eq!(a.display_name, "screenshot.png");
+                    assert_eq!(a.relative_path.as_deref(), Some("output/screenshot.png"));
                 }
                 other => panic!("expected ArtifactAnnounced, got {:?}", other),
             },

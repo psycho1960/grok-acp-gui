@@ -7,6 +7,8 @@ import type {
   TaskId,
   TurnSendResult,
   ArtifactImportResult,
+  ArtifactListResult,
+  ArtifactPreviewResult,
   TypedDesktopEvent,
   Unsubscribe,
 } from "../../bridge/types";
@@ -25,6 +27,9 @@ export interface ConversationFacade {
   resumeSession(taskId: TaskId): Promise<DesktopResult>;
   openTask(taskId: TaskId): Promise<DesktopResult>;
   importArtifacts(taskId: TaskId, paths: string[]): Promise<DesktopResult<ArtifactImportResult>>;
+  listArtifacts(taskId: TaskId): Promise<DesktopResult<ArtifactListResult>>;
+  previewArtifact(taskId: TaskId, artifactId: string): Promise<DesktopResult<ArtifactPreviewResult>>;
+  revealArtifact(taskId: TaskId, artifactId: string): Promise<DesktopResult>;
   resolvePermission(payload: import("../../bridge/types").PermissionResolvePayload): Promise<DesktopResult>;
   resolvePlan(payload: import("../../bridge/types").PlanResolvePayload): Promise<DesktopResult>;
   subscribe(
@@ -66,6 +71,18 @@ export function createConversationFacade(
 
     async importArtifacts(taskId, paths) {
       return bridge.execute({ type: "artifact.import", payload: { taskId, paths } }) as Promise<DesktopResult<ArtifactImportResult>>;
+    },
+
+    async listArtifacts(taskId) {
+      return bridge.execute({ type: "artifact.list", payload: { taskId } }) as Promise<DesktopResult<ArtifactListResult>>;
+    },
+
+    async previewArtifact(taskId, artifactId) {
+      return bridge.execute({ type: "artifact.preview", payload: { taskId, artifactId } }) as Promise<DesktopResult<ArtifactPreviewResult>>;
+    },
+
+    async revealArtifact(taskId, artifactId) {
+      return bridge.execute({ type: "artifact.reveal", payload: { taskId, artifactId } });
     },
 
     async resolvePermission(payload) {

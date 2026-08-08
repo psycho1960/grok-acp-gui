@@ -513,6 +513,7 @@ function applyArtifact(
       artifactId: p.artifactId,
       mimeType: p.mimeType,
       displayName: p.displayName,
+      state: p.state ?? "ready",
     },
   };
   return upsertItem(next, item);

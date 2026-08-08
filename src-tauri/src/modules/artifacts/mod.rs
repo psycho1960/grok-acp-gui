@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::bridge::types::TaskId;
@@ -15,6 +16,10 @@ use crate::modules::persistence::Repository;
 pub const MAX_IMAGES_PER_PROMPT: usize = 20;
 pub const MAX_IMAGE_BYTES: u64 = 200 * 1024 * 1024;
 pub const MAX_PREVIEW_PIXELS: u64 = 80_000_000;
+/// Per-task ceiling for expendable cache files. Referenced original artifacts
+/// are never evicted; only interrupted-import temporary files or other
+/// unreferenced cache entries are eligible for least-recently-modified cleanup.
+pub const CACHE_QUOTA_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +52,34 @@ pub trait ArtifactService: Send + Sync {
         task_id: &TaskId,
         artifact_ids: &[String],
     ) -> Result<Vec<ResolvedImage>, DomainError>;
+
+    /// Accept an ACP-announced *relative* workspace path, then copy it through
+    /// the same validation and managed-storage pipeline as a user import.
+    fn register_agent_artifact(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        relative_path: &str,
+    ) -> Result<ArtifactDescriptor, DomainError>;
+
+    fn list(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+    ) -> Result<Vec<ArtifactDescriptor>, DomainError>;
+
+    fn reveal(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        artifact_id: &str,
+    ) -> Result<(), DomainError>;
+
+    fn enforce_cache_quota(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+    ) -> Result<(), DomainError>;
 }
 
 /// Artifacts are deliberately rooted in the task's current workspace, not in
@@ -60,7 +93,7 @@ impl ManagedArtifactService {
         Self
     }
 
-    fn root_for_task(
+    fn workspace_for_task(
         &self,
         repo: &dyn Repository,
         task_id: &TaskId,
@@ -72,12 +105,20 @@ impl ManagedArtifactService {
             .and_then(|binding| binding.cwd)
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(project.path));
-        let base = base.canonicalize().map_err(|_| {
+        base.canonicalize().map_err(|_| {
             DomainError::new(
                 codes::ARTIFACT_CACHE_MISSING,
                 "Task workspace is unavailable",
             )
-        })?;
+        })
+    }
+
+    fn root_for_task(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+    ) -> Result<PathBuf, DomainError> {
+        let base = self.workspace_for_task(repo, task_id)?;
         let root = base.join(".grok-acp-gui").join("artifacts");
         std::fs::create_dir_all(&root).map_err(|_| {
             DomainError::new(
@@ -98,6 +139,42 @@ impl ManagedArtifactService {
             ));
         }
         Ok(root)
+    }
+
+    fn agent_workspace_file(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        relative_path: &str,
+    ) -> Result<PathBuf, DomainError> {
+        let relative = Path::new(relative_path);
+        if relative.is_absolute()
+            || relative_path.is_empty()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(DomainError::new(
+                codes::ARTIFACT_NOT_FOUND,
+                "Agent artifact path is outside the managed workspace",
+            ));
+        }
+        let workspace = self.workspace_for_task(repo, task_id)?;
+        let candidate = workspace.join(relative).canonicalize().map_err(|_| {
+            DomainError::new(codes::ARTIFACT_NOT_FOUND, "Agent artifact is unavailable")
+        })?;
+        if !candidate.starts_with(&workspace) {
+            return Err(DomainError::new(
+                codes::ARTIFACT_NOT_FOUND,
+                "Agent artifact path escaped the managed workspace",
+            ));
+        }
+        Ok(candidate)
     }
 
     fn import_one(
@@ -250,10 +327,12 @@ impl ArtifactService for ManagedArtifactService {
                 "Images total more than 200 MiB",
             ));
         }
-        paths
+        let imported = paths
             .iter()
             .map(|path| self.import_one(repo, task_id, path))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        self.enforce_cache_quota(repo, task_id)?;
+        Ok(imported)
     }
 
     fn resolve_images(
@@ -319,6 +398,142 @@ impl ArtifactService for ManagedArtifactService {
             })
             .collect()
     }
+
+    fn register_agent_artifact(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        relative_path: &str,
+    ) -> Result<ArtifactDescriptor, DomainError> {
+        let source = self.agent_workspace_file(repo, task_id, relative_path)?;
+        self.import_one(repo, task_id, &source.to_string_lossy())
+    }
+
+    fn list(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+    ) -> Result<Vec<ArtifactDescriptor>, DomainError> {
+        let root = self.root_for_task(repo, task_id)?;
+        repo.list_attachments_by_task(&task_id.0)?
+            .into_iter()
+            .map(|record| {
+                let mut dto = descriptor(&record);
+                let valid = PathBuf::from(&record.cache_path)
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|path| path.starts_with(&root))
+                    && std::fs::read(&record.cache_path).ok().is_some_and(|bytes| {
+                        bytes.len() as u64 == record.bytes
+                            && format!("{:x}", Sha256::digest(bytes)) == record.sha256
+                    });
+                if !valid {
+                    dto.state = "missing".into();
+                    dto.preview_capability = "none".into();
+                }
+                Ok(dto)
+            })
+            .collect()
+    }
+
+    fn reveal(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        artifact_id: &str,
+    ) -> Result<(), DomainError> {
+        self.resolve_images(repo, task_id, &[artifact_id.to_owned()])?;
+        let record = repo.get_attachment(artifact_id)?;
+        std::process::Command::new("explorer.exe")
+            .arg("/select,")
+            .arg(&record.cache_path)
+            .spawn()
+            .map_err(|_| {
+                DomainError::new(
+                    codes::ARTIFACT_NOT_FOUND,
+                    "Unable to reveal managed artifact",
+                )
+            })?;
+        Ok(())
+    }
+
+    fn enforce_cache_quota(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+    ) -> Result<(), DomainError> {
+        let root = self.root_for_task(repo, task_id)?;
+        let protected: HashSet<PathBuf> = repo
+            .list_attachments_by_task(&task_id.0)?
+            .into_iter()
+            .filter_map(|record| PathBuf::from(record.cache_path).canonicalize().ok())
+            .collect();
+        let mut files = Vec::new();
+        collect_files(&root, &mut files)?;
+        let mut total = files.iter().map(|(_, bytes, _)| *bytes).sum::<u64>();
+        if total <= CACHE_QUOTA_BYTES {
+            return Ok(());
+        }
+        files.sort_by_key(|(_, _, modified)| *modified);
+        for (path, bytes, _) in files {
+            if total <= CACHE_QUOTA_BYTES {
+                break;
+            }
+            if protected.contains(&path) {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(bytes);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn collect_files(
+    directory: &Path,
+    output: &mut Vec<(PathBuf, u64, std::time::SystemTime)>,
+) -> Result<(), DomainError> {
+    for entry in std::fs::read_dir(directory).map_err(|_| {
+        DomainError::new(
+            codes::ARTIFACT_CACHE_MISSING,
+            "Unable to scan managed artifact storage",
+        )
+    })? {
+        let entry = entry.map_err(|_| {
+            DomainError::new(
+                codes::ARTIFACT_CACHE_MISSING,
+                "Unable to inspect managed artifact storage",
+            )
+        })?;
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|_| {
+            DomainError::new(
+                codes::ARTIFACT_CACHE_MISSING,
+                "Unable to inspect managed artifact storage",
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_files(&entry.path(), output)?;
+        } else if metadata.is_file() {
+            let path = entry.path().canonicalize().map_err(|_| {
+                DomainError::new(
+                    codes::ARTIFACT_CACHE_MISSING,
+                    "Managed artifact cache is unavailable",
+                )
+            })?;
+            output.push((
+                path,
+                metadata.len(),
+                metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn descriptor(record: &AttachmentRecord) -> ArtifactDescriptor {

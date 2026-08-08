@@ -48,6 +48,7 @@ export const useConversationStore = defineStore("conversation", () => {
   const sendPending = ref(false);
   const attachmentPending = ref(false);
   const attachments = ref<ComposerAttachment[]>([]);
+  const artifactRevision = ref(0);
   const cancelPending = ref(false);
   const bridgeOnline = ref(true);
   const focusEventSeq = ref<number | null>(null);
@@ -183,6 +184,7 @@ export const useConversationStore = defineStore("conversation", () => {
         bridgeOnline.value = true;
       }
     }
+    if (event.type === "artifact.available") artifactRevision.value += 1;
     scheduleDelta(event);
   }
 
@@ -336,6 +338,7 @@ export const useConversationStore = defineStore("conversation", () => {
       const indexed = new Map(attachments.value.map((item) => [item.artifactId, item]));
       for (const item of imported as ArtifactDescriptor[]) indexed.set(item.artifactId, item);
       attachments.value = Array.from(indexed.values());
+      artifactRevision.value += 1;
       return imported.length > 0;
     } catch (error) {
       sendError.value = error instanceof Error ? error.message : "图片导入失败";
@@ -584,6 +587,7 @@ export const useConversationStore = defineStore("conversation", () => {
     sendPending,
     attachmentPending,
     attachments,
+    artifactRevision,
     cancelPending,
     bridgeOnline,
     focusEventSeq,

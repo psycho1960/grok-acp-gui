@@ -104,6 +104,7 @@ export interface ArtifactSlotView {
   artifactId: string;
   mimeType: string;
   displayName: string;
+  state?: "ready" | "quarantined" | "missing" | string;
 }
 
 export interface TimelineItemBase {

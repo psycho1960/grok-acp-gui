@@ -15,6 +15,7 @@ pub mod adapters {
 
 use crate::adapters::grok_acp::GrokAcpAdapter;
 use crate::modules::agent_runtime::{AgentRuntime, AgentRuntimeImpl, RuntimeConfig};
+use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::{TaskRuntime, TaskRuntimeImpl};
 use bridge::dispatch::{self as br_dispatch, DesktopResult};
@@ -83,8 +84,64 @@ fn execute(state: tauri::State<'_, AppState>, command: serde_json::Value) -> Des
     })
 }
 
+/// The renderer can only request an already-indexed task artifact through this
+/// protocol.  It never receives a filesystem path or a `file:` URL, and the
+/// service repeats owner/root/hash validation before any bytes are returned.
+fn serve_artifact_protocol(
+    app_handle: &AppHandle,
+    request_path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    let not_found = || {
+        tauri::http::Response::builder()
+            .status(404)
+            .header("Cache-Control", "no-store")
+            .body(Vec::new())
+            .expect("static artifact response")
+    };
+    let Some((task_id, artifact_id)) = protocol_artifact_ids(request_path) else {
+        return not_found();
+    };
+    let state = app_handle.state::<AppState>();
+    let images = match ManagedArtifactService::new().resolve_images(
+        state.repo.as_ref(),
+        &bridge::types::TaskId::new(task_id.to_owned()),
+        &[artifact_id.to_owned()],
+    ) {
+        Ok(images) if images.len() == 1 => images,
+        _ => return not_found(),
+    };
+    let image = &images[0];
+    tauri::http::Response::builder()
+        .status(200)
+        .header("Content-Type", image.descriptor.mime_type.as_str())
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "no-store")
+        .body(image.bytes.clone())
+        .expect("static artifact response")
+}
+
+fn protocol_artifact_ids(path: &str) -> Option<(&str, &str)> {
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() != 2 {
+        return None;
+    }
+    let safe_id = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    };
+    (safe_id(segments[0]) && safe_id(segments[1])).then_some((segments[0], segments[1]))
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
+        .register_uri_scheme_protocol("grok-artifact", |context, request| {
+            serve_artifact_protocol(context.app_handle(), request.uri().path())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
@@ -203,4 +260,20 @@ fn spawn_event_forwarder(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::protocol_artifact_ids;
+
+    #[test]
+    fn artifact_protocol_accepts_only_opaque_ids() {
+        assert_eq!(
+            protocol_artifact_ids("/task-1/artifact_2"),
+            Some(("task-1", "artifact_2"))
+        );
+        assert!(protocol_artifact_ids("/task-1/../secret").is_none());
+        assert!(protocol_artifact_ids("/task-1/%2e%2e").is_none());
+        assert!(protocol_artifact_ids("/task-1/artifact-2/extra").is_none());
+    }
 }

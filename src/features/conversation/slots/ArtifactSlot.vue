@@ -2,7 +2,8 @@
 import Badge from "../../../shared/ui/Badge.vue";
 import type { ArtifactSlotView } from "../types";
 
-defineProps<{ slotData: ArtifactSlotView }>();
+const props = defineProps<{ slotData: ArtifactSlotView }>();
+const emit = defineEmits<{ open: [artifactId: string] }>();
 </script>
 
 <template>
@@ -16,7 +17,8 @@ defineProps<{ slotData: ArtifactSlotView }>();
       <span class="name">{{ slotData.displayName }}</span>
     </header>
     <p class="meta">{{ slotData.mimeType }} · {{ slotData.artifactId }}</p>
-    <p class="hint">预览与保存由 GAG-010 实现。</p>
+    <p v-if="slotData.state !== 'ready'" class="hint warning">该 Artifact 已隔离或不可用，不能预览。</p>
+    <button v-else type="button" class="open" @click="emit('open', props.slotData.artifactId)">在右侧查看</button>
   </section>
 </template>
 
@@ -40,4 +42,6 @@ header {
   color: var(--ctp-subtext0);
   font-size: var(--font-small);
 }
+.warning { color: var(--ctp-red); }
+.open { justify-self: start; min-height: var(--control-min-size); padding: 0 var(--space-2); color: var(--ctp-text); background: var(--ctp-surface0); border: 1px solid var(--ctp-surface1); border-radius: var(--radius-control); cursor: pointer; }
 </style>
