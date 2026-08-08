@@ -6,6 +6,7 @@ import Skeleton from "../../shared/ui/Skeleton.vue";
 import type { DesktopBridge, TaskId } from "../../bridge/types";
 import { pickImages } from "../../bridge/image-picker";
 import { subscribeImageDrops } from "../../bridge/image-drop";
+import { imageFileToBlobInput } from "./clipboard-images";
 import { useConversationStore } from "./conversation-store";
 import Composer from "./Composer.vue";
 import ConversationHeader from "./ConversationHeader.vue";
@@ -133,6 +134,22 @@ async function onAddAttachments(): Promise<void> {
   else await store.importAttachmentPaths(result.paths);
 }
 
+async function onPasteImages(files: File[]): Promise<void> {
+  const images = files.map((file) => ({
+    file,
+    displayName: file.name.trim() || `剪贴板图片.${file.type.split("/")[1] ?? "png"}`,
+  }));
+  try {
+    const blobs: import("../../bridge/types").ArtifactBlobInput[] = [];
+    for (const image of images) {
+      blobs.push(await imageFileToBlobInput(image));
+    }
+    await store.importAttachmentBlobs(blobs);
+  } catch (error) {
+    store.sendError = error instanceof Error ? error.message : "剪贴板图片导入失败";
+  }
+}
+
 function isInsideComposer(clientX: number, clientY: number): boolean {
   const bounds = composerRegion.value?.getBoundingClientRect();
   return Boolean(
@@ -166,9 +183,15 @@ function onOpenArtifact(artifactId: string): void {
       :attempt="store.attempt"
       :can-cancel="store.composerCapabilities.canCancel"
       :needs-refresh="store.needsRefresh"
+      :models="store.models"
+      :selected-model="store.selectedModel"
+      :selected-reasoning="store.selectedReasoning"
+      :settings-disabled="store.sendPending"
       @cancel="onCancel"
       @refresh="props.taskId && store.openTask(props.taskId as TaskId)"
       @resume="onResume"
+      @update:model="(model: string | null) => void store.configureModel(model)"
+      @update:reasoning="(reasoning) => void store.configureReasoning(reasoning)"
     />
 
     <div class="content-layout">
@@ -185,7 +208,7 @@ function onOpenArtifact(artifactId: string): void {
         <EmptyState
           v-else-if="store.items.length === 0"
           title="还没有消息"
-          detail="在下方输入并发送，开始与 Agent 对话。"
+          detail="在下方输入并发送，开始与智能体对话。"
         />
         <TimelineVirtualList
           v-else
@@ -225,11 +248,13 @@ function onOpenArtifact(artifactId: string): void {
       :attachment-pending="store.attachmentPending"
       :attachments="store.attachments"
       :drop-active="nativeDropActive"
+      :slash-commands="store.slashCommands"
       @update:model-value="store.setDraft"
       @send="onSend"
       @cancel="onCancel"
       @add-attachments="onAddAttachments"
       @drop-attachments="onDropAttachments"
+      @paste-images="onPasteImages"
       @remove-attachment="store.removeAttachment"
     />
   </section>

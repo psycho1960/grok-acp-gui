@@ -3,8 +3,12 @@
 import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import type {
+  ArtifactBlobInput,
   DesktopBridge,
   ArtifactDescriptor,
+  ModelInfo,
+  ReasoningEffort,
+  SlashCommandInfo,
   TaskOpenResult,
   TaskId,
   TypedDesktopEvent,
@@ -39,6 +43,15 @@ import type {
 
 const DELTA_FLUSH_MS = 32;
 
+const REASONING_LEVELS: ReasoningEffort[] = ["low", "medium", "high", "max"];
+
+function normalizeReasoning(value: unknown): ReasoningEffort | null {
+  return typeof value === "string" &&
+    (REASONING_LEVELS as string[]).includes(value)
+    ? (value as ReasoningEffort)
+    : null;
+}
+
 export const useConversationStore = defineStore("conversation", () => {
   const loadState = ref<ConversationLoadState>("idle");
   const errorMessage = ref<string | null>(null);
@@ -54,6 +67,14 @@ export const useConversationStore = defineStore("conversation", () => {
   const focusEventSeq = ref<number | null>(null);
   /** When true, explore read tools are folded. */
   const foldExplores = ref(true);
+  /** Runtime model capabilities (from bootstrap capability snapshot). */
+  const models = ref<ModelInfo[]>([]);
+  /** Slash commands discovered from ACP `available_commands`. */
+  const slashCommands = ref<SlashCommandInfo[]>([]);
+  /** Per-task model selection persisted via session.configure. */
+  const selectedModel = ref<string | null>(null);
+  /** Per-task reasoning effort selection persisted via session.configure. */
+  const selectedReasoning = ref<ReasoningEffort | null>(null);
 
   let facade: ConversationFacade | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -185,6 +206,10 @@ export const useConversationStore = defineStore("conversation", () => {
       }
     }
     if (event.type === "artifact.available") artifactRevision.value += 1;
+    if (event.type === "session.commands.updated") {
+      const commands = event.payload.commands;
+      if (Array.isArray(commands)) slashCommands.value = commands;
+    }
     scheduleDelta(event);
   }
 
@@ -205,6 +230,22 @@ export const useConversationStore = defineStore("conversation", () => {
         }
         handleDesktopEvent(evt.event);
       });
+      // Load runtime capabilities (models + slash commands). Failures only
+      // degrade to empty lists; the conversation itself stays usable.
+      try {
+        const snapshot = await facade.bootstrap();
+        models.value = Array.isArray(snapshot.capabilities?.models)
+          ? snapshot.capabilities.models
+          : [];
+        slashCommands.value = Array.isArray(snapshot.capabilities?.slashCommands)
+          ? snapshot.capabilities.slashCommands
+          : [];
+        if (snapshot.capabilities?.modelState?.currentModelId) {
+          selectedModel.value = snapshot.capabilities.modelState.currentModelId;
+        }
+      } catch {
+        // non-fatal
+      }
       bridgeOnline.value = true;
     } catch (error) {
       bridgeOnline.value = false;
@@ -227,6 +268,8 @@ export const useConversationStore = defineStore("conversation", () => {
       unsubscribe = null;
     }
     facade = null;
+    selectedModel.value = null;
+    selectedReasoning.value = null;
   }
 
   function commitSnapshot(snapshot: SessionTimelineSnapshot): void {
@@ -238,6 +281,10 @@ export const useConversationStore = defineStore("conversation", () => {
     sendError.value = null;
     loadState.value = "ready";
     errorMessage.value = null;
+    if (snapshot.model !== undefined) selectedModel.value = snapshot.model ?? null;
+    if (snapshot.reasoning !== undefined) {
+      selectedReasoning.value = normalizeReasoning(snapshot.reasoning);
+    }
   }
 
   function openFromSnapshot(snapshot: SessionTimelineSnapshot): void {
@@ -286,6 +333,10 @@ export const useConversationStore = defineStore("conversation", () => {
                   data.status === "conflicted"
                 ? "error"
                 : "idle";
+        if (data.model !== undefined) selectedModel.value = data.model ?? null;
+        if (data.reasoning !== undefined) {
+          selectedReasoning.value = normalizeReasoning(data.reasoning);
+        }
         commitSnapshot({
           taskId: data.taskId,
           sessionId: data.sessionId,
@@ -294,8 +345,14 @@ export const useConversationStore = defineStore("conversation", () => {
           cursor,
           events: data.events,
           attempt: data.attempt,
+          model: data.model,
+          reasoning: data.reasoning,
         });
       } else if (data?.title) {
+        if (data.model !== undefined) selectedModel.value = data.model ?? null;
+        if (data.reasoning !== undefined) {
+          selectedReasoning.value = normalizeReasoning(data.reasoning);
+        }
         commit({
           ...timeline.value,
           title: data.title,
@@ -335,10 +392,7 @@ export const useConversationStore = defineStore("conversation", () => {
       const result = await facade.importArtifacts(timeline.value.taskId, paths);
       if (result.success === "false") throw new Error(result.error.message);
       const imported = result.data?.artifacts ?? [];
-      const indexed = new Map(attachments.value.map((item) => [item.artifactId, item]));
-      for (const item of imported as ArtifactDescriptor[]) indexed.set(item.artifactId, item);
-      attachments.value = Array.from(indexed.values());
-      artifactRevision.value += 1;
+      mergeImported(imported);
       return imported.length > 0;
     } catch (error) {
       sendError.value = error instanceof Error ? error.message : "图片导入失败";
@@ -350,6 +404,83 @@ export const useConversationStore = defineStore("conversation", () => {
 
   function removeAttachment(artifactId: string): void {
     if (!sendPending.value) attachments.value = attachments.value.filter((item) => item.artifactId !== artifactId);
+  }
+
+  /** Merge imported descriptors into the pending attachment list. */
+  function mergeImported(imported: ArtifactDescriptor[]): void {
+    const indexed = new Map(attachments.value.map((item) => [item.artifactId, item]));
+    for (const item of imported) indexed.set(item.artifactId, item);
+    attachments.value = Array.from(indexed.values());
+    artifactRevision.value += 1;
+  }
+
+  /**
+   * Import clipboard image blobs (screenshots pasted without a filesystem
+   * path) through the same managed-artifact pipeline as file imports.
+   */
+  async function importAttachmentBlobs(blobs: ArtifactBlobInput[]): Promise<boolean> {
+    if (!blobs.length) return false;
+    if (!timeline.value.taskId || !facade) {
+      sendError.value = "请先打开任务，再粘贴图片";
+      return false;
+    }
+    attachmentPending.value = true;
+    sendError.value = null;
+    try {
+      const result = await facade.importArtifactBlobs(timeline.value.taskId, blobs);
+      if (result.success === "false") throw new Error(result.error.message);
+      const imported = result.data?.artifacts ?? [];
+      if (imported.length === 0) {
+        sendError.value = "图片导入失败：未返回任何附件";
+        return false;
+      }
+      mergeImported(imported);
+      return true;
+    } catch (error) {
+      sendError.value = error instanceof Error ? error.message : "剪贴板图片导入失败";
+      return false;
+    } finally {
+      attachmentPending.value = false;
+    }
+  }
+
+  /**
+   * Persist the model selection for the current task. Every following turn
+   * then carries the new model in its ACP prompt request.
+   */
+  async function configureModel(model: string | null): Promise<boolean> {
+    const previous = selectedModel.value;
+    selectedModel.value = model;
+    if (!timeline.value.taskId || !facade) return false;
+    try {
+      const result = await facade.configureSession(timeline.value.taskId, {
+        model,
+      });
+      if (result.success === "false") throw new Error(result.error.message);
+      return true;
+    } catch (error) {
+      selectedModel.value = previous;
+      sendError.value = error instanceof Error ? error.message : "模型切换失败";
+      return false;
+    }
+  }
+
+  /** Persist the reasoning effort selection for the current task. */
+  async function configureReasoning(reasoning: ReasoningEffort): Promise<boolean> {
+    const previous = selectedReasoning.value;
+    selectedReasoning.value = reasoning;
+    if (!timeline.value.taskId || !facade) return false;
+    try {
+      const result = await facade.configureSession(timeline.value.taskId, {
+        reasoning,
+      });
+      if (result.success === "false") throw new Error(result.error.message);
+      return true;
+    } catch (error) {
+      selectedReasoning.value = previous;
+      sendError.value = error instanceof Error ? error.message : "推理强度切换失败";
+      return false;
+    }
   }
 
   async function sendMessage(): Promise<boolean> {
@@ -592,6 +723,10 @@ export const useConversationStore = defineStore("conversation", () => {
     bridgeOnline,
     focusEventSeq,
     foldExplores,
+    models,
+    slashCommands,
+    selectedModel,
+    selectedReasoning,
     composerCapabilities,
     isRunning,
     attach,
@@ -600,6 +735,9 @@ export const useConversationStore = defineStore("conversation", () => {
     openTask,
     setDraft,
     importAttachmentPaths,
+    importAttachmentBlobs,
+    configureModel,
+    configureReasoning,
     removeAttachment,
     sendMessage,
     cancelTurn,

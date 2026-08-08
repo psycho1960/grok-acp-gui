@@ -74,7 +74,7 @@ const title = computed(
       </section>
 
       <section class="detail-section">
-        <h3>会话 attempt</h3>
+        <h3>会话尝试</h3>
         <p v-if="task.sessionId">
           会话 {{ task.sessionId }}
           <span v-if="task.sessionState">（{{ task.sessionState }}）</span>

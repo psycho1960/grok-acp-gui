@@ -31,6 +31,25 @@ function formatTime(iso: string): string {
     return "";
   }
 }
+
+/** 中文类型标签：时间线徽章必须是中文（全中文界面要求）。 */
+const KIND_LABELS: Record<string, string> = {
+  user: "用户",
+  assistant: "助手",
+  thinking: "思考",
+  tool: "工具",
+  activity: "活动",
+  error: "错误",
+  system: "系统",
+  permission: "权限",
+  plan: "计划",
+  artifact: "制品",
+  unknown: "未知",
+};
+
+function kindLabel(kind: string): string {
+  return KIND_LABELS[kind] ?? kind;
+}
 </script>
 
 <template>
@@ -55,7 +74,7 @@ function formatTime(iso: string): string {
                 : 'neutral'
         "
       >
-        {{ item.kind }}
+        {{ kindLabel(item.kind) }}
       </Badge>
       <time :datetime="item.timestamp">{{ formatTime(item.timestamp) }}</time>
       <span class="seq">#{{ item.seq }}</span>

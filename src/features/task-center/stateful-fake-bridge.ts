@@ -43,13 +43,20 @@ export function createStatefulTaskCenterBridge(
       ready: base.ready ?? true,
       runtime: base.runtime ?? { status: "ready", authenticated: true },
       capabilities: base.capabilities ?? {
-        models: [{ modelId: "grok", name: "Grok" }],
-        modes: [
-          { id: "agent", name: "Agent" },
-          { id: "plan", name: "Plan" },
-          { id: "ask", name: "Ask" },
+        models: [
+          { modelId: "grok-4.5", name: "grok-4.5", reasoningEffort: "high" },
+          { modelId: "deepseek", name: "deepseek (deepseek-v4-pro)", reasoningEffort: "max" },
         ],
-        slashCommands: [],
+        modes: [
+          { id: "agent", name: "智能体" },
+          { id: "plan", name: "计划" },
+          { id: "ask", name: "问答" },
+        ],
+        slashCommands: [
+          { name: "init", description: "初始化一个新项目", acceptsInput: false },
+          { name: "plan", description: "为变更制定计划", acceptsInput: true },
+          { name: "share", description: "分享当前会话", acceptsInput: false },
+        ],
       },
       projects: [...projects],
       activeTasks: [...tasks],
@@ -71,7 +78,7 @@ export function createStatefulTaskCenterBridge(
           success: "false",
           error: fakeError({
             code: "BRIDGE_VALIDATION_FAILED",
-            message: "Directory does not exist or is not accessible",
+            message: "目录不存在或不可访问",
           }),
         };
       }
@@ -80,7 +87,7 @@ export function createStatefulTaskCenterBridge(
           success: "false",
           error: fakeError({
             code: "BRIDGE_VALIDATION_FAILED",
-            message: "Path is not a directory",
+            message: "路径不是目录",
           }),
         };
       }
@@ -103,7 +110,7 @@ export function createStatefulTaskCenterBridge(
           success: "false",
           error: fakeError({
             code: "BRIDGE_VALIDATION_FAILED",
-            message: "Directory does not exist or is not accessible",
+            message: "目录不存在或不可访问",
           }),
         };
       }
@@ -112,7 +119,7 @@ export function createStatefulTaskCenterBridge(
           success: "false",
           error: fakeError({
             code: "BRIDGE_VALIDATION_FAILED",
-            message: "Path is not a directory",
+            message: "路径不是目录",
           }),
         };
       }
@@ -160,7 +167,7 @@ export function createStatefulTaskCenterBridge(
           success: "false",
           error: fakeError({
             code: "PROJECT_NOT_FOUND",
-            message: "Project not found",
+            message: "项目不存在",
           }),
         };
       }
@@ -179,7 +186,7 @@ export function createStatefulTaskCenterBridge(
           success: "false",
           error: fakeError({
             code: "BRIDGE_VALIDATION_FAILED",
-            message: "Task prompt is required",
+            message: "任务目标不能为空",
           }),
         };
       }
@@ -188,7 +195,7 @@ export function createStatefulTaskCenterBridge(
       const task: Task = {
         id,
         projectId: project.id,
-        title: command.payload.title,
+        title: command.payload.title ?? "",
         status: "preparing",
         workspaceKind:
           command.payload.workspaceStrategy === "direct"

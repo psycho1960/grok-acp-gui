@@ -32,6 +32,7 @@ const SESSION_EVENT_TYPES = new Set([
   "plan.updated",
   "changes.updated",
   "artifact.available",
+  "session.commands.updated",
 ]);
 
 /** Runtime guard for the untrusted IPC event envelope. */

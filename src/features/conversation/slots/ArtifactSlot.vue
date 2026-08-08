@@ -10,14 +10,14 @@ const emit = defineEmits<{ open: [artifactId: string] }>();
   <section
     class="artifact-slot surface-card"
     data-testid="artifact-slot"
-    aria-label="Artifact 插槽"
+    aria-label="制品插槽"
   >
     <header>
-      <Badge tone="success">Artifact</Badge>
+      <Badge tone="success">制品</Badge>
       <span class="name">{{ slotData.displayName }}</span>
     </header>
     <p class="meta">{{ slotData.mimeType }} · {{ slotData.artifactId }}</p>
-    <p v-if="slotData.state !== 'ready'" class="hint warning">该 Artifact 已隔离或不可用，不能预览。</p>
+    <p v-if="slotData.state !== 'ready'" class="hint warning">该制品已隔离或不可用，不能预览。</p>
     <button v-else type="button" class="open" @click="emit('open', props.slotData.artifactId)">在右侧查看</button>
   </section>
 </template>

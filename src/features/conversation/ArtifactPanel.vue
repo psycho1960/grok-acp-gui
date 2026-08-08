@@ -81,17 +81,17 @@ defineExpose({ openArtifact, refresh });
 </script>
 
 <template>
-  <aside class="artifact-panel" aria-label="Artifact 面板" data-testid="artifact-panel">
+  <aside class="artifact-panel" aria-label="制品面板" data-testid="artifact-panel">
     <header>
       <div>
-        <h2>Artifacts</h2>
+        <h2>制品</h2>
         <p>受管副本，原始路径不会暴露给页面。</p>
       </div>
       <Button variant="ghost" :disabled="loading" @click="refresh">刷新</Button>
     </header>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
     <p v-else-if="loading" class="empty">正在加载…</p>
-    <p v-else-if="!artifacts.length" class="empty">此任务尚无可用 Artifact。</p>
+    <p v-else-if="!artifacts.length" class="empty">此任务尚无可用制品。</p>
     <ul v-else class="artifact-list">
       <li v-for="artifact in artifacts" :key="artifact.artifactId" class="artifact-card">
         <div class="metadata">

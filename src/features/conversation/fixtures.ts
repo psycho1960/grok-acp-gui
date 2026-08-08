@@ -76,12 +76,12 @@ export function fixturePermission(
     expectedVersion: 1,
     expiresAtEpochSeconds: Math.floor(Date.now() / 1000) + 300,
     options: [
-      { optionId: "allow-once-1", name: "Allow once", kind: "allow_once" },
-      { optionId: "reject-1", name: "Reject", kind: "reject_once" },
+      { optionId: "allow-once-1", name: "允许一次", kind: "allow_once" },
+      { optionId: "reject-1", name: "拒绝", kind: "reject_once" },
     ],
     toolCall: {
       toolCallId: "tc-perm",
-      title: "Run shell",
+      title: "运行命令",
       kind: "execute",
       locations: ["src/app.ts"],
     },
@@ -102,8 +102,8 @@ export function fixturePlan(seq: number, status = "awaiting_approval"): TypedDes
     detail: {
       requestId: `plan-${seq}`,
       correlationId: `corr-plan-${seq}`,
-      summary: "Explore, edit, and test",
-      steps: ["Explore", "Edit", "Test"],
+      summary: "探索、编辑并测试变更",
+      steps: ["探索", "编辑", "测试"],
       version: seq,
       options: [
         { optionId: `revise-${seq}`, name: "继续规划", kind: "request_revision" },
@@ -176,7 +176,7 @@ export function fixtureToolLifecycle(startSeq = 10): TypedDesktopEvent[] {
   return [
     fixtureToolDelta(startSeq, {
       toolCallId: "tc-1",
-      title: "Read file",
+      title: "读取文件",
       kind: "read",
       status: "running",
       inputSummary: "src/main.ts",
@@ -185,17 +185,17 @@ export function fixtureToolLifecycle(startSeq = 10): TypedDesktopEvent[] {
     }),
     fixtureToolDelta(startSeq + 1, {
       toolCallId: "tc-1",
-      title: "Read file",
+      title: "读取文件",
       kind: "read",
       status: "completed",
-      resultSummary: "42 lines",
+      resultSummary: "42 行",
       resultRedacted: false,
       endedAt: ts(12),
       durationMs: 2000,
     }),
     fixtureToolDelta(startSeq + 2, {
       toolCallId: "tc-2",
-      title: "Run tests",
+      title: "运行测试",
       kind: "execute",
       status: "running",
       inputSummary: "npm test",
@@ -205,7 +205,7 @@ export function fixtureToolLifecycle(startSeq = 10): TypedDesktopEvent[] {
     fixtureToolDelta(startSeq + 3, {
       toolCallId: "tc-2",
       status: "failed",
-      resultSummary: "exit 1",
+      resultSummary: "退出码 1",
       exitCode: 1,
       endedAt: ts(15),
       durationMs: 3000,
@@ -217,7 +217,7 @@ export function fixtureToolLifecycle(startSeq = 10): TypedDesktopEvent[] {
 export function fixtureRedactedTool(seq: number): TypedDesktopEvent {
   return fixtureToolDelta(seq, {
     toolCallId: "tc-secret",
-    title: "Shell",
+    title: "命令行",
     kind: "execute",
     status: "completed",
     redacted: true,
@@ -230,10 +230,10 @@ export function fixtureRedactedTool(seq: number): TypedDesktopEvent {
 export function fixtureConversationEvents(): TypedDesktopEvent[] {
   return [
     fixtureTaskState(1, "running"),
-    fixtureActivity(2, "thinking", "Planning approach"),
-    fixtureAssistantDelta(3, "I'll "),
-    fixtureAssistantDelta(4, "inspect the "),
-    fixtureAssistantDelta(5, "module."),
+    fixtureActivity(2, "thinking", "正在规划方案"),
+    fixtureAssistantDelta(3, "我将"),
+    fixtureAssistantDelta(4, "检查"),
+    fixtureAssistantDelta(5, "该模块。"),
     ...fixtureToolLifecycle(6),
     fixturePermission(10),
     fixturePlan(11),
@@ -251,23 +251,23 @@ export function fixtureSessionSnapshot(
   return {
     taskId: FIX_TASK,
     sessionId: FIX_SESSION,
-    title: "Conversation fixture",
+    title: "对话演示",
     status: "running",
     cursor: 5,
     events: [
       fixtureTaskState(1, "running"),
-      fixtureAssistantDelta(2, "Hello from snapshot. "),
-      fixtureAssistantDelta(3, "History frozen."),
+      fixtureAssistantDelta(2, "快照消息："),
+      fixtureAssistantDelta(3, "历史已冻结。"),
       fixtureToolDelta(4, {
         toolCallId: "tc-snap",
-        title: "List dir",
+        title: "列出目录",
         kind: "read",
         status: "completed",
         inputSummary: "src/",
-        resultSummary: "12 files",
+        resultSummary: "12 个文件",
         durationMs: 15,
       }),
-      fixtureActivity(5, "status", "Snapshot complete"),
+      fixtureActivity(5, "status", "快照完成"),
     ],
     attempt: 1,
     ...overrides,
@@ -282,16 +282,16 @@ export function generateManyEvents(count: number): TypedDesktopEvent[] {
       events.push(
         fixtureToolDelta(i, {
           toolCallId: `tc-bulk-${Math.floor(i / 7)}`,
-          title: `Tool ${i}`,
+          title: `工具 ${i}`,
           kind: i % 14 === 0 ? "execute" : "read",
           status: i % 14 === 0 ? "completed" : "running",
           inputSummary: `arg-${i}`,
         }),
       );
     } else if (i % 11 === 0) {
-      events.push(fixtureActivity(i, "heartbeat", `tick ${i}`));
+      events.push(fixtureActivity(i, "heartbeat", `心跳 ${i}`));
     } else {
-      events.push(fixtureAssistantDelta(i, `word${i} `));
+      events.push(fixtureAssistantDelta(i, `词${i} `));
     }
   }
   return events;

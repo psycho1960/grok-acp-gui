@@ -25,6 +25,28 @@ const props = withDefaults(
 );
 
 const conversationEvents = fixtureConversationEvents();
+
+// Persist the per-task selection across reloads (the real backend persists
+// it in SQLite; localStorage simulates that for the browser fixture).
+const MODEL_STORAGE_KEY = "gag010:fixture-model";
+const REASONING_STORAGE_KEY = "gag010:fixture-reasoning";
+function readStoredSelection(key: string, fallback: string | null): string | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return raw === "" ? null : raw;
+  } catch {
+    return fallback;
+  }
+}
+function writeStoredSelection(key: string, value: string | null): void {
+  try {
+    window.localStorage.setItem(key, value ?? "");
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
 const snapshot = props.bulkEvents > 0
   ? fixtureSessionSnapshot({
       cursor: 0,
@@ -33,11 +55,17 @@ const snapshot = props.bulkEvents > 0
       status: "running",
       title: `Perf ${props.bulkEvents}`,
     })
-  : fixtureSessionSnapshot();
+  : fixtureSessionSnapshot({
+      model: readStoredSelection(MODEL_STORAGE_KEY, "grok-4.5"),
+      reasoning: readStoredSelection(REASONING_STORAGE_KEY, "high"),
+    });
 
 const sentMessages: string[] = [];
 let cancelCount = 0;
 let interactiveSeq = snapshot.cursor;
+let configuredModel: string | null = snapshot.model ?? null;
+let configuredReasoning: string | null = snapshot.reasoning ?? null;
+let blobImportCount = 0;
 
 function nextInteractiveSeq(): number {
   interactiveSeq += 1;
@@ -47,9 +75,42 @@ function nextInteractiveSeq(): number {
 const bridge = createFakeDesktopBridge({
   bootstrapSnapshot: createConversationSeedSnapshot(),
   onExecute(command) {
+    if (command.type === "session.configure") {
+      const settings = command.payload.settings ?? {};
+      if (typeof settings.model === "string") {
+        configuredModel = settings.model;
+        writeStoredSelection(MODEL_STORAGE_KEY, configuredModel);
+      }
+      if (typeof settings.reasoning === "string") {
+        configuredReasoning = settings.reasoning;
+        writeStoredSelection(REASONING_STORAGE_KEY, configuredReasoning);
+      }
+      return {
+        success: "true",
+        data: { taskId: command.payload.taskId, model: configuredModel, reasoning: configuredReasoning },
+      };
+    }
+    if (command.type === "artifact.import.blob") {
+      blobImportCount += 1;
+      const blobs = Array.isArray(command.payload.blobs) ? command.payload.blobs : [];
+      return {
+        success: "true",
+        data: {
+          artifacts: blobs.map((blob: { displayName?: string }, index: number) => ({
+            artifactId: `artifact-clip-${blobImportCount}-${index}`,
+            displayName: blob.displayName ?? "剪贴板图片.png",
+            mimeType: "image/png",
+            bytes: 1024,
+            state: "ready",
+            previewCapability: "inline",
+          })),
+        },
+      };
+    }
     if (command.type === "turn.send") {
       sentMessages.push(command.payload.message);
-      // Echo assistant reply for interactive fixture
+      // Echo assistant reply for interactive fixture; include the current
+      // model/reasoning selection so e2e can observe what a turn carried.
       queueMicrotask(() => {
         push({
           type: "task.state",
@@ -69,7 +130,9 @@ const bridge = createFakeDesktopBridge({
           sessionId: "sess-conv-1" as never,
           seq: nextInteractiveSeq(),
           timestamp: new Date().toISOString(),
-          payload: { text: `Echo: ${command.payload.message}` },
+          payload: {
+            text: `回复：${command.payload.message} [model=${configuredModel ?? "-"} reasoning=${configuredReasoning ?? "-"}]`,
+          },
         });
         push({
           type: "task.state",
@@ -113,8 +176,10 @@ const bridge = createFakeDesktopBridge({
         success: "true",
         data: {
           taskId: command.payload.taskId,
-          title: "Conversation fixture",
+          title: "对话演示",
           status: "running",
+          model: configuredModel,
+          reasoning: configuredReasoning,
         },
       };
     }
