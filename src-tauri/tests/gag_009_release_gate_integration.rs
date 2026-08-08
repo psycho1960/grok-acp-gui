@@ -933,6 +933,29 @@ async fn d5_p0_plan_decision_failure_never_sends_approve_to_acp() {
 }
 
 #[tokio::test]
+async fn d5_p1_cancelled_session_invalidates_pending_plan_before_approval() {
+    let env = setup(FakeScenario::Plan, "plan", Duration::from_secs(300)).await;
+    boot_and_prompt(&env).await;
+    let plan = wait_for(|| pending_plan(&env, "plan-2")).await;
+
+    env.task_runtime
+        .cancel_session(env.task_id.clone())
+        .await
+        .expect("cancel session");
+
+    assert_eq!(
+        pending_plan(&env, "plan-2").unwrap().state,
+        PlanState::Superseded,
+        "cancellation invalidates a proposed Plan"
+    );
+    let result = plan_resolve(&env, &plan, "opt-approve").await;
+    assert!(result.is_err(), "cancelled Plan cannot be approved");
+    assert_never_sent(&env, "opt-approve").await;
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
 async fn p1_04_two_parallel_tasks_plan_permission_acp_responses_isolated() {
     // B-3: two concurrent tasks each receiving a Plan+permission request
     // must have isolated events, DB state, and ACP responses — neither

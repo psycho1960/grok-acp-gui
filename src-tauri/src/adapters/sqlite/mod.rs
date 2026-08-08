@@ -1529,6 +1529,17 @@ impl Repository for SqliteRepository {
         Ok(plan)
     }
 
+    fn supersede_session_plans(&self, session_id: &str, _reason: &str) -> RepoResult<u32> {
+        let conn = self.lock()?;
+        let count = conn
+            .execute(
+                "UPDATE plans SET state='superseded',updated_at=?1 WHERE session_id=?2 AND state='proposed'",
+                params![utc_now(), session_id],
+            )
+            .map_err(|e| db_error("supersede_session_plans", &e))?;
+        Ok(count as u32)
+    }
+
     fn create_permission(&self, permission: &PermissionRecord) -> RepoResult<()> {
         let conn = self.lock()?;
         let options = serde_json::to_string(&permission.options).map_err(|e| {

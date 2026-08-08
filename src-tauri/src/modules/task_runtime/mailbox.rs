@@ -217,6 +217,10 @@ impl MailboxWorker {
             }
             crate::modules::agent_runtime::AgentEvent::TurnCancelled(_) => {
                 self.repo
+                    .expire_session_permissions(&event.meta.session_id.0, "turn cancelled")?;
+                self.repo
+                    .supersede_session_plans(&event.meta.session_id.0, "turn cancelled")?;
+                self.repo
                     .update_task_status(&self.task_id.0, "idle", Some("cancelled by user"))?;
             }
             crate::modules::agent_runtime::AgentEvent::RequestFailed(failure) => {
@@ -466,6 +470,8 @@ impl MailboxWorker {
         if let Some(mut binding) = self.repo.get_binding_by_task(&self.task_id.0)? {
             self.repo
                 .expire_session_permissions(&binding.session_id.0, "turn cancelled")?;
+            self.repo
+                .supersede_session_plans(&binding.session_id.0, "turn cancelled")?;
             if binding.state == crate::domain::types::SessionState::Active {
                 binding.state = crate::domain::types::SessionState::Idle;
                 self.repo.update_binding(&binding)?;

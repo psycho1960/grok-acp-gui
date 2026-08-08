@@ -161,6 +161,9 @@ pub trait Repository: Send + Sync {
     fn latest_plan_version(&self, task_id: &str) -> RepoResult<Option<u64>>;
     fn latest_plan(&self, task_id: &str) -> RepoResult<Option<PlanRecord>>;
     fn decide_plan(&self, decision: &PlanDecision) -> RepoResult<PlanRecord>;
+    /// Invalidates every still-proposed Plan for a session after cancellation
+    /// or process loss so an old ACP request cannot be approved later.
+    fn supersede_session_plans(&self, session_id: &str, reason: &str) -> RepoResult<u32>;
 
     fn create_permission(&self, permission: &PermissionRecord) -> RepoResult<()>;
     fn get_permission(&self, request_id: &str, session_id: &str) -> RepoResult<PermissionRecord>;
