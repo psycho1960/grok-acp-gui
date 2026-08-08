@@ -142,6 +142,7 @@ struct Env {
     agent_runtime: Arc<AgentRuntimeImpl<TapTransport>>,
     log: Arc<StdMutex<Vec<String>>>,
     workspace: PathBuf,
+    database_path: Option<PathBuf>,
     task_id: TaskId,
     session_id: SessionId,
 }
@@ -156,11 +157,32 @@ fn nanos() -> u128 {
 /// Boot a full production wiring: real in-memory SQLite, real Fake ACP
 /// subprocess, TaskRuntime + AgentRuntime + event forwarder.
 async fn setup(scenario: FakeScenario, mode: &str, permission_timeout: Duration) -> Env {
+    setup_with_database_path(scenario, mode, permission_timeout, None).await
+}
+
+async fn setup_on_disk(scenario: FakeScenario, mode: &str, permission_timeout: Duration) -> Env {
+    let database_path = std::env::temp_dir().join(format!(
+        "gag009-rg-db-{}-{}.sqlite",
+        std::process::id(),
+        nanos()
+    ));
+    setup_with_database_path(scenario, mode, permission_timeout, Some(database_path)).await
+}
+
+async fn setup_with_database_path(
+    scenario: FakeScenario,
+    mode: &str,
+    permission_timeout: Duration,
+    database_path: Option<PathBuf>,
+) -> Env {
     let workspace =
         std::env::temp_dir().join(format!("gag009-rg-{}-{}", std::process::id(), nanos()));
     fs::create_dir_all(&workspace).expect("create temp workspace");
 
-    let concrete = Arc::new(SqliteRepository::open_in_memory().unwrap());
+    let concrete = Arc::new(match database_path.as_ref() {
+        Some(path) => SqliteRepository::open(path).unwrap(),
+        None => SqliteRepository::open_in_memory().unwrap(),
+    });
     let repo: Arc<dyn Repository> = concrete.clone();
     let now = utc_now();
     let path_str = workspace.to_string_lossy().to_string();
@@ -209,6 +231,7 @@ async fn setup(scenario: FakeScenario, mode: &str, permission_timeout: Duration)
         agent_runtime,
         log,
         workspace,
+        database_path,
         task_id,
         session_id,
     }
@@ -369,6 +392,11 @@ async fn shutdown(env: &Env) {
     let workspace = env.workspace.to_string_lossy().to_string();
     if workspace.starts_with(std::env::temp_dir().to_string_lossy().as_ref()) {
         let _ = fs::remove_dir_all(&env.workspace);
+    }
+    if let Some(database_path) = &env.database_path {
+        let _ = fs::remove_file(database_path);
+        let _ = fs::remove_file(database_path.with_extension("sqlite-wal"));
+        let _ = fs::remove_file(database_path.with_extension("sqlite-shm"));
     }
 }
 
@@ -799,6 +827,108 @@ async fn p1_02_process_raw_input_workspace_escape_rejected() {
     // No allow response reaches the Fake ACP.
     assert_never_sent(&env, "opt-allow-once").await;
 
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn d5_p0_duplicate_permission_request_id_keeps_original_rpc_binding() {
+    let env = setup(
+        FakeScenario::DuplicatePermission,
+        "code",
+        Duration::from_secs(300),
+    )
+    .await;
+    boot_and_prompt(&env).await;
+
+    let permission = wait_for(|| pending_permission(&env, "duplicate-perm-1")).await;
+    assert_eq!(permission.category, OperationCategory::Write);
+
+    permission_resolve(&env, &permission, "opt-allow-once")
+        .await
+        .expect("the original request remains resolvable");
+    wait_for_response(&env, "opt-allow-once").await;
+
+    let responses = responses_with_option(&env, "opt-allow-once");
+    assert_eq!(responses.len(), 1, "the option may be resolved only once");
+    assert_eq!(
+        responses[0]["id"],
+        serde_json::json!(1001),
+        "the selected option must answer the first JSON-RPC request, not the duplicate"
+    );
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn d5_p0_database_decision_failure_never_sends_allow_to_acp() {
+    let env = setup_on_disk(FakeScenario::Permission, "code", Duration::from_secs(300)).await;
+    boot_and_prompt(&env).await;
+    let permission = wait_for(|| pending_permission(&env, "perm-2")).await;
+    let database_path = env
+        .database_path
+        .as_ref()
+        .expect("on-disk setup has a database path");
+    let lock = rusqlite::Connection::open(database_path).expect("open lock connection");
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .expect("acquire SQLite write lock");
+
+    let result = permission_resolve(&env, &permission, "opt-allow-once").await;
+    assert!(result.is_err(), "locked SQLite decision must fail");
+    assert_eq!(result.unwrap_err().code, codes::DB_QUERY_FAILED);
+    assert_never_sent(&env, "opt-allow-once").await;
+
+    lock.execute_batch("ROLLBACK")
+        .expect("release SQLite write lock");
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn d5_p0_duplicate_plan_request_id_keeps_original_rpc_binding() {
+    let env = setup(
+        FakeScenario::DuplicatePlan,
+        "plan",
+        Duration::from_secs(300),
+    )
+    .await;
+    boot_and_prompt(&env).await;
+
+    let plan = wait_for(|| pending_plan(&env, "duplicate-plan-1")).await;
+    plan_resolve(&env, &plan, "opt-approve")
+        .await
+        .expect("the original Plan request remains resolvable");
+    wait_for_response(&env, "opt-approve").await;
+
+    let responses = responses_with_option(&env, "opt-approve");
+    assert_eq!(responses.len(), 1, "the option may be resolved only once");
+    assert_eq!(
+        responses[0]["id"],
+        serde_json::json!(1001),
+        "the selected option must answer the first JSON-RPC request, not the duplicate"
+    );
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn d5_p0_plan_decision_failure_never_sends_approve_to_acp() {
+    let env = setup_on_disk(FakeScenario::Plan, "plan", Duration::from_secs(300)).await;
+    boot_and_prompt(&env).await;
+    let plan = wait_for(|| pending_plan(&env, "plan-2")).await;
+    let database_path = env
+        .database_path
+        .as_ref()
+        .expect("on-disk setup has a database path");
+    let lock = rusqlite::Connection::open(database_path).expect("open lock connection");
+    lock.execute_batch("BEGIN IMMEDIATE")
+        .expect("acquire SQLite write lock");
+
+    let result = plan_resolve(&env, &plan, "opt-approve").await;
+    assert!(result.is_err(), "locked SQLite decision must fail");
+    assert_eq!(result.unwrap_err().code, codes::DB_QUERY_FAILED);
+    assert_never_sent(&env, "opt-approve").await;
+
+    lock.execute_batch("ROLLBACK")
+        .expect("release SQLite write lock");
     shutdown(&env).await;
 }
 

@@ -649,9 +649,21 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             ));
         }
 
-        // Send while the local record is still pending. The process-wide
-        // resolution mutex prevents duplicate sends; the gate opens only after
-        // ACP submission succeeds and the DB decision commits.
+        let decided_at = crate::domain::types::utc_now();
+        let decided = self.repo.decide_permission(&PermissionDecision {
+            request_id: request.request_id.clone(),
+            task_id: request.task_id.clone(),
+            session_id: request.session_id.clone(),
+            correlation_id: request.correlation_id,
+            workspace: pending.workspace,
+            expected_plan_version,
+            option_id: request.option_id.clone(),
+            decided_at,
+            decided_at_epoch_seconds: now_epoch_seconds,
+        })?;
+        // A durable decision must exist before the Agent receives an allow
+        // response. If SQLite rejects the transaction, fail closed without
+        // emitting any ACP approval that could authorize external I/O.
         self.agent_runtime
             .send(
                 request.session_id.clone(),
@@ -661,18 +673,6 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
                 }),
             )
             .await?;
-        let decided_at = crate::domain::types::utc_now();
-        let decided = self.repo.decide_permission(&PermissionDecision {
-            request_id: request.request_id,
-            task_id: request.task_id.clone(),
-            session_id: request.session_id,
-            correlation_id: request.correlation_id,
-            workspace: pending.workspace,
-            expected_plan_version,
-            option_id: request.option_id,
-            decided_at,
-            decided_at_epoch_seconds: now_epoch_seconds,
-        })?;
         self.repo
             .update_task_status(&request.task_id.0, "running", None)?;
         Ok(decided.state)
@@ -736,6 +736,19 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             ));
         }
 
+        let decided = self.repo.decide_plan(&PlanDecision {
+            request_id: request.request_id.clone(),
+            task_id: request.task_id.clone(),
+            session_id: request.session_id.clone(),
+            correlation_id: request.correlation_id,
+            workspace: pending.workspace,
+            expected_version: request.expected_version,
+            option_id: request.option_id.clone(),
+            decided_at: crate::domain::types::utc_now(),
+        })?;
+        // Persist before responding to the Agent for the same reason as a
+        // permission decision: an ACP approval must never outlive its local
+        // audit trail when storage fails.
         self.agent_runtime
             .send(
                 request.session_id.clone(),
@@ -745,16 +758,6 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
                 }),
             )
             .await?;
-        let decided = self.repo.decide_plan(&PlanDecision {
-            request_id: request.request_id,
-            task_id: request.task_id.clone(),
-            session_id: request.session_id,
-            correlation_id: request.correlation_id,
-            workspace: pending.workspace,
-            expected_version: request.expected_version,
-            option_id: request.option_id,
-            decided_at: crate::domain::types::utc_now(),
-        })?;
         self.repo.update_task_status(
             &request.task_id.0,
             if decided.state == PlanState::Rejected {

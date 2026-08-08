@@ -454,15 +454,57 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                                 continue;
                             }
                             if let Some(request_id) = interpreter::permission_request_id(request) {
-                                pending_permission_requests
-                                    .lock()
-                                    .unwrap()
-                                    .insert(request_id, request.id.clone());
+                                let duplicate = {
+                                    let mut pending = pending_permission_requests.lock().unwrap();
+                                    match pending.entry(request_id) {
+                                        std::collections::hash_map::Entry::Occupied(_) => true,
+                                        std::collections::hash_map::Entry::Vacant(entry) => {
+                                            entry.insert(request.id.clone());
+                                            false
+                                        }
+                                    }
+                                };
+                                if duplicate {
+                                    let error = AcpError {
+                                        code: crate::adapters::grok_acp::codec::error_codes::INVALID_REQUEST,
+                                        message: "duplicate pending permission request id".into(),
+                                        data: serde_json::Value::Null,
+                                    };
+                                    if reader_outbound
+                                        .send(encode_response_error(&request.id, &error))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
                             } else if let Some(request_id) = interpreter::plan_request_id(request) {
-                                pending_plan_requests
-                                    .lock()
-                                    .unwrap()
-                                    .insert(request_id, request.id.clone());
+                                let duplicate = {
+                                    let mut pending = pending_plan_requests.lock().unwrap();
+                                    match pending.entry(request_id) {
+                                        std::collections::hash_map::Entry::Occupied(_) => true,
+                                        std::collections::hash_map::Entry::Vacant(entry) => {
+                                            entry.insert(request.id.clone());
+                                            false
+                                        }
+                                    }
+                                };
+                                if duplicate {
+                                    let error = AcpError {
+                                        code: crate::adapters::grok_acp::codec::error_codes::INVALID_REQUEST,
+                                        message: "duplicate pending Plan request id".into(),
+                                        data: serde_json::Value::Null,
+                                    };
+                                    if reader_outbound
+                                        .send(encode_response_error(&request.id, &error))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    continue;
+                                }
                             }
                         }
                         let interpreted = {

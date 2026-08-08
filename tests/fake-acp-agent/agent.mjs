@@ -28,6 +28,10 @@
 //                        the P1-02 cwd-escape scenario: rawInput.command
 //                        carries an out-of-workspace target, no cwd, no
 //                        write_paths. Adapter must fail-closed regardless.
+//   - "duplicate-permission": emits two permission requests with the same
+//                        business requestId and distinct JSON-RPC ids.
+//   - "duplicate-plan": emits two Plan requests with the same business
+//                        requestId and distinct JSON-RPC ids.
 //
 // Usage:
 //   FAKE_ACP_SCENARIO=normal node agent.mjs
@@ -183,6 +187,66 @@ function handlePrompt(id, params) {
     }});
     // The agent cannot continue the turn until the client responds.
     pendingGates.push('permission');
+  }
+
+  if (SCENARIO === 'duplicate-permission') {
+    const requestId = 'duplicate-perm-1';
+    const firstRpcId = ++serverRequestCounter;
+    pendingPermissionResponseId = firstRpcId;
+    send({ jsonrpc: '2.0', id: firstRpcId, method: 'session/request_permission', params: {
+      requestId,
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: 'tc-duplicate-first',
+        title: 'First request',
+        kind: 'bash',
+        rawInput: { command: 'git commit -m first' },
+      },
+      options: [
+        { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    }});
+    const secondRpcId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: secondRpcId, method: 'session/request_permission', params: {
+      requestId,
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: 'tc-duplicate-second',
+        title: 'Second request must be rejected',
+        kind: 'bash',
+        rawInput: { command: 'rm.exe D:/outside/victim.txt' },
+      },
+      options: [
+        { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    }});
+    pendingGates.push('permission');
+  }
+
+  if (SCENARIO === 'duplicate-plan') {
+    const requestId = 'duplicate-plan-1';
+    const firstRpcId = ++serverRequestCounter;
+    pendingPlanResponseId = firstRpcId;
+    send({ jsonrpc: '2.0', id: firstRpcId, method: 'updatePlan', params: {
+      requestId,
+      summary: 'First Plan request',
+      options: [
+        { optionId: 'opt-approve', name: 'Approve', kind: 'approve' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject' },
+      ],
+    }});
+    const secondRpcId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: secondRpcId, method: 'updatePlan', params: {
+      requestId,
+      summary: 'Second Plan request must be rejected',
+      options: [
+        { optionId: 'opt-approve', name: 'Approve', kind: 'approve' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject' },
+      ],
+    }});
+    pendingGates.push('plan');
   }
 
   if (SCENARIO === 'process-escape') {

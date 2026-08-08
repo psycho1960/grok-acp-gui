@@ -35,6 +35,8 @@ pub enum FakeScenario {
     PlanPermission,
     ProcessWrite,
     ProcessEscape,
+    DuplicatePermission,
+    DuplicatePlan,
 }
 
 impl FakeScenario {
@@ -53,6 +55,8 @@ impl FakeScenario {
             FakeScenario::PlanPermission => "plan-permission",
             FakeScenario::ProcessWrite => "process-write",
             FakeScenario::ProcessEscape => "process-escape",
+            FakeScenario::DuplicatePermission => "duplicate-permission",
+            FakeScenario::DuplicatePlan => "duplicate-plan",
         }
     }
 }
