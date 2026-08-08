@@ -7,6 +7,9 @@ dist-test/
 coverage/
 test-results/
 test-results-*/
+.pw-out-*/
+_ci_logs*/
+*.zip
 *.bak
 *.log
 npm-debug.log*
