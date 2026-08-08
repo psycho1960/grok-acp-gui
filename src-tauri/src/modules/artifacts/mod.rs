@@ -327,6 +327,20 @@ impl ArtifactService for ManagedArtifactService {
                 "Images total more than 200 MiB",
             ));
         }
+        // A referenced artifact is an original for this task and must not be
+        // evicted. Reclaim only orphan/temporary entries first, then reject
+        // before writing when the task cache cannot hold another prompt.
+        self.enforce_cache_quota(repo, task_id)?;
+        let root = self.root_for_task(repo, task_id)?;
+        let mut cache_files = Vec::new();
+        collect_files(&root, &mut cache_files)?;
+        let used = cache_files.iter().map(|(_, bytes, _)| *bytes).sum::<u64>();
+        if !cache_has_capacity(used, total) {
+            return Err(DomainError::new(
+                codes::ARTIFACT_TOO_LARGE,
+                "Task artifact cache is full; remove unused task artifacts before importing more images",
+            ));
+        }
         let imported = paths
             .iter()
             .map(|path| self.import_one(repo, task_id, path))
@@ -536,6 +550,10 @@ fn collect_files(
     Ok(())
 }
 
+fn cache_has_capacity(used: u64, incoming: u64) -> bool {
+    used.saturating_add(incoming) <= CACHE_QUOTA_BYTES
+}
+
 fn descriptor(record: &AttachmentRecord) -> ArtifactDescriptor {
     ArtifactDescriptor {
         artifact_id: record.id.0.clone(),
@@ -668,5 +686,11 @@ mod tests {
         png.extend_from_slice(&20_000_u32.to_be_bytes());
         png.extend_from_slice(&20_000_u32.to_be_bytes());
         assert!(validate_dimensions(&png, "image/png").is_err());
+    }
+
+    #[test]
+    fn cache_quota_rejects_before_referenced_originals_are_evicted() {
+        assert!(cache_has_capacity(CACHE_QUOTA_BYTES - 1, 1));
+        assert!(!cache_has_capacity(CACHE_QUOTA_BYTES, 1));
     }
 }
