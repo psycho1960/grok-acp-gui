@@ -160,6 +160,18 @@ function handleSessionNew(id, params) {
       ],
     },
   });
+  if (SCENARIO === 'available-commands') {
+    sendNotification('session/update', {
+      sessionId: activeSessionId,
+      update: {
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [
+          { name: 'init', description: 'Initialize a new project', input: null },
+          { name: 'plan', description: 'Plan a change', input: { unstructured: true } },
+        ],
+      },
+    });
+  }
 }
 
 function handleSetMode(id, params) {
@@ -451,6 +463,11 @@ function streamAndFinish(id, params) {
     : text.includes('<attachment_visual_context')
       ? ['MAIN_TEXT_ONLY_OK']
       : ['Hello', ' from', ' fake', ' ACP', ' agent!'];
+  // Echo the per-turn model/reasoning params so tests can observe what the
+  // client sent in the session/prompt request.
+  if (params.model !== undefined || params.reasoning !== undefined) {
+    words.unshift(`MODEL=${params.model ?? '-'} REASONING=${params.reasoning ?? '-'}`);
+  }
   let delay = SCENARIO === 'slow' ? 200 : 10;
   const step = SCENARIO === 'slow' ? 100 : 10;
   for (const word of words) {

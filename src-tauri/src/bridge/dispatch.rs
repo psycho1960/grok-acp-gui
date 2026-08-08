@@ -49,8 +49,10 @@ impl DesktopResult {
 /// The single Tauri command channel for events.
 pub const EVENT_CHANNEL: &str = "bridge:event";
 
-/// Max JSON payload size (1 MiB) before validation rejects.
-const MAX_PAYLOAD_BYTES: u64 = 1_048_576;
+/// Max JSON payload size (8 MiB) before validation rejects. Raised from 1 MiB
+/// so clipboard screenshots (base64-encoded) can cross the bridge; 8 MiB
+/// still bounds a single local IPC message.
+const MAX_PAYLOAD_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Implementation of the `bootstrap` command (called from lib.rs).
 pub fn bootstrap_impl(repo: &dyn Repository, db_init_error: Option<&str>) -> BootstrapSnapshot {
@@ -399,7 +401,7 @@ async fn dispatch(
         DesktopCommand::TurnCancel(payload) => {
             turn_cancel(repo, runtime, task_runtime, payload).await
         }
-        DesktopCommand::SessionConfigure(_) => not_implemented("session.configure"),
+        DesktopCommand::SessionConfigure(payload) => session_configure(repo, payload),
         DesktopCommand::SessionResume(payload) => session_resume(repo, task_runtime, payload).await,
 
         DesktopCommand::PermissionResolve(payload) => {
@@ -408,6 +410,7 @@ async fn dispatch(
         DesktopCommand::PlanResolve(payload) => plan_resolve(task_runtime, payload).await,
 
         DesktopCommand::ArtifactImport(payload) => artifact_import(repo, payload),
+        DesktopCommand::ArtifactImportBlob(payload) => artifact_import_blob(repo, payload),
         DesktopCommand::ArtifactList(payload) => artifact_list(repo, payload),
         DesktopCommand::ArtifactPreview(payload) => artifact_preview(repo, payload),
         DesktopCommand::ArtifactReveal(payload) => artifact_reveal(repo, payload),
@@ -447,6 +450,25 @@ fn artifact_list(
 ) -> DesktopResult {
     use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
     match ManagedArtifactService::new().list(repo, &payload.task_id) {
+        Ok(artifacts) => DesktopResult::ok(serde_json::json!({ "artifacts": artifacts })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn artifact_import_blob(
+    repo: &dyn Repository,
+    payload: &super::commands::ArtifactImportBlobPayload,
+) -> DesktopResult {
+    use crate::modules::artifacts::{ArtifactService, BlobImage, ManagedArtifactService};
+    let blobs: Vec<BlobImage> = payload
+        .blobs
+        .iter()
+        .map(|blob| BlobImage {
+            display_name: blob.display_name.clone(),
+            base64_data: blob.base64_data.clone(),
+        })
+        .collect();
+    match ManagedArtifactService::new().import_blob_images(repo, &payload.task_id, &blobs) {
         Ok(artifacts) => DesktopResult::ok(serde_json::json!({ "artifacts": artifacts })),
         Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
@@ -740,6 +762,39 @@ fn display_path_for(path: &str) -> String {
     }
 }
 
+/// Derive a task title from the first sentence of the user's first message.
+/// Mirrors `deriveTaskTitle` in `src/features/task-center/title.ts`.
+const DERIVED_TITLE_MAX_CHARS: usize = 30;
+
+fn derive_task_title(prompt: &str) -> String {
+    let first_line = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let first_sentence = first_line
+        .split(|ch: char| "。！？.!?;；".contains(ch))
+        .map(str::trim)
+        .find(|sentence| !sentence.is_empty())
+        .unwrap_or(first_line);
+    let fallback = if first_sentence.is_empty() {
+        prompt.trim()
+    } else {
+        first_sentence
+    };
+    let trimmed = fallback.trim();
+    if trimmed.is_empty() {
+        return "新任务".into();
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() > DERIVED_TITLE_MAX_CHARS {
+        let cut: String = chars[..DERIVED_TITLE_MAX_CHARS].iter().collect();
+        format!("{}…", cut.trim_end())
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn paths_equal(a: &str, b: &str) -> bool {
     let na = a
         .replace('\\', "/")
@@ -773,15 +828,14 @@ async fn task_create(
             .with_action("Enter a task goal before creating."),
         );
     }
-    if payload.title.trim().is_empty() {
-        return DesktopResult::err(
-            AppError::new(
-                domain::error::codes::BRIDGE_VALIDATION_FAILED,
-                "Task title is required",
-            )
-            .with_action("Provide a title or a non-empty prompt."),
-        );
-    }
+    // The task title is optional (FR: auto-generate from the first sentence
+    // of the user's first message). Defense in depth: a direct API caller
+    // that omits the title still gets a derived one instead of an error.
+    let title = if payload.title.trim().is_empty() {
+        derive_task_title(&payload.prompt)
+    } else {
+        payload.title.clone()
+    };
 
     // Ensure project exists
     if repo.get_project(&payload.project_id.0).is_err() {
@@ -801,7 +855,7 @@ async fn task_create(
     let task = Task {
         id: TaskId::new(format!("task-{}", Uuid::new_v4())),
         project_id: payload.project_id.clone(),
-        title: payload.title.clone(),
+        title,
         status: TaskStatus::Preparing,
         workspace_kind,
         mode: payload.mode.clone(),
@@ -1146,6 +1200,93 @@ async fn turn_cancel(
     }
 }
 
+/// Persist per-task session choices (`model` / `reasoning`) so every
+/// following turn carries them. `turn.send` already builds its ACP prompt
+/// request from the persisted task fields, so persisting here is enough to
+/// make the next prompt observable with the new values.
+fn session_configure(
+    repo: &dyn Repository,
+    payload: &super::commands::SessionConfigurePayload,
+) -> DesktopResult {
+    let mut task = match repo.get_task(&payload.task_id.0) {
+        Ok(task) => task,
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
+
+    let settings = payload.settings.as_object().cloned().unwrap_or_default();
+    let mut changed = false;
+
+    if let Some(raw_model) = settings.get("model") {
+        let model = match raw_model {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    if crate::modules::agent_runtime::config::validate_model_id(Some(trimmed))
+                        .is_err()
+                    {
+                        return DesktopResult::err(AppError::new(
+                            domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                            "模型标识无效",
+                        ));
+                    }
+                    Some(trimmed.to_string())
+                }
+            }
+            _ => {
+                return DesktopResult::err(AppError::new(
+                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                    "模型设置必须是字符串",
+                ))
+            }
+        };
+        if task.model != model {
+            task.model = model;
+            changed = true;
+        }
+    }
+
+    if let Some(raw_reasoning) = settings.get("reasoning") {
+        let reasoning = match raw_reasoning {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value)
+                if matches!(value.as_str(), "low" | "medium" | "high" | "max") =>
+            {
+                Some(value.clone())
+            }
+            serde_json::Value::String(_) => {
+                return DesktopResult::err(AppError::new(
+                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                    "推理强度仅支持 low / medium / high / max",
+                ))
+            }
+            _ => {
+                return DesktopResult::err(AppError::new(
+                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                    "推理强度设置必须是字符串",
+                ))
+            }
+        };
+        if task.reasoning != reasoning {
+            task.reasoning = reasoning;
+            changed = true;
+        }
+    }
+
+    if changed {
+        if let Err(error) = repo.update_task(&task) {
+            return DesktopResult::err(AppError::new(error.code, error.message));
+        }
+    }
+    DesktopResult::ok(serde_json::json!({
+        "taskId": payload.task_id,
+        "model": task.model,
+        "reasoning": task.reasoning,
+    }))
+}
+
 async fn session_resume(
     repo: &dyn Repository,
     task_runtime: &dyn TaskRuntime,
@@ -1196,6 +1337,8 @@ async fn task_open(
             "taskId": task.id,
             "title": task.title,
             "status": status,
+            "model": task.model,
+            "reasoning": task.reasoning,
             "cursor": { "lastSeq": 0, "snapshotSeq": 0 },
             "events": [],
             "attempt": task.attempt_count,
@@ -1222,6 +1365,8 @@ async fn task_open(
         "sessionId": binding.session_id,
         "title": task.title,
         "status": status,
+        "model": task.model,
+        "reasoning": task.reasoning,
         "cursor": {
             "lastSeq": snapshot.last_seq,
             "snapshotSeq": snapshot.last_seq,
@@ -1459,6 +1604,20 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
             )
         }
 
+        AgentEvent::CommandsUpdated(p) => {
+            let payload = serde_json::json!({ "commands": p.commands });
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::SESSION_COMMANDS_UPDATED,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    payload,
+                )
+                .build(),
+            )
+        }
+
         AgentEvent::RequestFailed(p) => {
             let payload = super::events::DiagnosticNoticePayload {
                 level: "error".into(),
@@ -1549,7 +1708,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_payload_rejected() {
-        let big: String = "x".repeat(2_000_000);
+        let big: String = "x".repeat(9_000_000);
         let raw = serde_json::json!({"type": "runtime.refresh", "payload": {}, "big": big});
         let repo = std::sync::Arc::new(
             crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo"),

@@ -3,6 +3,7 @@
 //! The renderer receives descriptors only. Image bytes stay in a task's
 //! managed workspace directory until the backend serialises an ACP prompt.
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -38,12 +39,28 @@ pub struct ResolvedImage {
     pub bytes: Vec<u8>,
 }
 
+/// A clipboard image blob crossing the bridge (base64, no filesystem path).
+#[derive(Debug, Clone)]
+pub struct BlobImage {
+    pub display_name: String,
+    pub base64_data: String,
+}
+
 pub trait ArtifactService: Send + Sync {
     fn import_images(
         &self,
         repo: &dyn Repository,
         task_id: &TaskId,
         paths: &[String],
+    ) -> Result<Vec<ArtifactDescriptor>, DomainError>;
+
+    /// Import clipboard image blobs (no filesystem path) through the same
+    /// validation and managed-storage pipeline as path-based imports.
+    fn import_blob_images(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        blobs: &[BlobImage],
     ) -> Result<Vec<ArtifactDescriptor>, DomainError>;
 
     fn resolve_images(
@@ -233,9 +250,38 @@ impl ManagedArtifactService {
             )
         })?;
         validate_extension(&source, mime)?;
-        validate_dimensions(&bytes, mime)?;
+        let source_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("image")
+            .to_owned();
+        self.import_bytes(repo, task_id, &bytes, &source_name)
+    }
 
-        let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    /// Shared pipeline: validate bytes, dedupe by hash, write to the managed
+    /// cache, and register the attachment. Used by path and blob imports.
+    fn import_bytes(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        bytes: &[u8],
+        source_name: &str,
+    ) -> Result<ArtifactDescriptor, DomainError> {
+        if bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_BYTES {
+            return Err(DomainError::new(
+                codes::ARTIFACT_TOO_LARGE,
+                "Each image must be between 1 byte and 200 MiB",
+            ));
+        }
+        let mime = detect_image_mime(bytes).ok_or_else(|| {
+            DomainError::new(
+                codes::ARTIFACT_INVALID_FORMAT,
+                "Unsupported or invalid image format",
+            )
+        })?;
+        validate_dimensions(bytes, mime)?;
+
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
         if let Some(existing) = repo
             .list_attachments_by_task(&task_id.0)?
             .into_iter()
@@ -255,7 +301,7 @@ impl ManagedArtifactService {
         let cache_path = shard.join(format!("{}.{}", sha256, canonical_extension(mime)));
         if !cache_path.exists() {
             let temporary = shard.join(format!(".{}.{}.tmp", sha256, uuid::Uuid::new_v4()));
-            std::fs::write(&temporary, &bytes).map_err(|_| {
+            std::fs::write(&temporary, bytes).map_err(|_| {
                 DomainError::new(
                     codes::ARTIFACT_CACHE_MISSING,
                     "Unable to write managed image",
@@ -281,6 +327,7 @@ impl ManagedArtifactService {
                 "Managed image escaped storage",
             ));
         }
+        let source_name = sanitize_source_name(source_name, mime);
         let record = AttachmentRecord {
             id: AttachmentId::new(format!("artifact-{}", &sha256[..24])),
             task_id: task_id.clone(),
@@ -288,11 +335,7 @@ impl ManagedArtifactService {
             mime: mime.into(),
             bytes: bytes.len() as u64,
             cache_path: cache_path.to_string_lossy().into_owned(),
-            source_name: source
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("image")
-                .to_owned(),
+            source_name,
             created_at: utc_now(),
         };
         repo.create_attachment(&record)?;
@@ -344,6 +387,64 @@ impl ArtifactService for ManagedArtifactService {
         let imported = paths
             .iter()
             .map(|path| self.import_one(repo, task_id, path))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.enforce_cache_quota(repo, task_id)?;
+        Ok(imported)
+    }
+
+    fn import_blob_images(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        blobs: &[BlobImage],
+    ) -> Result<Vec<ArtifactDescriptor>, DomainError> {
+        if blobs.is_empty() || blobs.len() > MAX_IMAGES_PER_PROMPT {
+            return Err(DomainError::new(
+                codes::ARTIFACT_TOO_LARGE,
+                "A message may contain from 1 to 20 images",
+            ));
+        }
+        // Decode first so declared size can be checked before any writes.
+        let mut decoded: Vec<(String, Vec<u8>)> = Vec::with_capacity(blobs.len());
+        let mut total = 0_u64;
+        for blob in blobs {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(blob.base64_data.trim())
+                .map_err(|_| {
+                    DomainError::new(
+                        codes::ARTIFACT_INVALID_FORMAT,
+                        "剪贴板图片数据已损坏，无法导入",
+                    )
+                })?;
+            if bytes.is_empty() || bytes.len() as u64 > MAX_IMAGE_BYTES {
+                return Err(DomainError::new(
+                    codes::ARTIFACT_TOO_LARGE,
+                    "Each image must be between 1 byte and 200 MiB",
+                ));
+            }
+            total = total.saturating_add(bytes.len() as u64);
+            if total > MAX_IMAGE_BYTES {
+                return Err(DomainError::new(
+                    codes::ARTIFACT_TOO_LARGE,
+                    "Images total more than 200 MiB",
+                ));
+            }
+            decoded.push((blob.display_name.clone(), bytes));
+        }
+        self.enforce_cache_quota(repo, task_id)?;
+        let root = self.root_for_task(repo, task_id)?;
+        let mut cache_files = Vec::new();
+        collect_files(&root, &mut cache_files)?;
+        let used = cache_files.iter().map(|(_, bytes, _)| *bytes).sum::<u64>();
+        if !cache_has_capacity(used, total) {
+            return Err(DomainError::new(
+                codes::ARTIFACT_TOO_LARGE,
+                "Task artifact cache is full; remove unused task artifacts before importing more images",
+            ));
+        }
+        let imported = decoded
+            .iter()
+            .map(|(name, bytes)| self.import_bytes(repo, task_id, bytes, name))
             .collect::<Result<Vec<_>, _>>()?;
         self.enforce_cache_quota(repo, task_id)?;
         Ok(imported)
@@ -665,6 +766,36 @@ fn canonical_extension(mime: &str) -> &'static str {
     }
 }
 
+/// Keep a blob's display name safe for the UI and ensure it carries an
+/// extension matching the detected content so downstream tools can guess
+/// the format without trusting client-supplied mime types.
+fn sanitize_source_name(name: &str, mime: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '/' | '\\' | '\0' | '<' | '>' | ':' | '"' | '|' | '?' | '*'
+            )
+        })
+        .take(120)
+        .collect();
+    let trimmed = sanitized.trim().to_string();
+    let sanitized = if trimmed.is_empty() {
+        "剪贴板图片".to_string()
+    } else {
+        trimmed
+    };
+    let has_known_extension = sanitized.rsplit_once('.').is_some_and(|(_, extension)| {
+        canonical_extension(mime) == extension.to_ascii_lowercase().as_str()
+    });
+    if has_known_extension {
+        sanitized
+    } else {
+        format!("{}.{}", sanitized, canonical_extension(mime))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,5 +823,130 @@ mod tests {
     fn cache_quota_rejects_before_referenced_originals_are_evicted() {
         assert!(cache_has_capacity(CACHE_QUOTA_BYTES - 1, 1));
         assert!(!cache_has_capacity(CACHE_QUOTA_BYTES, 1));
+    }
+
+    #[test]
+    fn sanitize_source_name_appends_matching_extension() {
+        assert_eq!(sanitize_source_name("截图", "image/png"), "截图.png");
+        assert_eq!(
+            sanitize_source_name("a/b\\c:d.png", "image/png"),
+            "abcd.png"
+        );
+        assert_eq!(
+            sanitize_source_name("shot.jpg", "image/png"),
+            "shot.jpg.png"
+        );
+        assert_eq!(sanitize_source_name("   ", "image/gif"), "剪贴板图片.gif");
+    }
+
+    #[test]
+    fn sanitize_source_name_keeps_matching_extension() {
+        assert_eq!(sanitize_source_name("clip.png", "image/png"), "clip.png");
+        assert_eq!(sanitize_source_name("clip.JPG", "image/jpeg"), "clip.JPG");
+    }
+
+    #[test]
+    fn blob_import_round_trips_through_managed_storage() {
+        use crate::adapters::sqlite::SqliteRepository;
+        use crate::domain::types::{
+            utc_now, Project, ProjectId, Task, TaskId as DomainTaskId, TaskStatus, WorkspaceKind,
+        };
+        use std::path::PathBuf;
+
+        let repo = SqliteRepository::open_in_memory().expect("in-memory repository");
+        let workspace = std::env::temp_dir().join(format!(
+            "grok-acp-gui-blob-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        repo.create_project(&Project {
+            id: ProjectId::new("proj-blob"),
+            path: workspace.to_string_lossy().into_owned(),
+            display_path: "blob-test".into(),
+            repo_root: None,
+            trusted_at: Some(utc_now()),
+            last_opened_at: utc_now(),
+        })
+        .expect("project");
+        let task_id = DomainTaskId::new("task-blob-1");
+        repo.create_task(&Task {
+            id: task_id.clone(),
+            project_id: ProjectId::new("proj-blob"),
+            title: "Blob import".into(),
+            status: TaskStatus::Idle,
+            workspace_kind: WorkspaceKind::Direct,
+            mode: None,
+            model: None,
+            reasoning: None,
+            created_at: utc_now(),
+            updated_at: utc_now(),
+            interrupt_reason: None,
+            interrupted_at: None,
+            attempt_count: 1,
+        })
+        .expect("task");
+
+        // 1x1 transparent PNG.
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+            .expect("valid png base64");
+
+        let service = ManagedArtifactService::new();
+        let imported = service
+            .import_blob_images(
+                &repo,
+                &TaskId("task-blob-1".into()),
+                &[BlobImage {
+                    display_name: "剪贴板截图".into(),
+                    base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
+                }],
+            )
+            .expect("blob import");
+        assert_eq!(imported.len(), 1);
+        assert_eq!(imported[0].mime_type, "image/png");
+        assert_eq!(imported[0].bytes, png.len() as u64);
+        assert!(imported[0].display_name.contains("剪贴板截图"));
+
+        // Identical bytes dedupe to the same artifact id.
+        let again = service
+            .import_blob_images(
+                &repo,
+                &TaskId("task-blob-1".into()),
+                &[BlobImage {
+                    display_name: "另一名字.png".into(),
+                    base64_data: base64::engine::general_purpose::STANDARD.encode(&png),
+                }],
+            )
+            .expect("blob re-import");
+        assert_eq!(again[0].artifact_id, imported[0].artifact_id);
+
+        // Garbage base64 fails closed.
+        let bad = service.import_blob_images(
+            &repo,
+            &TaskId("task-blob-1".into()),
+            &[BlobImage {
+                display_name: "坏图".into(),
+                base64_data: "not base64 !!!".into(),
+            }],
+        );
+        assert!(bad.is_err());
+        // Valid base64 of non-image bytes fails closed too.
+        let not_image = service.import_blob_images(
+            &repo,
+            &TaskId("task-blob-1".into()),
+            &[BlobImage {
+                display_name: "文本".into(),
+                base64_data: base64::engine::general_purpose::STANDARD
+                    .encode(b"<svg onload=alert(1)>"),
+            }],
+        );
+        assert!(not_image.is_err());
+
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = PathBuf::new();
     }
 }

@@ -52,6 +52,8 @@ pub enum AgentEvent {
     PermissionRequested(PermissionRequestedPayload),
     /// An artifact (image, file result) was announced.
     ArtifactAnnounced(ArtifactAnnouncedPayload),
+    /// The ACP session published its available slash commands.
+    CommandsUpdated(CommandsUpdatedPayload),
     /// A request failed.
     RequestFailed(RequestFailedPayload),
     /// The current turn was cancelled by the user.
@@ -74,6 +76,7 @@ impl AgentEvent {
             AgentEvent::PlanProposed(_) => "plan_proposed",
             AgentEvent::PermissionRequested(_) => "permission_requested",
             AgentEvent::ArtifactAnnounced(_) => "artifact_announced",
+            AgentEvent::CommandsUpdated(_) => "commands_updated",
             AgentEvent::RequestFailed(_) => "request_failed",
             AgentEvent::TurnCancelled(_) => "turn_cancelled",
             AgentEvent::ProcessExited(_) => "process_exited",
@@ -285,6 +288,25 @@ pub struct ArtifactAnnouncedPayload {
     /// stays inside the runtime boundary and is never serialised to the UI.
     #[serde(default, skip_serializing)]
     pub relative_path: Option<String>,
+}
+
+/// A slash command the ACP agent can execute (Grok Build quick commands).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableCommandDescriptor {
+    /// Command name (e.g. "init", "plan", "share").
+    pub name: String,
+    /// Human-readable description, redacted for display.
+    pub description: String,
+    /// Whether the command accepts trailing text input.
+    pub accepts_input: bool,
+}
+
+/// The ACP session published or changed its available commands.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandsUpdatedPayload {
+    pub commands: Vec<AvailableCommandDescriptor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

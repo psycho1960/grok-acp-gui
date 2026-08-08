@@ -40,6 +40,7 @@ pub enum FakeScenario {
     DuplicatePermission,
     DuplicatePlan,
     SetModeError,
+    CommandsUpdate,
 }
 
 impl FakeScenario {
@@ -63,6 +64,7 @@ impl FakeScenario {
             FakeScenario::DuplicatePermission => "duplicate-permission",
             FakeScenario::DuplicatePlan => "duplicate-plan",
             FakeScenario::SetModeError => "set-mode-error",
+            FakeScenario::CommandsUpdate => "available-commands",
         }
     }
 }

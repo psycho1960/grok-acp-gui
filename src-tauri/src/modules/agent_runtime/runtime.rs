@@ -876,10 +876,20 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         "data": image.base64_data,
                     })
                 }));
-                let params = serde_json::json!({
+                let mut params = serde_json::json!({
                     "sessionId": acp_session_id,
                     "prompt": prompt,
                 });
+                // Per-turn model / reasoning override. These are additive
+                // ACP prompt params the agent may ignore; the observable
+                // contract is that every prompt carries the current task
+                // selection (GAG-008 conversation settings).
+                if let Some(model) = p.model.as_deref() {
+                    params["model"] = serde_json::json!(model);
+                }
+                if let Some(reasoning) = p.reasoning.as_deref() {
+                    params["reasoning"] = serde_json::json!(reasoning);
+                }
                 encode_request(request_id, "session/prompt", &params)
             }
             ClientRequest::Cancel => {
