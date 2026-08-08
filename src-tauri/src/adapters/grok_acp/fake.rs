@@ -35,6 +35,8 @@ pub enum FakeScenario {
     PlanPermission,
     ProcessWrite,
     ProcessEscape,
+    ReadEscape,
+    SecretDisplayFields,
     DuplicatePermission,
     DuplicatePlan,
 }
@@ -55,6 +57,8 @@ impl FakeScenario {
             FakeScenario::PlanPermission => "plan-permission",
             FakeScenario::ProcessWrite => "process-write",
             FakeScenario::ProcessEscape => "process-escape",
+            FakeScenario::ReadEscape => "read-escape",
+            FakeScenario::SecretDisplayFields => "secret-display-fields",
             FakeScenario::DuplicatePermission => "duplicate-permission",
             FakeScenario::DuplicatePlan => "duplicate-plan",
         }

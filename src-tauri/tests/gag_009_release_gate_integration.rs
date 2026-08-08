@@ -956,6 +956,75 @@ async fn d5_p1_cancelled_session_invalidates_pending_plan_before_approval() {
 }
 
 #[tokio::test]
+async fn d5_p1_secret_display_fields_are_redacted_before_storage_and_bridge() {
+    const SECRET: &str = "GAG009_TEST_SECRET_NEVER_LOG";
+    let env = setup(
+        FakeScenario::SecretDisplayFields,
+        "code",
+        Duration::from_secs(300),
+    )
+    .await;
+    boot_and_prompt(&env).await;
+
+    let permission = wait_for(|| pending_permission(&env, "perm-2")).await;
+    assert!(
+        !permission.summary_redacted.contains(SECRET),
+        "permission summary must redact tool-call title"
+    );
+    assert!(permission.summary_redacted.contains("[redacted]"));
+    assert!(
+        !permission
+            .options
+            .iter()
+            .any(|option| option.label.contains(SECRET)),
+        "persisted permission option labels must redact secrets"
+    );
+
+    let events = env
+        .repo
+        .get_events_after(&env.session_id.0, 0, 100)
+        .expect("stored session events");
+    let event = events
+        .iter()
+        .find(|event| event.event_type == "permission_requested")
+        .expect("permission event must be persisted");
+    let serialized = event.payload.to_string();
+    assert!(
+        !serialized.contains(SECRET),
+        "Renderer-facing persisted event must not contain the fixture secret: {serialized}"
+    );
+    assert!(serialized.contains("[redacted]"));
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn d5_p1_raw_readonly_path_outside_workspace_is_fail_closed() {
+    let env = setup(FakeScenario::ReadEscape, "code", Duration::from_secs(300)).await;
+    boot_and_prompt(&env).await;
+
+    let permission = wait_for(|| pending_permission(&env, "perm-2")).await;
+    assert_eq!(
+        permission.category,
+        OperationCategory::Unknown,
+        "an outside rawInput read path is not approvable"
+    );
+    assert!(
+        permission
+            .options
+            .iter()
+            .all(|option| !matches!(option.action, PermissionOptionAction::AllowOnce)),
+        "fail-closed classification removes allow options"
+    );
+
+    let result = permission_resolve(&env, &permission, "opt-allow-once").await;
+    assert!(result.is_err(), "stripped allow option cannot be resolved");
+    assert_never_sent(&env, "opt-allow-once").await;
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
 async fn p1_04_two_parallel_tasks_plan_permission_acp_responses_isolated() {
     // B-3: two concurrent tasks each receiving a Plan+permission request
     // must have isolated events, DB state, and ACP responses — neither

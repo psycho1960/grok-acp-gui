@@ -187,6 +187,22 @@ impl OperationDescriptor {
                 return Err(unknown("operation path escapes its workspace"));
             }
         }
+        // ACP rawInput may omit structured readPaths. For the narrow
+        // read-only process allowlist, inspect literal path operands as well
+        // so an absolute or traversal path cannot silently escape the
+        // workspace just because the adapter had no platform PathOptions.
+        if self.kind == OperationKind::Process && self.category() == OperationCategory::ReadOnly {
+            for path in self.args.iter().filter(is_literal_path_operand) {
+                let normalized = if Path::new(path).is_absolute() {
+                    normalize_path(path)?
+                } else {
+                    normalize_path(&format!("{}/{}", cwd, path))?
+                };
+                if !path_is_within(&normalized, &root) {
+                    return Err(unknown("raw process path escapes its workspace"));
+                }
+            }
+        }
         if self.category() == OperationCategory::Unknown {
             return Err(unknown("operation is not in the declared policy matrix"));
         }
@@ -201,6 +217,21 @@ impl OperationDescriptor {
         hasher.update(canonical);
         Ok(format!("{:x}", hasher.finalize()))
     }
+}
+
+/// A non-option argv token that explicitly names a filesystem location.
+/// Bare patterns such as `TODO` stay ordinary search terms; paths and
+/// traversal operands are containment-checked against the workspace.
+fn is_literal_path_operand(arg: &&String) -> bool {
+    let value = arg.as_str();
+    !value.starts_with('-')
+        && (Path::new(value).is_absolute()
+            || value.starts_with("./")
+            || value.starts_with(".\\")
+            || value.starts_with("../")
+            || value.starts_with("..\\")
+            || value.contains('/')
+            || value.contains('\\'))
 }
 
 fn executable_name(executable: Option<&str>) -> Option<String> {
@@ -587,6 +618,16 @@ mod tests {
         let mut op = git(&["status"]);
         op.read_paths.push("../secret".into());
         assert!(op.validate_within("C:/repo").is_err());
+    }
+
+    #[test]
+    fn raw_readonly_process_argument_cannot_escape_workspace() {
+        let outside = process("rg.exe", &["secret", "D:/outside"]);
+        assert_eq!(outside.category(), OperationCategory::ReadOnly);
+        assert!(
+            outside.validate_within("C:/repo").is_err(),
+            "an explicit rawInput path must not bypass workspace containment"
+        );
     }
 
     #[test]

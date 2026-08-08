@@ -28,6 +28,12 @@
 //                        the P1-02 cwd-escape scenario: rawInput.command
 //                        carries an out-of-workspace target, no cwd, no
 //                        write_paths. Adapter must fail-closed regardless.
+//   - "read-escape": sends an apparently read-only rawInput command whose
+//                        literal path operand is outside the workspace.
+//   - "secret-display-fields": sends a permission request containing a
+//                        fixture secret in every Renderer-visible display
+//                        field. The client must redact those fields before
+//                        persistence and bridge publication.
 //   - "duplicate-permission": emits two permission requests with the same
 //                        business requestId and distinct JSON-RPC ids.
 //   - "duplicate-plan": emits two Plan requests with the same business
@@ -264,6 +270,47 @@ function handlePrompt(id, params) {
         title: 'Remove file outside workspace',
         kind: 'bash',
         rawInput: { command: 'rm.exe D:/outside/victim.txt' },
+      },
+      options: [
+        { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    }});
+    pendingGates.push('permission');
+  }
+
+  if (SCENARIO === 'secret-display-fields') {
+    const permId = `perm-${++requestCounter}`;
+    pendingPermissionResponseId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: pendingPermissionResponseId, method: 'session/request_permission', params: {
+      requestId: permId,
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: `tc-${requestCounter}`,
+        title: 'Deploy token=GAG009_TEST_SECRET_NEVER_LOG',
+        kind: 'bash',
+        locations: [{ path: 'C:/repo/token=GAG009_TEST_SECRET_NEVER_LOG' }],
+        rawInput: { command: 'git commit -m test' },
+      },
+      options: [
+        { optionId: 'opt-allow-once', name: 'Allow token=GAG009_TEST_SECRET_NEVER_LOG', kind: 'allow_once' },
+        { optionId: 'opt-reject', name: 'Reject', kind: 'reject_once' },
+      ],
+    }});
+    pendingGates.push('permission');
+  }
+
+  if (SCENARIO === 'read-escape') {
+    const permId = `perm-${++requestCounter}`;
+    pendingPermissionResponseId = ++serverRequestCounter;
+    send({ jsonrpc: '2.0', id: pendingPermissionResponseId, method: 'session/request_permission', params: {
+      requestId: permId,
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: `tc-${requestCounter}`,
+        title: 'Search outside workspace',
+        kind: 'bash',
+        rawInput: { command: 'rg secret D:/outside' },
       },
       options: [
         { optionId: 'opt-allow-once', name: 'Allow once', kind: 'allow_once' },

@@ -576,7 +576,8 @@ fn extract_tool_call(params: &serde_json::Value) -> ToolEventPayload {
     ToolEventPayload {
         tool_call_id: extract_tool_call_id(source),
         title: extract_string_field(source, "title")
-            .or_else(|| extract_string_field(source, "name")),
+            .or_else(|| extract_string_field(source, "name"))
+            .map(|value| redact_visible_text(&value)),
         kind: extract_string_field(source, "kind")
             .or_else(|| extract_string_field(source, "toolName"))
             .or_else(|| extract_string_field(source, "type")),
@@ -607,7 +608,7 @@ fn extract_locations(source: &serde_json::Value) -> Vec<String> {
             location
                 .get("path")
                 .and_then(|path| path.as_str())
-                .map(ToOwned::to_owned)
+                .map(redact_visible_text)
         })
         .take(8)
         .collect()
@@ -672,8 +673,8 @@ fn extract_permission_options(params: &serde_json::Value) -> Vec<PermissionOptio
                 let name = opt
                     .get("name")
                     .or_else(|| opt.get("label"))?
-                    .as_str()?
-                    .to_string();
+                    .as_str()
+                    .map(redact_visible_text)?;
                 let kind = opt
                     .get("kind")
                     .or_else(|| opt.get("action"))
