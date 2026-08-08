@@ -688,7 +688,8 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         // A durable decision must exist before the Agent receives an allow
         // response. If SQLite rejects the transaction, fail closed without
         // emitting any ACP approval that could authorize external I/O.
-        self.agent_runtime
+        if let Err(error) = self
+            .agent_runtime
             .send(
                 request.session_id.clone(),
                 ClientRequest::ResolvePermission(ResolvePermissionRequest {
@@ -696,7 +697,20 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
                     option_id: request.option_id.clone(),
                 }),
             )
-            .await?;
+            .await
+        {
+            if self
+                .repo
+                .revert_permission_decision(&request.request_id, &request.session_id.0)
+                .is_err()
+            {
+                let _ = self.repo.expire_session_permissions(
+                    &request.session_id.0,
+                    "ACP permission delivery failed",
+                );
+            }
+            return Err(error);
+        }
         self.repo
             .update_task_status(&request.task_id.0, "running", None)?;
         Ok(decided.state)
@@ -774,7 +788,8 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         // Persist before responding to the Agent for the same reason as a
         // permission decision: an ACP approval must never outlive its local
         // audit trail when storage fails.
-        self.agent_runtime
+        if let Err(error) = self
+            .agent_runtime
             .send(
                 request.session_id.clone(),
                 ClientRequest::ResolvePlan(ResolvePlanRequest {
@@ -782,7 +797,19 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
                     option_id: request.option_id.clone(),
                 }),
             )
-            .await?;
+            .await
+        {
+            if self
+                .repo
+                .revert_plan_decision(&request.request_id, &request.session_id.0)
+                .is_err()
+            {
+                let _ = self
+                    .repo
+                    .supersede_session_plans(&request.session_id.0, "ACP Plan delivery failed");
+            }
+            return Err(error);
+        }
         self.repo.update_task_status(
             &request.task_id.0,
             if decided.state == PlanState::Rejected {

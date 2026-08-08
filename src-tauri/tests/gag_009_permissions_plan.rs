@@ -327,3 +327,69 @@ fn startup_recovery_expires_one_shot_approval() {
         PermissionState::Expired
     );
 }
+
+#[test]
+fn failed_acp_delivery_reverts_permission_decision_to_requested() {
+    let repo = repository();
+    repo.create_permission(&permission(None, 500)).unwrap();
+    repo.decide_permission(&PermissionDecision {
+        request_id: "permission-1".into(),
+        task_id: TaskId::new("task-1"),
+        session_id: SessionId::new("session-1"),
+        correlation_id: "correlation-1".into(),
+        workspace: "C:/repo".into(),
+        expected_plan_version: None,
+        option_id: "allow-1".into(),
+        decided_at: utc_now(),
+        decided_at_epoch_seconds: 10,
+    })
+    .unwrap();
+
+    let reverted = repo
+        .revert_permission_decision("permission-1", "session-1")
+        .expect("failed delivery restores pending permission");
+    assert_eq!(reverted.state, PermissionState::Requested);
+    assert_eq!(reverted.decided_option_id, None);
+}
+
+#[test]
+fn failed_acp_delivery_reverts_plan_decision_to_proposed() {
+    let repo = repository();
+    repo.create_plan(&PlanRecord {
+        request_id: "plan-1".into(),
+        task_id: TaskId::new("task-1"),
+        session_id: SessionId::new("session-1"),
+        correlation_id: "correlation-1".into(),
+        workspace: "C:/repo".into(),
+        version: 1,
+        plan_hash: "plan-hash".into(),
+        state: PlanState::Proposed,
+        summary_redacted: "Plan".into(),
+        options: vec![PlanOption {
+            option_id: "approve-1".into(),
+            label: "Approve".into(),
+            action: PlanOptionAction::Approve,
+        }],
+        decided_option_id: None,
+        created_at: utc_now(),
+        updated_at: utc_now(),
+    })
+    .unwrap();
+    repo.decide_plan(&PlanDecision {
+        request_id: "plan-1".into(),
+        task_id: TaskId::new("task-1"),
+        session_id: SessionId::new("session-1"),
+        correlation_id: "correlation-1".into(),
+        workspace: "C:/repo".into(),
+        expected_version: 1,
+        option_id: "approve-1".into(),
+        decided_at: utc_now(),
+    })
+    .unwrap();
+
+    let reverted = repo
+        .revert_plan_decision("plan-1", "session-1")
+        .expect("failed delivery restores pending Plan");
+    assert_eq!(reverted.state, PlanState::Proposed);
+    assert_eq!(reverted.decided_option_id, None);
+}

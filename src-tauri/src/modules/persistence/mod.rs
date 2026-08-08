@@ -161,6 +161,9 @@ pub trait Repository: Send + Sync {
     fn latest_plan_version(&self, task_id: &str) -> RepoResult<Option<u64>>;
     fn latest_plan(&self, task_id: &str) -> RepoResult<Option<PlanRecord>>;
     fn decide_plan(&self, decision: &PlanDecision) -> RepoResult<PlanRecord>;
+    /// Reverses a delivered-local-but-not-delivered-to-ACP Plan decision.
+    /// The caller uses this only when the ACP response write failed.
+    fn revert_plan_decision(&self, request_id: &str, session_id: &str) -> RepoResult<PlanRecord>;
     /// Invalidates every still-proposed Plan for a session after cancellation
     /// or process loss so an old ACP request cannot be approved later.
     fn supersede_session_plans(&self, session_id: &str, reason: &str) -> RepoResult<u32>;
@@ -168,6 +171,13 @@ pub trait Repository: Send + Sync {
     fn create_permission(&self, permission: &PermissionRecord) -> RepoResult<()>;
     fn get_permission(&self, request_id: &str, session_id: &str) -> RepoResult<PermissionRecord>;
     fn decide_permission(&self, decision: &PermissionDecision) -> RepoResult<PermissionRecord>;
+    /// Reverses a delivered-local-but-not-delivered-to-ACP permission decision.
+    /// The caller uses this only when the ACP response write failed.
+    fn revert_permission_decision(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> RepoResult<PermissionRecord>;
     /// Atomically expires one still-pending request. Used by the backend
     /// timeout worker before it returns the ACP denial option.
     fn expire_permission(

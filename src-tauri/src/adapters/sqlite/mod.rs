@@ -1529,6 +1529,31 @@ impl Repository for SqliteRepository {
         Ok(plan)
     }
 
+    fn revert_plan_decision(&self, request_id: &str, session_id: &str) -> RepoResult<PlanRecord> {
+        let conn = self.lock()?;
+        let changed = conn
+            .execute(
+                "UPDATE plans SET state='proposed',decided_option_id=NULL,updated_at=?1
+                 WHERE request_id=?2 AND session_id=?3
+                   AND state IN ('approved','rejected','revision_requested')",
+                params![utc_now(), request_id, session_id],
+            )
+            .map_err(|e| db_error("revert_plan_decision update", &e))?;
+        if changed != 1 {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Plan decision cannot be safely reverted",
+            ));
+        }
+        // Query on the already-held connection: get_plan() re-locks the mutex.
+        conn.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE request_id=?1 AND session_id=?2",
+            params![request_id, session_id],
+            row_to_plan,
+        )
+        .map_err(|e| db_error("revert_plan_decision load", &e))
+    }
+
     fn supersede_session_plans(&self, session_id: &str, _reason: &str) -> RepoResult<u32> {
         let conn = self.lock()?;
         let count = conn
@@ -1654,6 +1679,36 @@ impl Repository for SqliteRepository {
         tx.commit()
             .map_err(|e| db_error("decide_permission commit", &e))?;
         Ok(permission)
+    }
+
+    fn revert_permission_decision(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> RepoResult<PermissionRecord> {
+        let conn = self.lock()?;
+        let changed = conn
+            .execute(
+                "UPDATE permission_decisions
+                 SET state='requested',decided_option_id=NULL,scope_json=NULL,updated_at=?1
+                 WHERE request_id=?2 AND session_id=?3
+                   AND state IN ('approved_once','approved_scope','denied')",
+                params![utc_now(), request_id, session_id],
+            )
+            .map_err(|e| db_error("revert_permission_decision update", &e))?;
+        if changed != 1 {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Permission decision cannot be safely reverted",
+            ));
+        }
+        // Query on the already-held connection: get_permission() re-locks the mutex.
+        conn.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1 AND session_id=?2",
+            params![request_id, session_id],
+            row_to_permission,
+        )
+        .map_err(|e| db_error("revert_permission_decision load", &e))
     }
 
     fn expire_permission(
