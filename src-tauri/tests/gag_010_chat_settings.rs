@@ -323,6 +323,270 @@ async fn available_commands_update_reaches_the_bridge_as_typed_event() {
 }
 
 #[tokio::test]
+async fn session_configure_mode_persists_and_next_turn_set_mode_is_observable() {
+    let repo = make_repo_with_project("project-mode-switch").await;
+    let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::Normal,
+        fake_agent_path(),
+    ));
+    let task_runtime = Arc::new(TaskRuntimeImpl::new(repo.clone(), runtime.clone()));
+    task_runtime.spawn_agent_event_forwarder();
+    let mut events = task_runtime.event_subscriber();
+
+    let task_id = create_task(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        "project-mode-switch",
+        "first message",
+        Some("Mode switch"),
+    )
+    .await;
+    // Let the first turn finish so the session is idle for the next send.
+    wait_for_event(events.resubscribe(), |event| {
+        event.event_type == "task.state"
+            && event.payload.get("status").and_then(|v| v.as_str()) == Some("idle")
+    })
+    .await;
+
+    // Switch the task to Plan mode.
+    let configured = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "session.configure",
+            "payload": {
+                "taskId": task_id,
+                "settings": { "mode": "plan" }
+            }
+        }),
+    )
+    .await;
+    match configured {
+        DesktopResult::Ok { data } => {
+            assert_eq!(data["mode"], "plan");
+        }
+        DesktopResult::Err { error } => panic!("configure failed: {error:?}"),
+    }
+
+    let task = repo.get_task(&task_id).expect("task query");
+    assert_eq!(task.mode.as_deref(), Some("plan"));
+
+    // task.open must surface the mode so a reopened conversation restores it.
+    let reopened = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({ "type": "task.open", "payload": { "taskId": task_id } }),
+    )
+    .await;
+    match reopened {
+        DesktopResult::Ok { data } => {
+            assert_eq!(data["mode"], "plan");
+        }
+        DesktopResult::Err { error } => panic!("open failed: {error:?}"),
+    }
+
+    // The next turn must send session/set_mode with modeId=plan before the
+    // prompt; the fake agent echoes the active mode in the stream.
+    let sent = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "turn.send",
+            "payload": { "taskId": task_id, "message": "second message" }
+        }),
+    )
+    .await;
+    assert!(matches!(sent, DesktopResult::Ok { .. }), "{sent:?}");
+
+    let mut streamed = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < deadline && !streamed.contains("MODE=plan") {
+        if let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
+            if event.event_type == "message.delta" {
+                streamed.push_str(
+                    event
+                        .payload
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                );
+            }
+        }
+    }
+    assert!(
+        streamed.contains("MODE=plan"),
+        "the session/set_mode modeId was not echoed back: {streamed:?}"
+    );
+
+    runtime.shutdown_all("test complete").await;
+}
+
+#[tokio::test]
+async fn session_configure_rejects_invalid_or_oversized_mode_values() {
+    let repo = make_repo_with_project("project-mode-reject").await;
+    let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::Normal,
+        fake_agent_path(),
+    ));
+    let task_runtime = Arc::new(TaskRuntimeImpl::new(repo.clone(), runtime.clone()));
+    task_runtime.spawn_agent_event_forwarder();
+
+    let task_id = create_task(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        "project-mode-reject",
+        "hello",
+        Some("Mode reject"),
+    )
+    .await;
+
+    let configure = |settings: serde_json::Value| {
+        execute_impl(
+            repo.as_ref(),
+            runtime.as_ref(),
+            task_runtime.as_ref(),
+            serde_json::json!({
+                "type": "session.configure",
+                "payload": { "taskId": task_id, "settings": settings }
+            }),
+        )
+    };
+
+    // Illegal characters are rejected.
+    let bad = configure(serde_json::json!({ "mode": "a/b c" })).await;
+    assert!(
+        matches!(bad, DesktopResult::Err { .. }),
+        "invalid mode accepted"
+    );
+
+    // Overlong mode ids are rejected.
+    let long = "x".repeat(65);
+    let oversized = configure(serde_json::json!({ "mode": long })).await;
+    assert!(
+        matches!(oversized, DesktopResult::Err { .. }),
+        "oversized mode accepted"
+    );
+
+    // A mode value that is not a string is rejected.
+    let non_string = configure(serde_json::json!({ "mode": 42 })).await;
+    assert!(
+        matches!(non_string, DesktopResult::Err { .. }),
+        "non-string mode accepted"
+    );
+
+    // Nothing changed the persisted mode (create_task used the initial "ask").
+    let task = repo.get_task(&task_id).expect("task query");
+    assert_eq!(task.mode.as_deref(), Some("ask"));
+
+    runtime.shutdown_all("test complete").await;
+}
+
+#[tokio::test]
+async fn unadvertised_mode_fails_the_turn_with_acp_request_failed() {
+    let repo = make_repo_with_project("project-mode-unadvertised").await;
+    let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::Normal,
+        fake_agent_path(),
+    ));
+    let task_runtime = Arc::new(TaskRuntimeImpl::new(repo.clone(), runtime.clone()));
+    task_runtime.spawn_agent_event_forwarder();
+    let events = task_runtime.event_subscriber();
+
+    let task_id = create_task(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        "project-mode-unadvertised",
+        "hello",
+        Some("Mode unadvertised"),
+    )
+    .await;
+    // Let the first turn finish so the session is idle for the next send.
+    wait_for_event(events.resubscribe(), |event| {
+        event.event_type == "task.state"
+            && event.payload.get("status").and_then(|v| v.as_str()) == Some("idle")
+    })
+    .await;
+
+    // The fake agent advertises default/plan/code/ask — "unknown-mode" is
+    // syntactically valid but not advertised.
+    let configured = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "session.configure",
+            "payload": {
+                "taskId": task_id,
+                "settings": { "mode": "unknown-mode" }
+            }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(configured, DesktopResult::Ok { .. }),
+        "configure must accept the value; the ACP layer validates advertisement"
+    );
+
+    let sent = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "turn.send",
+            "payload": { "taskId": task_id, "message": "this must fail" }
+        }),
+    )
+    .await;
+    match sent {
+        DesktopResult::Err { error } => {
+            assert_eq!(
+                error.code, "ACP_REQUEST_FAILED",
+                "unadvertised mode must fail closed: {error:?}"
+            );
+        }
+        DesktopResult::Ok { .. } => panic!("unadvertised mode must not send a turn"),
+    }
+
+    // The task remains usable: switching back to an advertised mode works.
+    let revert = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "session.configure",
+            "payload": {
+                "taskId": task_id,
+                "settings": { "mode": "ask" }
+            }
+        }),
+    )
+    .await;
+    assert!(matches!(revert, DesktopResult::Ok { .. }), "{revert:?}");
+    let retried = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "turn.send",
+            "payload": { "taskId": task_id, "message": "retry after revert" }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(retried, DesktopResult::Ok { .. }),
+        "retry after reverting to an advertised mode must succeed: {retried:?}"
+    );
+
+    runtime.shutdown_all("test complete").await;
+}
+
+#[tokio::test]
 async fn empty_task_title_is_derived_from_the_first_sentence() {
     let repo = make_repo_with_project("project-derived-title").await;
     let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(

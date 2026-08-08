@@ -1275,6 +1275,35 @@ fn session_configure(
         }
     }
 
+    if let Some(raw_mode) = settings.get("mode") {
+        let mode = match raw_mode {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if validate_mode_id(trimmed) {
+                    Some(trimmed.to_string())
+                } else {
+                    return DesktopResult::err(AppError::new(
+                        domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                        "模式标识无效",
+                    ));
+                }
+            }
+            _ => {
+                return DesktopResult::err(AppError::new(
+                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                    "模式设置必须是字符串",
+                ))
+            }
+        };
+        if task.mode != mode {
+            task.mode = mode;
+            changed = true;
+        }
+    }
+
     if changed {
         if let Err(error) = repo.update_task(&task) {
             return DesktopResult::err(AppError::new(error.code, error.message));
@@ -1282,9 +1311,20 @@ fn session_configure(
     }
     DesktopResult::ok(serde_json::json!({
         "taskId": payload.task_id,
+        "mode": task.mode,
         "model": task.model,
         "reasoning": task.reasoning,
     }))
+}
+
+/// Mode identifiers are opaque capability strings (agent/plan/ask/code/…).
+/// Accept alphanumerics, `-`, `_` and `.`, bounded to 64 chars.
+fn validate_mode_id(mode: &str) -> bool {
+    !mode.is_empty()
+        && mode.len() <= 64
+        && mode
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 async fn session_resume(
@@ -1337,6 +1377,7 @@ async fn task_open(
             "taskId": task.id,
             "title": task.title,
             "status": status,
+            "mode": task.mode,
             "model": task.model,
             "reasoning": task.reasoning,
             "cursor": { "lastSeq": 0, "snapshotSeq": 0 },
@@ -1365,6 +1406,7 @@ async fn task_open(
         "sessionId": binding.session_id,
         "title": task.title,
         "status": status,
+        "mode": task.mode,
         "model": task.model,
         "reasoning": task.reasoning,
         "cursor": {

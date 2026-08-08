@@ -463,10 +463,12 @@ function streamAndFinish(id, params) {
     : text.includes('<attachment_visual_context')
       ? ['MAIN_TEXT_ONLY_OK']
       : ['Hello', ' from', ' fake', ' ACP', ' agent!'];
-  // Echo the per-turn model/reasoning params so tests can observe what the
-  // client sent in the session/prompt request.
+  // Echo the active mode so tests can observe session/set_mode, plus the
+  // per-turn model/reasoning params when present.
   if (params.model !== undefined || params.reasoning !== undefined) {
-    words.unshift(`MODEL=${params.model ?? '-'} REASONING=${params.reasoning ?? '-'}`);
+    words.unshift(`MODEL=${params.model ?? '-'} REASONING=${params.reasoning ?? '-'} MODE=${activeMode}`);
+  } else {
+    words.unshift(`MODE=${activeMode}`);
   }
   let delay = SCENARIO === 'slow' ? 200 : 10;
   const step = SCENARIO === 'slow' ? 100 : 10;
