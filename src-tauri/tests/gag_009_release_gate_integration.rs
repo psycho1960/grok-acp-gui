@@ -754,9 +754,9 @@ async fn p1_02_process_raw_input_workspace_escape_rejected() {
     // verified via the inbound log instead — proving the Fake ACP truly
     // sent the escape rawInput and the adapter dispatched it.
     let log = env.log.lock().unwrap();
-    let inbound_dumped_escape = log.iter().any(|line| {
-        line.starts_with("inbound ") && line.contains("D:/outside/victim.txt")
-    });
+    let inbound_dumped_escape = log
+        .iter()
+        .any(|line| line.starts_with("inbound ") && line.contains("D:/outside/victim.txt"));
     assert!(
         inbound_dumped_escape,
         "inbound rawInput must carry the workspace-external escape path"
