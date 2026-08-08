@@ -308,6 +308,23 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             DomainError::new(crate::domain::error::codes::RUNTIME_INVALID_MODEL, message)
         })?;
 
+        // Fail fast with a precise error when the selected model profile needs
+        // an env-var API key that this process tree does not have. Without this
+        // check the grok child would start fine but fail every turn with a
+        // misleading "authentication required" error.
+        if let Some(model) = config.model.as_deref() {
+            if let Some(message) = super::config::missing_model_env_key(
+                model,
+                &super::config::configured_models(),
+                |key| std::env::var_os(key).is_some_and(|value| !value.is_empty()),
+            ) {
+                return Err(DomainError::new(
+                    crate::domain::error::codes::RUNTIME_MODEL_ENV_MISSING,
+                    message,
+                ));
+            }
+        }
+
         // Create or reset the session slot.
         {
             let mut sessions = self.sessions.lock().await;

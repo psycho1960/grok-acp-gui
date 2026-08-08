@@ -19,6 +19,10 @@ pub struct ConfiguredModel {
     pub id: String,
     pub name: String,
     pub reasoning_effort: Option<String>,
+    /// Name of the environment variable that holds this profile's API key
+    /// (`env_key` in the profile). The value is never read or stored — only
+    /// the variable NAME is captured so callers can check presence.
+    pub env_key: Option<String>,
 }
 
 /// Read model profiles from Grok Build's local `config.toml`.
@@ -42,6 +46,31 @@ fn grok_config_path() -> Option<PathBuf> {
         .map(|home| home.join(".grok").join("config.toml"))
 }
 
+/// Check that a model profile's `env_key` variable is present in the process
+/// environment. Returns a display-safe message when the variable is missing.
+///
+/// Profiles without an `env_key` (native models, inline-`api_key` profiles)
+/// and unknown profile ids pass the check — grok resolves those itself.
+/// Only the variable NAME is mentioned, never any value.
+pub(crate) fn missing_model_env_key(
+    model: &str,
+    profiles: &[ConfiguredModel],
+    env_present: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let profile = profiles.iter().find(|profile| profile.id == model)?;
+    let env_key = profile.env_key.as_deref()?;
+    if env_present(env_key) {
+        None
+    } else {
+        Some(format!(
+            "Model '{}' requires environment variable '{}', which is not set in \
+             this app's environment. Set it for your user (e.g. via 'setx {} value') \
+             and restart the app from a new terminal.",
+            model, env_key, env_key
+        ))
+    }
+}
+
 fn configured_models_from_path(path: &std::path::Path) -> Vec<ConfiguredModel> {
     let Ok(metadata) = std::fs::metadata(path) else {
         return vec![];
@@ -60,6 +89,7 @@ fn parse_configured_models(contents: &str) -> Vec<ConfiguredModel> {
     let mut current_profile: Option<String> = None;
     let mut current_model: Option<String> = None;
     let mut current_reasoning_effort: Option<String> = None;
+    let mut current_env_key: Option<String> = None;
 
     for raw_line in contents.lines() {
         let line = raw_line.trim();
@@ -73,6 +103,7 @@ fn parse_configured_models(contents: &str) -> Vec<ConfiguredModel> {
                 current_profile.take(),
                 current_model.take(),
                 current_reasoning_effort.take(),
+                current_env_key.take(),
             );
             current_profile = line
                 .strip_prefix("[model.")
@@ -90,6 +121,9 @@ fn parse_configured_models(contents: &str) -> Vec<ConfiguredModel> {
         match key.trim() {
             "model" => current_model = parse_toml_string(value.trim()),
             "reasoning_effort" => current_reasoning_effort = parse_reasoning_effort(value.trim()),
+            // Capture only the variable NAME. The API key value itself is
+            // deliberately never read into this process.
+            "env_key" => current_env_key = parse_toml_string(value.trim()),
             _ => {}
         }
     }
@@ -99,6 +133,7 @@ fn parse_configured_models(contents: &str) -> Vec<ConfiguredModel> {
         current_profile,
         current_model,
         current_reasoning_effort,
+        current_env_key,
     );
     profiles
 }
@@ -108,6 +143,7 @@ fn push_configured_model(
     profile: Option<String>,
     model_name: Option<String>,
     reasoning_effort: Option<String>,
+    env_key: Option<String>,
 ) {
     let (Some(profile), Some(model_name)) = (profile, model_name) else {
         return;
@@ -124,6 +160,7 @@ fn push_configured_model(
         id: profile,
         name,
         reasoning_effort,
+        env_key,
     });
 }
 
@@ -381,13 +418,96 @@ mod tests {
                     id: "grok-4.5".into(),
                     name: "grok-4.5".into(),
                     reasoning_effort: Some("high".into()),
+                    env_key: None,
                 },
                 ConfiguredModel {
                     id: "deepseek".into(),
                     name: "deepseek (deepseek-v4-pro)".into(),
                     reasoning_effort: Some("max".into()),
+                    env_key: None,
                 },
             ],
+        );
+    }
+
+    #[test]
+    fn parses_env_key_name_but_never_the_value() {
+        let config = r#"
+            [model.opencode]
+            model = "opencode-deepseek-v4-flash"
+            env_key = "OPENCODE_API_KEY1"
+            api_key = "sk-should-never-be-captured"
+            [model.minimax]
+            model = "MiniMax-M3"
+            api_key = "sk-inline-only"
+        "#;
+
+        let models = parse_configured_models(config);
+        assert_eq!(
+            models,
+            vec![
+                ConfiguredModel {
+                    id: "opencode".into(),
+                    name: "opencode (opencode-deepseek-v4-flash)".into(),
+                    reasoning_effort: None,
+                    env_key: Some("OPENCODE_API_KEY1".into()),
+                },
+                ConfiguredModel {
+                    id: "minimax".into(),
+                    name: "minimax (MiniMax-M3)".into(),
+                    reasoning_effort: None,
+                    // Inline api_key profiles carry no env_key: grok reads the
+                    // key from config.toml itself, and we never capture values.
+                    env_key: None,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn missing_env_key_reports_only_the_variable_name() {
+        let profiles = vec![ConfiguredModel {
+            id: "opencode".into(),
+            name: "opencode-deepseek-v4-flash".into(),
+            reasoning_effort: None,
+            env_key: Some("OPENCODE_API_KEY1".into()),
+        }];
+
+        let missing = missing_model_env_key("opencode", &profiles, |_| false).expect("missing");
+        assert!(missing.contains("OPENCODE_API_KEY1"), "{missing}");
+        assert!(
+            !missing.contains("sk-"),
+            "message must not contain any key value"
+        );
+        assert!(missing.contains("restart the app"), "{missing}");
+    }
+
+    #[test]
+    fn env_key_present_passes_the_check() {
+        let profiles = vec![ConfiguredModel {
+            id: "opencode".into(),
+            name: "opencode-deepseek-v4-flash".into(),
+            reasoning_effort: None,
+            env_key: Some("OPENCODE_API_KEY1".into()),
+        }];
+
+        assert_eq!(missing_model_env_key("opencode", &profiles, |_| true), None);
+    }
+
+    #[test]
+    fn profiles_without_env_key_or_unknown_models_pass_the_check() {
+        let profiles = vec![ConfiguredModel {
+            id: "native".into(),
+            name: "grok-4.5".into(),
+            reasoning_effort: None,
+            env_key: None,
+        }];
+
+        assert_eq!(missing_model_env_key("native", &profiles, |_| false), None);
+        assert_eq!(
+            missing_model_env_key("unknown-model", &profiles, |_| false),
+            None,
+            "unknown profiles must pass: grok resolves them itself"
         );
     }
 }
