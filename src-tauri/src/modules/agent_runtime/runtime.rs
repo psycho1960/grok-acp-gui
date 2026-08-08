@@ -30,8 +30,8 @@ use crate::bridge::types::SessionId;
 use crate::domain::error::{codes, DomainError};
 use crate::modules::agent_runtime::diagnostics::DiagLog;
 use crate::modules::agent_runtime::events::{
-    AgentEvent, EventMeta, ProcessExitedPayload, SessionReadyPayload, TimestampedEvent,
-    TurnCancelledPayload,
+    AgentEvent, EventMeta, ModeDescriptor, ProcessExitedPayload, SessionReadyPayload,
+    TimestampedEvent, TurnCancelledPayload,
 };
 use crate::modules::agent_runtime::requests::{ClientRequest, SendAck};
 use crate::modules::agent_runtime::state::{self, RuntimeState, RuntimeTransition};
@@ -72,6 +72,8 @@ struct SessionSlot {
     next_request_id: u64,
     /// Session id allocated by the ACP agent via `session/new`.
     acp_session_id: Option<String>,
+    /// Mode ids advertised by ACP in the `session/new` response.
+    available_mode_ids: Vec<String>,
     /// Agent-to-client JSON-RPC request ids awaiting a permission response.
     /// Keys are the stable request ids exposed to the task runtime; values are
     /// the raw JSON-RPC ids that must be echoed in the response envelope.
@@ -98,6 +100,7 @@ impl SessionSlot {
             // 1..=3 are reserved for initialize/authenticate/session-new.
             next_request_id: 3,
             acp_session_id: None,
+            available_mode_ids: Vec::new(),
             pending_permission_requests: Arc::new(StdMutex::new(HashMap::new())),
             pending_plan_requests: Arc::new(StdMutex::new(HashMap::new())),
             executable_path,
@@ -401,6 +404,11 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                     .await?;
 
                 let reader_acp_session_id = handshake_info.acp_session_id.clone();
+                let available_mode_ids = handshake_info
+                    .modes
+                    .iter()
+                    .map(|mode| mode.id.clone())
+                    .collect();
 
                 // Emit session_ready event.
                 let event = TimestampedEvent {
@@ -410,7 +418,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         agent_name: handshake_info.agent_name,
                         agent_version: handshake_info.agent_version,
                         models: vec![],
-                        modes: vec![],
+                        modes: handshake_info.modes,
                     }),
                 };
                 self.emit_runtime_event(event).await;
@@ -420,6 +428,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                     let mut sessions = self.sessions.lock().await;
                     let slot = sessions.get_mut(&session_id).unwrap();
                     slot.acp_session_id = Some(handshake_info.acp_session_id);
+                    slot.available_mode_ids = available_mode_ids;
                     (
                         slot.interp_ctx.clone(),
                         slot.pending_permission_requests.clone(),
@@ -661,10 +670,39 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             }
         }
 
-        if starts_turn {
-            self.try_transition(&session_id, RuntimeTransition::TurnStarted)
-                .await?;
-        }
+        let mode_to_set = match &request {
+            ClientRequest::Prompt(prompt) => match prompt.mode.as_deref() {
+                Some(requested_mode) => {
+                    let advertised_modes = self
+                        .sessions
+                        .lock()
+                        .await
+                        .get(&session_id)
+                        .map(|slot| slot.available_mode_ids.clone())
+                        .ok_or_else(|| {
+                            DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
+                        })?;
+                    if advertised_modes.is_empty() {
+                        if requested_mode.eq_ignore_ascii_case("plan") {
+                            return Err(DomainError::new(
+                                codes::ACP_REQUEST_FAILED,
+                                "ACP did not advertise the required plan mode",
+                            ));
+                        }
+                        None
+                    } else if advertised_modes.iter().any(|mode| mode == requested_mode) {
+                        Some(requested_mode.to_string())
+                    } else {
+                        return Err(DomainError::new(
+                            codes::ACP_REQUEST_FAILED,
+                            "requested session mode is not advertised by ACP",
+                        ));
+                    }
+                }
+                None => None,
+            },
+            _ => None,
+        };
 
         // Get the outbound channel.
         let outbound = {
@@ -678,22 +716,47 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         };
 
         // Allocate a request ID.
-        let (request_id, acp_session_id) = {
+        let (request_id, mode_request_id, acp_session_id) = {
             let mut sessions = self.sessions.lock().await;
             let slot = sessions.get_mut(&session_id).unwrap();
+            let mode_request_id = mode_to_set.as_ref().map(|_| {
+                slot.next_request_id += 1;
+                slot.next_request_id
+            });
             slot.next_request_id += 1;
             let request_id = slot.next_request_id;
-            if starts_turn {
-                let mut context = slot.interp_ctx.lock().unwrap();
-                context.current_request_id = Some(request_id);
-                context.suppress_turn_updates = false;
-                context.clear_error_hint();
-            }
             let acp_session_id = slot.acp_session_id.clone().ok_or_else(|| {
                 DomainError::new(codes::ACP_HANDSHAKE_FAILED, "ACP session id is missing")
             })?;
-            (request_id, acp_session_id)
+            (request_id, mode_request_id, acp_session_id)
         };
+
+        if let (Some(mode_request_id), Some(mode_id)) = (mode_request_id, mode_to_set.as_deref()) {
+            let encoded = encode_request(
+                mode_request_id,
+                "session/set_mode",
+                &serde_json::json!({
+                    "sessionId": acp_session_id,
+                    "modeId": mode_id,
+                }),
+            );
+            outbound.send(encoded).await.map_err(|_| {
+                DomainError::new(codes::RUNTIME_PROCESS_DIED, "failed to send to process")
+            })?;
+        }
+
+        if starts_turn {
+            self.try_transition(&session_id, RuntimeTransition::TurnStarted)
+                .await?;
+            let sessions = self.sessions.lock().await;
+            let slot = sessions.get(&session_id).ok_or_else(|| {
+                DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
+            })?;
+            let mut context = slot.interp_ctx.lock().unwrap();
+            context.current_request_id = Some(request_id);
+            context.suppress_turn_updates = false;
+            context.clear_error_hint();
+        }
 
         let encoded = match &request {
             ClientRequest::Prompt(p) => {
@@ -1018,6 +1081,7 @@ struct HandshakeInfo {
     agent_name: String,
     agent_version: String,
     acp_session_id: String,
+    modes: Vec<ModeDescriptor>,
 }
 
 /// Perform the ACP handshake: send `initialize` and wait for the response.
@@ -1197,12 +1261,29 @@ async fn perform_handshake(
                                 "session/new response did not include sessionId".to_string()
                             })?
                             .to_string();
+                        let modes = session
+                            .get("modes")
+                            .and_then(|modes| modes.get("availableModes"))
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|mode| {
+                                let id = mode.get("id")?.as_str()?.to_string();
+                                let name = mode
+                                    .get("name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or(&id)
+                                    .to_string();
+                                Some(ModeDescriptor { id, name })
+                            })
+                            .collect();
 
                         return Ok(HandshakeInfo {
                             protocol_version,
                             agent_name,
                             agent_version,
                             acp_session_id,
+                            modes,
                         });
                     }
                     AcpMessage::Unknown(_) => {

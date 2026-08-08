@@ -84,6 +84,7 @@ let pendingPlanResponseId = null;
 const pendingGates = [];
 const resolvedGates = new Set();
 let pendingPrompt = null;
+let activeMode = 'default';
 
 function allGatesResolved() {
   return pendingGates.length > 0 && pendingGates.every((gate) => resolvedGates.has(gate));
@@ -146,7 +147,27 @@ function handleSessionNew(id, params) {
     return;
   }
   activeSessionId = `fake-session-${++requestCounter}`;
-  sendResponse(id, { sessionId: activeSessionId });
+  sendResponse(id, {
+    sessionId: activeSessionId,
+    modes: {
+      currentModeId: activeMode,
+      availableModes: [
+        { id: 'default', name: 'Default' },
+        { id: 'plan', name: 'Plan' },
+        { id: 'code', name: 'Code' },
+      ],
+    },
+  });
+}
+
+function handleSetMode(id, params) {
+  const allowed = new Set(['default', 'plan', 'code']);
+  if (params?.sessionId !== activeSessionId || !allowed.has(params?.modeId)) {
+    sendError(id, -32602, 'sessionId and an advertised modeId are required');
+    return;
+  }
+  activeMode = params.modeId;
+  sendResponse(id, {});
 }
 
 function handlePrompt(id, params) {
@@ -559,6 +580,9 @@ rl.on('line', (line) => {
         break;
       case 'session/prompt':
         handlePrompt(msg.id, msg.params);
+        break;
+      case 'session/set_mode':
+        handleSetMode(msg.id, msg.params);
         break;
       case 'session/cancel':
         handleCancel(msg.id);

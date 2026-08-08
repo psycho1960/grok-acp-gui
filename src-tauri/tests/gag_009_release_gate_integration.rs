@@ -261,6 +261,30 @@ async fn boot_and_prompt(env: &Env) {
         .expect("send prompt");
 }
 
+async fn boot_and_prompt_with_mode(env: &Env, mode: &str) {
+    env.task_runtime
+        .enqueue_task(env.task_id.clone(), env.session_id.clone())
+        .await
+        .expect("enqueue");
+    env.task_runtime
+        .start_session(env.task_id.clone(), env.session_id.clone())
+        .await
+        .expect("start session");
+    env.agent_runtime
+        .send(
+            env.session_id.clone(),
+            ClientRequest::Prompt(PromptRequest {
+                message: "make a plan".into(),
+                attachments: vec![],
+                mode: Some(mode.into()),
+                model: None,
+                reasoning: None,
+            }),
+        )
+        .await
+        .expect("send prompt");
+}
+
 async fn wait_for<F, T>(mut condition: F) -> T
 where
     F: FnMut() -> Option<T>,
@@ -297,6 +321,16 @@ fn outbound_responses(env: &Env) -> Vec<serde_json::Value> {
             let value: serde_json::Value = serde_json::from_str(payload).ok()?;
             (value.get("id").is_some() && value.get("result").is_some()).then_some(value)
         })
+        .collect()
+}
+
+fn outbound_requests(env: &Env) -> Vec<serde_json::Value> {
+    env.log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|line| serde_json::from_str(line.strip_prefix("outbound ")?).ok())
+        .filter(|value: &serde_json::Value| value.get("method").is_some())
         .collect()
 }
 
@@ -1046,6 +1080,36 @@ async fn d5_p1_cancelling_turn_answers_pending_permission_with_cancelled_outcome
     let responses = cancelled_permission_responses(&env);
     assert_eq!(responses.len(), 1, "pending permission is answered once");
     assert_eq!(responses[0]["id"], serde_json::json!(1001));
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn p1_plan_mode_is_set_from_session_new_before_first_prompt() {
+    let env = setup(FakeScenario::Normal, "plan", Duration::from_secs(300)).await;
+    boot_and_prompt_with_mode(&env, "plan").await;
+
+    wait_for(|| {
+        outbound_requests(&env)
+            .iter()
+            .position(|request| request["method"] == "session/prompt")
+    })
+    .await;
+    let requests = outbound_requests(&env);
+    let prompt_index = requests
+        .iter()
+        .position(|request| request["method"] == "session/prompt")
+        .expect("prompt must be sent");
+    let mode_index = requests
+        .iter()
+        .position(|request| {
+            request["method"] == "session/set_mode" && request["params"]["modeId"] == "plan"
+        })
+        .expect("Plan mode must be selected through ACP before prompting");
+    assert!(
+        mode_index < prompt_index,
+        "mode selection precedes the Prompt"
+    );
 
     shutdown(&env).await;
 }
