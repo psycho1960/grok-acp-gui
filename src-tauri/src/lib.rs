@@ -26,7 +26,9 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct AppState {
     pub repo: Arc<dyn Repository>,
     pub runtime: Arc<dyn AgentRuntime>,
+    pub vision_runtime: Arc<dyn AgentRuntime>,
     pub task_runtime: Arc<dyn TaskRuntime>,
+    pub artifacts: Arc<dyn ArtifactService>,
     pub db_init_error: Option<String>,
 }
 
@@ -74,14 +76,27 @@ async fn bootstrap(
 }
 
 #[tauri::command]
-fn execute(state: tauri::State<'_, AppState>, command: serde_json::Value) -> DesktopResult {
-    // Clone Arcs out of state to get 'static references for the async block.
+async fn execute(
+    state: tauri::State<'_, AppState>,
+    command: serde_json::Value,
+) -> Result<DesktopResult, String> {
+    // This must remain an async Tauri command. Image turns can wait for the
+    // isolated vision runtime, and blocking here would freeze the WebView's
+    // Windows message loop for the entire analysis timeout.
     let repo = state.inner().repo.clone();
     let runtime = state.inner().runtime.clone();
+    let vision_runtime = state.inner().vision_runtime.clone();
     let task_runtime = state.inner().task_runtime.clone();
-    tauri::async_runtime::block_on(async move {
-        br_dispatch::execute_impl(&*repo, &*runtime, &*task_runtime, command).await
-    })
+    let artifacts = state.inner().artifacts.clone();
+    Ok(br_dispatch::execute_impl_with_vision(
+        &*repo,
+        &*runtime,
+        &*vision_runtime,
+        &*task_runtime,
+        &*artifacts,
+        command,
+    )
+    .await)
 }
 
 /// The renderer can only request an already-indexed task artifact through this
@@ -200,6 +215,13 @@ pub fn run() {
             let adapter = GrokAcpAdapter::new(config);
             let runtime_impl = AgentRuntimeImpl::new(adapter);
 
+            // --- Visual preprocessing runtime (GAG-010) ---
+            // Kept isolated from the main task runtime so temporary Luna
+            // events never enter the task/session persistence stream.
+            let vision_runtime: Arc<dyn AgentRuntime> =
+                AgentRuntimeImpl::new(GrokAcpAdapter::new(RuntimeConfig::default()));
+            let artifacts: Arc<dyn ArtifactService> = Arc::new(ManagedArtifactService::new());
+
             // --- Task runtime (GAG-006): task/session isolation, ordering,
             // persistence, and task-scoped event publication. ---
             let task_runtime_impl = Arc::new(TaskRuntimeImpl::new(
@@ -218,7 +240,9 @@ pub fn run() {
             app.manage(AppState {
                 repo,
                 runtime,
+                vision_runtime,
                 task_runtime,
+                artifacts,
                 db_init_error,
             });
             Ok(())
@@ -228,11 +252,12 @@ pub fn run() {
         .expect("error while running Grok ACP GUI");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
-            let runtime = app_handle
+            let runtimes = app_handle
                 .try_state::<AppState>()
-                .map(|state| state.runtime.clone());
-            if let Some(runtime) = runtime {
+                .map(|state| (state.runtime.clone(), state.vision_runtime.clone()));
+            if let Some((runtime, vision_runtime)) = runtimes {
                 tauri::async_runtime::block_on(runtime.shutdown_all("application exit"));
+                tauri::async_runtime::block_on(vision_runtime.shutdown_all("application exit"));
             }
         }
     });

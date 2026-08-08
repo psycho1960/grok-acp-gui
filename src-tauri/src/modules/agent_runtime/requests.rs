@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptImage {
+    /// Original file name, used only in the prompt sent to the visual
+    /// runtime so its OCR/description can name each attachment.
+    pub display_name: String,
     pub mime_type: String,
     pub base64_data: String,
 }
@@ -85,6 +88,7 @@ mod tests {
         let req = ClientRequest::Prompt(PromptRequest {
             message: "fix the bug".into(),
             attachments: vec![PromptImage {
+                display_name: "screen.png".into(),
                 mime_type: "image/png".into(),
                 base64_data: "cG5n".into(),
             }],

@@ -10,6 +10,8 @@ const props = defineProps<{
   sendPending?: boolean;
   attachmentPending?: boolean;
   attachments?: ComposerAttachment[];
+  /** Native (OS-level) drag-over highlight driven by the parent view. */
+  dropActive?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -22,7 +24,7 @@ const emit = defineEmits<{
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
-const dropActive = ref(false);
+const hoverDropActive = ref(false);
 const hasContent = computed(() => props.modelValue.trim().length > 0 || (props.attachments?.length ?? 0) > 0);
 
 function onKeydown(event: KeyboardEvent): void {
@@ -49,7 +51,7 @@ function pathsFromTransfer(transfer: DataTransfer | null): string[] {
 
 function onDrop(event: DragEvent | ClipboardEvent): void {
   event.preventDefault();
-  dropActive.value = false;
+  hoverDropActive.value = false;
   const paths = "dataTransfer" in event ? pathsFromTransfer(event.dataTransfer) : pathsFromTransfer(event.clipboardData);
   if (paths.length) emit("dropAttachments", paths);
 }
@@ -60,14 +62,14 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
 <template>
   <footer
     class="composer"
-    :class="{ 'drop-active': dropActive }"
+    :class="{ 'drop-active': hoverDropActive || props.dropActive }"
     data-testid="composer"
     aria-label="消息输入"
-    @dragover.prevent="dropActive = true"
-    @dragleave="dropActive = false"
+    @dragover.prevent="hoverDropActive = true"
+    @dragleave="hoverDropActive = false"
     @drop="onDrop"
   >
-    <div v-if="dropActive" class="drop-zone" aria-hidden="true">松开即可添加图片</div>
+    <div v-if="hoverDropActive || props.dropActive" class="drop-zone" aria-hidden="true">松开即可添加图片</div>
     <p v-if="capabilities.disabledReason" class="disabled-reason" role="status">
       {{ capabilities.disabledReason }}
     </p>
