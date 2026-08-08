@@ -4,6 +4,7 @@ import { computed, ref, shallowRef } from "vue";
 import { defineStore } from "pinia";
 import type {
   DesktopBridge,
+  ArtifactDescriptor,
   TaskOpenResult,
   TaskId,
   TypedDesktopEvent,
@@ -29,6 +30,7 @@ import {
 } from "./reducer";
 import type {
   ComposerCapabilities,
+  ComposerAttachment,
   ConversationLoadState,
   ConversationState,
   SessionTimelineSnapshot,
@@ -44,6 +46,9 @@ export const useConversationStore = defineStore("conversation", () => {
   const draft = ref("");
   const sendError = ref<string | null>(null);
   const sendPending = ref(false);
+  const attachmentPending = ref(false);
+  const attachments = ref<ComposerAttachment[]>([]);
+  const artifactRevision = ref(0);
   const cancelPending = ref(false);
   const bridgeOnline = ref(true);
   const focusEventSeq = ref<number | null>(null);
@@ -179,6 +184,7 @@ export const useConversationStore = defineStore("conversation", () => {
         bridgeOnline.value = true;
       }
     }
+    if (event.type === "artifact.available") artifactRevision.value += 1;
     scheduleDelta(event);
   }
 
@@ -228,6 +234,7 @@ export const useConversationStore = defineStore("conversation", () => {
     const next = applySnapshot(createEmptyConversationState(snapshot.taskId), snapshot);
     commit(next);
     draft.value = loadDraft(snapshot.taskId);
+    attachments.value = [];
     sendError.value = null;
     loadState.value = "ready";
     errorMessage.value = null;
@@ -248,6 +255,7 @@ export const useConversationStore = defineStore("conversation", () => {
       status: "idle",
     });
     draft.value = loadDraft(taskId);
+    attachments.value = [];
 
     if (!facade) {
       loadState.value = "ready";
@@ -315,9 +323,40 @@ export const useConversationStore = defineStore("conversation", () => {
     saveDraft(timeline.value.taskId, text);
   }
 
+  async function importAttachmentPaths(paths: string[]): Promise<boolean> {
+    if (!paths.length) return false;
+    if (!timeline.value.taskId || !facade) {
+      sendError.value = "请先打开任务，再添加图片";
+      return false;
+    }
+    attachmentPending.value = true;
+    sendError.value = null;
+    try {
+      const result = await facade.importArtifacts(timeline.value.taskId, paths);
+      if (result.success === "false") throw new Error(result.error.message);
+      const imported = result.data?.artifacts ?? [];
+      const indexed = new Map(attachments.value.map((item) => [item.artifactId, item]));
+      for (const item of imported as ArtifactDescriptor[]) indexed.set(item.artifactId, item);
+      attachments.value = Array.from(indexed.values());
+      artifactRevision.value += 1;
+      return imported.length > 0;
+    } catch (error) {
+      sendError.value = error instanceof Error ? error.message : "图片导入失败";
+      return false;
+    } finally {
+      attachmentPending.value = false;
+    }
+  }
+
+  function removeAttachment(artifactId: string): void {
+    if (!sendPending.value) attachments.value = attachments.value.filter((item) => item.artifactId !== artifactId);
+  }
+
   async function sendMessage(): Promise<boolean> {
     const text = draft.value.trim();
-    if (!text) return false;
+    const outgoingAttachments = attachments.value.map((attachment) => ({ ...attachment }));
+    const attachmentIds = outgoingAttachments.map((attachment) => attachment.artifactId);
+    if (!text && attachmentIds.length === 0) return false;
     if (!composerCapabilities.value.canSend) return false;
     if (!timeline.value.taskId) {
       sendError.value = "未选择任务";
@@ -333,17 +372,21 @@ export const useConversationStore = defineStore("conversation", () => {
     const localId = `user-${Date.now()}`;
     pendingUserId = localId;
     commit(
-      appendUserMessage(timeline.value, redactVisibleText(text), {
+      appendUserMessage(timeline.value, redactVisibleText(text || `已添加 ${attachmentIds.length} 张图片附件`), {
         id: localId,
         pending: true,
+        attachments: outgoingAttachments,
       }),
     );
+    draft.value = "";
+    attachments.value = [];
+    clearDraft(timeline.value.taskId);
     // Enter running before IPC. ACP events may complete the turn before the
     // execute Promise resolves; setting it afterwards would overwrite idle.
     commit(setRunStatus(timeline.value, "running"));
 
     try {
-      const result = await facade.sendTurn(timeline.value.taskId, text);
+      const result = await facade.sendTurn(timeline.value.taskId, text, attachmentIds);
       if (result.success === "false") {
         commit(
           markUserMessageFailed(
@@ -354,7 +397,11 @@ export const useConversationStore = defineStore("conversation", () => {
         );
         sendError.value = result.error.message;
         commit(setRunStatus(timeline.value, "error"));
-        // Keep draft for retry
+        if (!draft.value) {
+          draft.value = text;
+          saveDraft(timeline.value.taskId, text);
+        }
+        if (!attachments.value.length) attachments.value = outgoingAttachments;
         return false;
       }
       commit(markUserMessageConfirmed(timeline.value, localId));
@@ -367,6 +414,11 @@ export const useConversationStore = defineStore("conversation", () => {
       commit(markUserMessageFailed(timeline.value, localId, msg));
       commit(setRunStatus(timeline.value, "error"));
       sendError.value = msg;
+      if (!draft.value) {
+        draft.value = text;
+        saveDraft(timeline.value.taskId, text);
+      }
+      if (!attachments.value.length) attachments.value = outgoingAttachments;
       return false;
     } finally {
       sendPending.value = false;
@@ -533,6 +585,9 @@ export const useConversationStore = defineStore("conversation", () => {
     draft,
     sendError,
     sendPending,
+    attachmentPending,
+    attachments,
+    artifactRevision,
     cancelPending,
     bridgeOnline,
     focusEventSeq,
@@ -544,6 +599,8 @@ export const useConversationStore = defineStore("conversation", () => {
     openFromSnapshot,
     openTask,
     setDraft,
+    importAttachmentPaths,
+    removeAttachment,
     sendMessage,
     cancelTurn,
     resumeSession,

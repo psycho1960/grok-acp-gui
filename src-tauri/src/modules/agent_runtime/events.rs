@@ -281,6 +281,10 @@ pub struct ArtifactAnnouncedPayload {
     pub mime_type: String,
     /// Display name (sanitised).
     pub display_name: String,
+    /// ACP may identify a generated file by a workspace-relative path. This
+    /// stays inside the runtime boundary and is never serialised to the UI.
+    #[serde(default, skip_serializing)]
+    pub relative_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

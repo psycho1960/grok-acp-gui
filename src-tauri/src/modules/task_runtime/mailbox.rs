@@ -170,6 +170,7 @@ impl MailboxWorker {
         let mut stored_payload =
             serde_json::to_value(&event.event).unwrap_or(serde_json::Value::Null);
         self.register_approval_request(&event, &mut stored_payload)?;
+        self.register_announced_artifact(&event, &mut stored_payload);
         let stored = StoredEvent {
             dedup_key,
             session_id: session_id.clone(),
@@ -461,6 +462,62 @@ impl MailboxWorker {
             _ => {}
         }
         Ok(())
+    }
+
+    /// ACP output paths are untrusted. Only a relative path that resolves
+    /// inside the task workspace can become an attachment; its bytes still go
+    /// through MOD-ARTIFACTS' type, size, hash, and atomic-copy checks. A
+    /// failed registration remains visible as quarantined metadata instead of
+    /// leaking a path to the renderer or aborting the session event stream.
+    fn register_announced_artifact(
+        &self,
+        event: &crate::modules::agent_runtime::TimestampedEvent,
+        stored_payload: &mut serde_json::Value,
+    ) {
+        use crate::modules::agent_runtime::AgentEvent;
+        use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
+
+        let AgentEvent::ArtifactAnnounced(payload) = &event.event else {
+            return;
+        };
+        let result = payload
+            .relative_path
+            .as_deref()
+            .ok_or_else(|| {
+                DomainError::new(
+                    "ARTIFACT_QUARANTINED",
+                    "ACP artifact has no workspace-relative path",
+                )
+            })
+            .and_then(|relative_path| {
+                ManagedArtifactService::new().register_agent_artifact(
+                    self.repo.as_ref(),
+                    &self.task_id,
+                    relative_path,
+                )
+            });
+        let object = match stored_payload.as_object_mut() {
+            Some(object) => object,
+            None => return,
+        };
+        object.remove("relativePath");
+        match result {
+            Ok(descriptor) => {
+                object.insert(
+                    "artifactId".into(),
+                    serde_json::json!(descriptor.artifact_id),
+                );
+                object.insert("mimeType".into(), serde_json::json!(descriptor.mime_type));
+                object.insert(
+                    "displayName".into(),
+                    serde_json::json!(descriptor.display_name),
+                );
+                object.insert("state".into(), serde_json::json!(descriptor.state));
+            }
+            Err(_) => {
+                object.insert("state".into(), serde_json::json!("quarantined"));
+            }
+        }
     }
 
     async fn handle_cancel(&self) -> Result<(), DomainError> {

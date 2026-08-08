@@ -120,6 +120,19 @@ pub struct ArtifactImportPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ArtifactIdPayload {
+    pub task_id: super::types::TaskId,
+    pub artifact_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactListPayload {
+    pub task_id: super::types::TaskId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArtifactSavePayload {
     pub task_id: super::types::TaskId,
     pub artifact_ids: Vec<String>,
@@ -226,6 +239,12 @@ pub enum DesktopCommand {
 
     #[serde(rename = "artifact.import")]
     ArtifactImport(ArtifactImportPayload),
+    #[serde(rename = "artifact.list")]
+    ArtifactList(ArtifactListPayload),
+    #[serde(rename = "artifact.preview")]
+    ArtifactPreview(ArtifactIdPayload),
+    #[serde(rename = "artifact.reveal")]
+    ArtifactReveal(ArtifactIdPayload),
     #[serde(rename = "artifact.save")]
     ArtifactSave(ArtifactSavePayload),
 
@@ -275,6 +294,9 @@ pub fn is_known_command(cmd_type: &str) -> bool {
             | "permission.resolve"
             | "plan.resolve"
             | "artifact.import"
+            | "artifact.list"
+            | "artifact.preview"
+            | "artifact.reveal"
             | "artifact.save"
             | "workspace.inspect"
             | "worktree.adopt"
@@ -402,6 +424,17 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             for path in &p.paths {
                 validate_non_empty_path(path)?;
             }
+            Ok(())
+        }
+
+        DesktopCommand::ArtifactList(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::ArtifactPreview(p) | DesktopCommand::ArtifactReveal(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_id_non_empty(&p.artifact_id)?;
             Ok(())
         }
 

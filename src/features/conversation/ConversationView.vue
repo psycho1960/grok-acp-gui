@@ -4,11 +4,14 @@ import EmptyState from "../../shared/ui/EmptyState.vue";
 import ErrorState from "../../shared/ui/ErrorState.vue";
 import Skeleton from "../../shared/ui/Skeleton.vue";
 import type { DesktopBridge, TaskId } from "../../bridge/types";
+import { pickImages } from "../../bridge/image-picker";
+import { subscribeImageDrops } from "../../bridge/image-drop";
 import { useConversationStore } from "./conversation-store";
 import Composer from "./Composer.vue";
 import ConversationHeader from "./ConversationHeader.vue";
 import TimelineItemView from "./TimelineItemView.vue";
 import TimelineVirtualList from "./TimelineVirtualList.vue";
+import ArtifactPanel from "./ArtifactPanel.vue";
 import type { SessionTimelineSnapshot } from "./types";
 
 const props = defineProps<{
@@ -21,6 +24,10 @@ const props = defineProps<{
 
 const store = useConversationStore();
 const listRef = ref<InstanceType<typeof TimelineVirtualList> | null>(null);
+const artifactPanel = ref<InstanceType<typeof ArtifactPanel> | null>(null);
+const composerRegion = ref<HTMLElement | null>(null);
+const nativeDropActive = ref(false);
+let unsubscribeImageDrops: (() => void) | null = null;
 
 const sessionKey = computed(
   () => String(store.sessionId ?? store.taskId ?? props.taskId ?? "none"),
@@ -44,10 +51,25 @@ onMounted(async () => {
   if (props.focusSeq != null) {
     store.setFocusEventSeq(props.focusSeq);
   }
+  try {
+    unsubscribeImageDrops = await subscribeImageDrops((event) => {
+      if (event.type === "leave") {
+        nativeDropActive.value = false;
+        return;
+      }
+      const inside = isInsideComposer(event.clientX, event.clientY);
+      nativeDropActive.value = inside && store.composerCapabilities.canSend;
+      if (event.type === "drop" && inside) void onDroppedAttachments(event.paths);
+    });
+  } catch {
+    // The native listener is optional in browser tests; the picker remains available.
+  }
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", focusPendingApproval);
+  unsubscribeImageDrops?.();
+  unsubscribeImageDrops = null;
   store.detach();
 });
 
@@ -104,6 +126,36 @@ async function onCancel(): Promise<void> {
 async function onResume(): Promise<void> {
   await store.resumeSession();
 }
+
+async function onAddAttachments(): Promise<void> {
+  const result = await pickImages();
+  if (result.error) store.sendError = result.error;
+  else await store.importAttachmentPaths(result.paths);
+}
+
+function isInsideComposer(clientX: number, clientY: number): boolean {
+  const bounds = composerRegion.value?.getBoundingClientRect();
+  return Boolean(
+    bounds &&
+      clientX >= bounds.left &&
+      clientX <= bounds.right &&
+      clientY >= bounds.top &&
+      clientY <= bounds.bottom,
+  );
+}
+
+async function onDroppedAttachments(paths: string[]): Promise<void> {
+  nativeDropActive.value = false;
+  await store.importAttachmentPaths(paths);
+}
+
+async function onDropAttachments(paths: string[]): Promise<void> {
+  await store.importAttachmentPaths(paths);
+}
+
+function onOpenArtifact(artifactId: string): void {
+  artifactPanel.value?.openArtifact(artifactId);
+}
 </script>
 
 <template>
@@ -119,50 +171,66 @@ async function onResume(): Promise<void> {
       @resume="onResume"
     />
 
-    <div class="body">
-      <div v-if="store.loadState === 'loading'" class="state-pad">
-        <Skeleton />
-        <Skeleton />
+    <div class="content-layout">
+      <div class="body">
+        <div v-if="store.loadState === 'loading'" class="state-pad">
+          <Skeleton />
+          <Skeleton />
+        </div>
+        <ErrorState
+          v-else-if="store.loadState === 'error'"
+          title="会话加载失败"
+          :detail="store.errorMessage ?? '未知错误'"
+        />
+        <EmptyState
+          v-else-if="store.items.length === 0"
+          title="还没有消息"
+          detail="在下方输入并发送，开始与 Agent 对话。"
+        />
+        <TimelineVirtualList
+          v-else
+          ref="listRef"
+          :items="store.items"
+          :session-key="sessionKey"
+          :focus-seq="props.focusSeq ?? store.focusEventSeq"
+          :item-height="128"
+        >
+          <template #default="{ item }">
+            <TimelineItemView
+              :item="item"
+              :focused="item.id === focusedId"
+              @toggle-tool="store.toggleTool"
+              @toggle-thinking="store.toggleThinking"
+              @resolve-permission="store.resolvePermission"
+              @resolve-plan="store.resolvePlan"
+              @open-artifact="onOpenArtifact"
+            />
+          </template>
+        </TimelineVirtualList>
       </div>
-      <ErrorState
-        v-else-if="store.loadState === 'error'"
-        title="会话加载失败"
-        :detail="store.errorMessage ?? '未知错误'"
+      <ArtifactPanel
+        ref="artifactPanel"
+        :bridge="props.bridge"
+        :task-id="store.taskId"
+        :refresh-key="store.artifactRevision"
       />
-      <EmptyState
-        v-else-if="store.items.length === 0"
-        title="还没有消息"
-        detail="在下方输入并发送，开始与 Agent 对话。"
-      />
-      <TimelineVirtualList
-        v-else
-        ref="listRef"
-        :items="store.items"
-        :session-key="sessionKey"
-        :focus-seq="props.focusSeq ?? store.focusEventSeq"
-        :item-height="128"
-      >
-        <template #default="{ item }">
-          <TimelineItemView
-            :item="item"
-            :focused="item.id === focusedId"
-            @toggle-tool="store.toggleTool"
-            @toggle-thinking="store.toggleThinking"
-            @resolve-permission="store.resolvePermission"
-            @resolve-plan="store.resolvePlan"
-          />
-        </template>
-      </TimelineVirtualList>
     </div>
 
     <Composer
+      ref="composerRegion"
       :model-value="store.draft"
       :capabilities="store.composerCapabilities"
       :send-error="store.sendError"
       :send-pending="store.sendPending"
+      :attachment-pending="store.attachmentPending"
+      :attachments="store.attachments"
+      :drop-active="nativeDropActive"
       @update:model-value="store.setDraft"
       @send="onSend"
       @cancel="onCancel"
+      @add-attachments="onAddAttachments"
+      @drop-attachments="onDropAttachments"
+      @remove-attachment="store.removeAttachment"
     />
   </section>
 </template>
@@ -175,6 +243,7 @@ async function onResume(): Promise<void> {
   min-height: 0;
   background: var(--ctp-base);
 }
+.content-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); min-height: 0; overflow: hidden; }
 .body {
   min-height: 0;
   overflow: hidden;
@@ -184,4 +253,5 @@ async function onResume(): Promise<void> {
   gap: var(--space-2);
   padding: var(--space-4);
 }
+@media (max-width: 860px) { .content-layout { grid-template-columns: 1fr; grid-template-rows: minmax(220px, 1fr) auto; } }
 </style>

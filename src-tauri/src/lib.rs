@@ -3,6 +3,7 @@ pub mod bridge;
 pub mod domain;
 pub mod modules {
     pub mod agent_runtime;
+    pub mod artifacts;
     pub mod persistence;
     pub mod task_runtime;
 }
@@ -14,6 +15,7 @@ pub mod adapters {
 
 use crate::adapters::grok_acp::GrokAcpAdapter;
 use crate::modules::agent_runtime::{AgentRuntime, AgentRuntimeImpl, RuntimeConfig};
+use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::{TaskRuntime, TaskRuntimeImpl};
 use bridge::dispatch::{self as br_dispatch, DesktopResult};
@@ -24,7 +26,9 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct AppState {
     pub repo: Arc<dyn Repository>,
     pub runtime: Arc<dyn AgentRuntime>,
+    pub vision_runtime: Arc<dyn AgentRuntime>,
     pub task_runtime: Arc<dyn TaskRuntime>,
+    pub artifacts: Arc<dyn ArtifactService>,
     pub db_init_error: Option<String>,
 }
 
@@ -72,18 +76,87 @@ async fn bootstrap(
 }
 
 #[tauri::command]
-fn execute(state: tauri::State<'_, AppState>, command: serde_json::Value) -> DesktopResult {
-    // Clone Arcs out of state to get 'static references for the async block.
+async fn execute(
+    state: tauri::State<'_, AppState>,
+    command: serde_json::Value,
+) -> Result<DesktopResult, String> {
+    // This must remain an async Tauri command. Image turns can wait for the
+    // isolated vision runtime, and blocking here would freeze the WebView's
+    // Windows message loop for the entire analysis timeout.
     let repo = state.inner().repo.clone();
     let runtime = state.inner().runtime.clone();
+    let vision_runtime = state.inner().vision_runtime.clone();
     let task_runtime = state.inner().task_runtime.clone();
-    tauri::async_runtime::block_on(async move {
-        br_dispatch::execute_impl(&*repo, &*runtime, &*task_runtime, command).await
-    })
+    let artifacts = state.inner().artifacts.clone();
+    Ok(br_dispatch::execute_impl_with_vision(
+        &*repo,
+        &*runtime,
+        &*vision_runtime,
+        &*task_runtime,
+        &*artifacts,
+        command,
+    )
+    .await)
+}
+
+/// The renderer can only request an already-indexed task artifact through this
+/// protocol.  It never receives a filesystem path or a `file:` URL, and the
+/// service repeats owner/root/hash validation before any bytes are returned.
+fn serve_artifact_protocol(
+    app_handle: &AppHandle,
+    request_path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    let not_found = || {
+        tauri::http::Response::builder()
+            .status(404)
+            .header("Cache-Control", "no-store")
+            .body(Vec::new())
+            .expect("static artifact response")
+    };
+    let Some((task_id, artifact_id)) = protocol_artifact_ids(request_path) else {
+        return not_found();
+    };
+    let state = app_handle.state::<AppState>();
+    let images = match ManagedArtifactService::new().resolve_images(
+        state.repo.as_ref(),
+        &bridge::types::TaskId::new(task_id.to_owned()),
+        &[artifact_id.to_owned()],
+    ) {
+        Ok(images) if images.len() == 1 => images,
+        _ => return not_found(),
+    };
+    let image = &images[0];
+    tauri::http::Response::builder()
+        .status(200)
+        .header("Content-Type", image.descriptor.mime_type.as_str())
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Cache-Control", "no-store")
+        .body(image.bytes.clone())
+        .expect("static artifact response")
+}
+
+fn protocol_artifact_ids(path: &str) -> Option<(&str, &str)> {
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() != 2 {
+        return None;
+    }
+    let safe_id = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    };
+    (safe_id(segments[0]) && safe_id(segments[1])).then_some((segments[0], segments[1]))
 }
 
 pub fn run() {
     let app = tauri::Builder::default()
+        .register_uri_scheme_protocol("grok-artifact", |context, request| {
+            serve_artifact_protocol(context.app_handle(), request.uri().path())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
@@ -142,6 +215,13 @@ pub fn run() {
             let adapter = GrokAcpAdapter::new(config);
             let runtime_impl = AgentRuntimeImpl::new(adapter);
 
+            // --- Visual preprocessing runtime (GAG-010) ---
+            // Kept isolated from the main task runtime so temporary Luna
+            // events never enter the task/session persistence stream.
+            let vision_runtime: Arc<dyn AgentRuntime> =
+                AgentRuntimeImpl::new(GrokAcpAdapter::new(RuntimeConfig::default()));
+            let artifacts: Arc<dyn ArtifactService> = Arc::new(ManagedArtifactService::new());
+
             // --- Task runtime (GAG-006): task/session isolation, ordering,
             // persistence, and task-scoped event publication. ---
             let task_runtime_impl = Arc::new(TaskRuntimeImpl::new(
@@ -160,7 +240,9 @@ pub fn run() {
             app.manage(AppState {
                 repo,
                 runtime,
+                vision_runtime,
                 task_runtime,
+                artifacts,
                 db_init_error,
             });
             Ok(())
@@ -170,11 +252,12 @@ pub fn run() {
         .expect("error while running Grok ACP GUI");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
-            let runtime = app_handle
+            let runtimes = app_handle
                 .try_state::<AppState>()
-                .map(|state| state.runtime.clone());
-            if let Some(runtime) = runtime {
+                .map(|state| (state.runtime.clone(), state.vision_runtime.clone()));
+            if let Some((runtime, vision_runtime)) = runtimes {
                 tauri::async_runtime::block_on(runtime.shutdown_all("application exit"));
+                tauri::async_runtime::block_on(vision_runtime.shutdown_all("application exit"));
             }
         }
     });
@@ -202,4 +285,20 @@ fn spawn_event_forwarder(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::protocol_artifact_ids;
+
+    #[test]
+    fn artifact_protocol_accepts_only_opaque_ids() {
+        assert_eq!(
+            protocol_artifact_ids("/task-1/artifact_2"),
+            Some(("task-1", "artifact_2"))
+        );
+        assert!(protocol_artifact_ids("/task-1/../secret").is_none());
+        assert!(protocol_artifact_ids("/task-1/%2e%2e").is_none());
+        assert!(protocol_artifact_ids("/task-1/artifact-2/extra").is_none());
+    }
 }

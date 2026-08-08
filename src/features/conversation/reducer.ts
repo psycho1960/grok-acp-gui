@@ -32,6 +32,20 @@ function itemId(kind: string, seq: number, extra = ""): string {
   return extra ? `${kind}-${seq}-${extra}` : `${kind}-${seq}`;
 }
 
+const VISUAL_CONTEXT_MARKER =
+  '<attachment_visual_context source="gpt-5.6-luna" trust="untrusted">';
+
+/**
+ * The main runtime receives Luna OCR in a private prompt suffix. Some ACP
+ * servers echo that composed prompt as a user_message_chunk; only the text the
+ * user actually entered may be rendered or used to reconcile optimistic UI.
+ */
+export function stripInternalVisualContext(text: string): string {
+  const markerIndex = text.indexOf(VISUAL_CONTEXT_MARKER);
+  if (markerIndex < 0) return text;
+  return text.slice(0, markerIndex).trimEnd();
+}
+
 export function createEmptyConversationState(
   taskId: TaskId | null = null,
 ): ConversationState {
@@ -141,12 +155,13 @@ function applyMessageDelta(
   const { role, text, toolCall } = event.payload;
 
   if (role === "user" && typeof text === "string" && text.length > 0) {
+    const visibleText = stripInternalVisualContext(text);
     const optimistic = [...next.items]
       .reverse()
       .find(
         (item): item is UserMessageItem =>
           item.kind === "user" &&
-          item.text === text &&
+          item.text === visibleText &&
           item.eventKey.startsWith("user:") &&
           !item.failed,
       );
@@ -157,7 +172,8 @@ function applyMessageDelta(
       sessionId: event.sessionId,
       timestamp: event.timestamp,
       eventKey: eventKey(event.sessionId, event.seq),
-      text,
+      text: visibleText,
+      attachments: optimistic?.attachments,
       pending: false,
       failed: false,
       errorMessage: undefined,
@@ -512,6 +528,7 @@ function applyArtifact(
       artifactId: p.artifactId,
       mimeType: p.mimeType,
       displayName: p.displayName,
+      state: p.state ?? "ready",
     },
   };
   return upsertItem(next, item);
@@ -804,7 +821,12 @@ export function applySnapshot(
 export function appendUserMessage(
   state: ConversationState,
   text: string,
-  opts: { id?: string; pending?: boolean; timestamp?: string } = {},
+  opts: {
+    id?: string;
+    pending?: boolean;
+    timestamp?: string;
+    attachments?: UserMessageItem["attachments"];
+  } = {},
 ): ConversationState {
   if (!state.sessionId && !state.taskId) {
     // Still allow local message before session binds
@@ -820,6 +842,7 @@ export function appendUserMessage(
     timestamp,
     eventKey: `user:${id}`,
     text,
+    attachments: opts.attachments?.map((attachment) => ({ ...attachment })),
     pending: opts.pending ?? false,
   };
   return upsertItem(state, item);

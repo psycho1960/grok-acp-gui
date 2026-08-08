@@ -17,6 +17,7 @@ const emit = defineEmits<{
   toggleThinking: [id: string];
   resolvePermission: [itemId: string, optionId: string];
   resolvePlan: [itemId: string, optionId: string];
+  openArtifact: [artifactId: string];
 }>();
 
 function formatTime(iso: string): string {
@@ -63,6 +64,13 @@ function formatTime(iso: string): string {
     <template v-if="item.kind === 'user'">
       <div class="bubble user" data-testid="user-message">
         <p>{{ item.text }}</p>
+        <ul v-if="item.attachments?.length" class="message-attachments" aria-label="消息附件">
+          <li v-for="attachment in item.attachments" :key="attachment.artifactId">
+            <span aria-hidden="true">▧</span>
+            <span>{{ attachment.displayName }}</span>
+            <span class="attachment-size">{{ Math.ceil(attachment.bytes / 1024) }} KiB</span>
+          </li>
+        </ul>
         <p v-if="item.pending" class="status-line">发送中…</p>
         <p v-if="item.failed" class="status-line error" role="alert">
           {{ item.errorMessage ?? "发送失败" }}
@@ -107,7 +115,7 @@ function formatTime(iso: string): string {
     </template>
 
     <template v-else-if="item.kind === 'artifact'">
-      <ArtifactSlot :slot-data="item.slot" />
+      <ArtifactSlot :slot-data="item.slot" @open="emit('openArtifact', $event)" />
     </template>
 
     <template v-else-if="item.kind === 'error'">
@@ -185,6 +193,27 @@ function formatTime(iso: string): string {
   font-size: var(--font-small);
   color: var(--ctp-subtext0);
 }
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0;
+  margin: var(--space-2) 0 0;
+  list-style: none;
+}
+.message-attachments li {
+  display: inline-flex;
+  max-width: 100%;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--radius-control);
+}
+.attachment-size { color: var(--ctp-subtext0); font-size: var(--font-small); }
 .status-line.error {
   color: var(--ctp-red);
 }

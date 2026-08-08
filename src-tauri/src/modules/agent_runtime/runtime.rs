@@ -848,12 +848,20 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
 
         let encoded = match &request {
             ClientRequest::Prompt(p) => {
+                let mut prompt = vec![serde_json::json!({
+                    "type": "text",
+                    "text": p.message,
+                })];
+                prompt.extend(p.attachments.iter().map(|image| {
+                    serde_json::json!({
+                        "type": "image",
+                        "mimeType": image.mime_type,
+                        "data": image.base64_data,
+                    })
+                }));
                 let params = serde_json::json!({
                     "sessionId": acp_session_id,
-                    "prompt": [{
-                        "type": "text",
-                        "text": p.message,
-                    }],
+                    "prompt": prompt,
                 });
                 encode_request(request_id, "session/prompt", &params)
             }

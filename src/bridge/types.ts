@@ -230,6 +230,9 @@ export type DesktopCommand =
   | { type: "permission.resolve"; payload: PermissionResolvePayload }
   | { type: "plan.resolve"; payload: PlanResolvePayload }
   | { type: "artifact.import"; payload: ArtifactImportPayload }
+  | { type: "artifact.list"; payload: ArtifactListPayload }
+  | { type: "artifact.preview"; payload: ArtifactIdPayload }
+  | { type: "artifact.reveal"; payload: ArtifactIdPayload }
   | { type: "artifact.save"; payload: ArtifactSavePayload }
   | { type: "workspace.inspect"; payload: WorkspaceInspectPayload }
   | { type: "worktree.adopt"; payload: WorktreeAdoptPayload }
@@ -320,6 +323,19 @@ export interface PlanResolvePayload {
 export interface ArtifactImportPayload {
   taskId: TaskId;
   paths: string[];
+}
+
+export interface ArtifactListPayload { taskId: TaskId; }
+export interface ArtifactIdPayload { taskId: TaskId; artifactId: string; }
+
+/** Metadata-only Artifact DTO. Cache paths and bytes never cross DesktopBridge. */
+export interface ArtifactDescriptor {
+  artifactId: string;
+  displayName: string;
+  mimeType: string;
+  bytes: number;
+  state: "ready" | "rejected" | "failed" | "missing" | "quarantined" | string;
+  previewCapability: "inline" | "onDemand" | "none" | string;
 }
 
 export interface ArtifactSavePayload {
@@ -504,6 +520,7 @@ export interface ArtifactAvailablePayload {
   artifactId: string;
   mimeType: string;
   displayName: string;
+  state?: "ready" | "quarantined" | "missing" | string;
 }
 
 export interface ResourceWarningPayload {
@@ -553,6 +570,20 @@ export interface TurnSendResult {
   requestId?: number;
   /** Compatibility with the original mock response. */
   seq?: number;
+}
+
+export interface ArtifactImportResult {
+  artifacts: ArtifactDescriptor[];
+}
+
+export interface ArtifactListResult {
+  artifacts: ArtifactDescriptor[];
+}
+
+export interface ArtifactPreviewResult {
+  artifact: ArtifactDescriptor;
+  /** Opaque custom-scheme URL. Never a filesystem path or data URL. */
+  url: string;
 }
 
 export interface WorkspaceInspectResult {

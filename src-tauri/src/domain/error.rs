@@ -30,6 +30,9 @@ pub mod codes {
 
     pub const ARTIFACT_TOO_LARGE: &str = "ARTIFACT_TOO_LARGE";
     pub const ARTIFACT_INVALID_FORMAT: &str = "ARTIFACT_INVALID_FORMAT";
+    pub const ARTIFACT_NOT_FOUND: &str = "ARTIFACT_NOT_FOUND";
+    pub const ARTIFACT_CACHE_MISSING: &str = "ARTIFACT_CACHE_MISSING";
+    pub const ARTIFACT_VISION_FAILED: &str = "ARTIFACT_VISION_FAILED";
 
     pub const DB_MIGRATION_FAILED: &str = "DB_MIGRATION_FAILED";
     pub const DB_QUERY_FAILED: &str = "DB_QUERY_FAILED";

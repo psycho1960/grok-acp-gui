@@ -240,6 +240,8 @@ pub struct ArtifactAvailablePayload {
     pub artifact_id: String,
     pub mime_type: String,
     pub display_name: String,
+    #[serde(default)]
+    pub state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
