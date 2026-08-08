@@ -166,7 +166,10 @@ impl OperationDescriptor {
         // Git path-type global options (-C, --git-dir, --work-tree) may point
         // outside the workspace; they must satisfy the same containment rule.
         if self.kind == OperationKind::Git {
-            for value in git_path_option_values(&self.args) {
+            for value in git_path_option_values(&self.args)
+                .into_iter()
+                .chain(git_no_index_operands(&self.args))
+            {
                 let normalized = if Path::new(&value).is_absolute() {
                     normalize_path(&value)?
                 } else {
@@ -306,6 +309,22 @@ fn git_path_option_values(args: &[String]) -> Vec<String> {
         }
     }
     values
+}
+
+/// `git diff --no-index` compares arbitrary filesystem operands rather than
+/// repository paths. They are therefore part of the workspace boundary.
+fn git_no_index_operands(args: &[String]) -> Vec<String> {
+    let Some(index) = args
+        .iter()
+        .position(|arg| arg.eq_ignore_ascii_case("--no-index"))
+    else {
+        return Vec::new();
+    };
+    args[index + 1..]
+        .iter()
+        .filter(|arg| arg.as_str() != "--" && !arg.starts_with('-'))
+        .cloned()
+        .collect()
 }
 
 fn classify_git(executable: Option<&str>, args: &[String]) -> OperationCategory {
@@ -725,6 +744,18 @@ mod tests {
             .validate_within("C:/repo")
             .is_ok());
         assert!(git(&["--git-dir=C:/repo/.git", "status"])
+            .validate_within("C:/repo")
+            .is_ok());
+    }
+
+    #[test]
+    fn git_no_index_operands_must_stay_inside_the_workspace() {
+        assert!(
+            git(&["diff", "--no-index", "D:/outside/a", "D:/outside/b",])
+                .validate_within("C:/repo")
+                .is_err()
+        );
+        assert!(git(&["diff", "--no-index", "C:/repo/a", "C:/repo/b",])
             .validate_within("C:/repo")
             .is_ok());
     }

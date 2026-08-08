@@ -791,17 +791,39 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         let current = self.get_state(&session_id).await;
         match current {
             Some(RuntimeState::Busy) => {
-                let outbound = {
+                let (outbound, acp_session_id, pending_permission_rpcs, pending_plan_rpcs) = {
                     let sessions = self.sessions.lock().await;
-                    sessions.get(&session_id).and_then(|s| s.outbound.clone())
+                    let Some(slot) = sessions.get(&session_id) else {
+                        return;
+                    };
+                    let pending_permission_rpcs =
+                        std::mem::take(&mut *slot.pending_permission_requests.lock().unwrap())
+                            .into_values()
+                            .collect::<Vec<_>>();
+                    let pending_plan_rpcs =
+                        std::mem::take(&mut *slot.pending_plan_requests.lock().unwrap())
+                            .into_values()
+                            .collect::<Vec<_>>();
+                    (
+                        slot.outbound.clone(),
+                        slot.acp_session_id.clone(),
+                        pending_permission_rpcs,
+                        pending_plan_rpcs,
+                    )
                 };
                 if let Some(tx) = outbound {
-                    let acp_session_id = {
-                        let sessions = self.sessions.lock().await;
-                        sessions
-                            .get(&session_id)
-                            .and_then(|slot| slot.acp_session_id.clone())
-                    };
+                    // Agent-to-client requests must always receive a terminal
+                    // response before cancelling the outer Prompt; otherwise a
+                    // live ACP process can keep the previous turn suspended.
+                    for rpc_id in pending_permission_rpcs.into_iter().chain(pending_plan_rpcs) {
+                        let encoded = encode_response_result(
+                            &rpc_id,
+                            &serde_json::json!({ "outcome": { "outcome": "cancelled" } }),
+                        );
+                        if tx.send(encoded).await.is_err() {
+                            break;
+                        }
+                    }
                     let encoded = encode_notification(
                         "session/cancel",
                         &serde_json::json!({ "sessionId": acp_session_id }),

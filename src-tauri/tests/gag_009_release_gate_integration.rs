@@ -329,6 +329,13 @@ fn responses_with_option(env: &Env, option_id: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+fn cancelled_permission_responses(env: &Env) -> Vec<serde_json::Value> {
+    outbound_responses(env)
+        .into_iter()
+        .filter(|value| value["result"]["outcome"]["outcome"].as_str() == Some("cancelled"))
+        .collect()
+}
+
 /// Wait until a response carrying `option_id` appears in the outbound log,
 /// then give any duplicate a short observation window to surface.
 async fn wait_for_response(env: &Env, option_id: &str) {
@@ -1020,6 +1027,25 @@ async fn d5_p1_raw_readonly_path_outside_workspace_is_fail_closed() {
     let result = permission_resolve(&env, &permission, "opt-allow-once").await;
     assert!(result.is_err(), "stripped allow option cannot be resolved");
     assert_never_sent(&env, "opt-allow-once").await;
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn d5_p1_cancelling_turn_answers_pending_permission_with_cancelled_outcome() {
+    let env = setup(FakeScenario::Permission, "code", Duration::from_secs(300)).await;
+    boot_and_prompt(&env).await;
+    wait_for(|| pending_permission(&env, "perm-2")).await;
+
+    env.task_runtime
+        .cancel_session(env.task_id.clone())
+        .await
+        .expect("cancel task");
+
+    wait_for(|| (!cancelled_permission_responses(&env).is_empty()).then_some(())).await;
+    let responses = cancelled_permission_responses(&env);
+    assert_eq!(responses.len(), 1, "pending permission is answered once");
+    assert_eq!(responses[0]["id"], serde_json::json!(1001));
 
     shutdown(&env).await;
 }

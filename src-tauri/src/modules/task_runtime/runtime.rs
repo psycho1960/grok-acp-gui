@@ -435,6 +435,11 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
 
         let session_id = binding.session_id.clone();
 
+        // Close any nested ACP permission/Plan request before making the
+        // local task idle. This prevents the agent from retaining a suspended
+        // previous turn after the UI has cancelled it.
+        self.agent_runtime.cancel(session_id.clone(), None).await;
+
         // Update task status back to idle so it can be re-enqueued.
         self.repo
             .update_task_status(&task_id.0, "idle", Some("cancelled by user"))?;

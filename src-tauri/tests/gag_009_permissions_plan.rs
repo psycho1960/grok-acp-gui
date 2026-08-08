@@ -180,6 +180,40 @@ fn raw_request_ids_are_isolated_by_session() {
             .0,
         "task-2"
     );
+
+    for (task_id, session_id, correlation_id) in [
+        ("task-1", "session-1", "correlation-1"),
+        ("task-2", "session-2", "correlation-1"),
+    ] {
+        repo.decide_permission(&PermissionDecision {
+            request_id: "permission-1".into(),
+            task_id: TaskId::new(task_id),
+            session_id: SessionId::new(session_id),
+            correlation_id: correlation_id.into(),
+            workspace: "C:/repo".into(),
+            expected_plan_version: None,
+            option_id: "allow-1".into(),
+            decided_at: utc_now(),
+            decided_at_epoch_seconds: 10,
+        })
+        .unwrap();
+    }
+
+    for (task_id, session_id) in [("task-1", "session-1"), ("task-2", "session-2")] {
+        let context = ExecutionContext {
+            task_id: TaskId::new(task_id),
+            session_id: SessionId::new(session_id),
+            workspace: "C:/repo".into(),
+            plan_version: None,
+            plan_approved: true,
+        };
+        assert!(
+            repo.consume_permission(&context, "digest-1", 20)
+                .unwrap()
+                .is_some(),
+            "same request ID must be consumed independently for {session_id}"
+        );
+    }
 }
 
 #[test]

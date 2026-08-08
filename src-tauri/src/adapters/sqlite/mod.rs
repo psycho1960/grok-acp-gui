@@ -1743,8 +1743,8 @@ impl Repository for SqliteRepository {
         let consumed_at = utc_now();
         if state == "approved_once" {
             let changed = tx.execute(
-                "UPDATE permission_decisions SET state='consumed',consumed_at=?1,updated_at=?1 WHERE request_id=?2 AND state='approved_once'",
-                params![consumed_at, request_id],
+                "UPDATE permission_decisions SET state='consumed',consumed_at=?1,updated_at=?1 WHERE request_id=?2 AND session_id=?3 AND state='approved_once'",
+                params![consumed_at, request_id, context.session_id.0],
             ).map_err(|e| db_error("consume_permission update", &e))?;
             if changed != 1 {
                 return Err(DomainError::new(
@@ -1755,8 +1755,8 @@ impl Repository for SqliteRepository {
         }
         tx.execute(
             "INSERT INTO approval_audit_events (task_id,session_id,request_id,event_kind,decision,operation_digest,plan_version,correlation_id,occurred_at)
-             SELECT task_id,session_id,request_id,'permission','consumed',operation_digest,plan_version,correlation_id,?1 FROM permission_decisions WHERE request_id=?2",
-            params![consumed_at, request_id],
+             SELECT task_id,session_id,request_id,'permission','consumed',operation_digest,plan_version,correlation_id,?1 FROM permission_decisions WHERE request_id=?2 AND session_id=?3",
+            params![consumed_at, request_id, context.session_id.0],
         ).map_err(|e| db_error("consume_permission audit", &e))?;
         tx.commit()
             .map_err(|e| db_error("consume_permission commit", &e))?;

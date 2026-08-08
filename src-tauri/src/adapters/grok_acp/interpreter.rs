@@ -743,6 +743,7 @@ fn extract_permission_operation(
         .to_string();
     let operation_kind = if operation_kind.eq_ignore_ascii_case("bash")
         || operation_kind.eq_ignore_ascii_case("shell")
+        || operation_kind.eq_ignore_ascii_case("execute")
     {
         parsed_command
             .as_ref()
@@ -1325,6 +1326,23 @@ mod tests {
             vec!["commit".to_string(), "-m".to_string(), "test".to_string()]
         );
         assert_eq!(descriptor.operation_kind, "git");
+    }
+
+    #[test]
+    fn standard_acp_execute_kind_classifies_git_raw_command_as_git() {
+        let params = json!({
+            "toolCall": {
+                "toolCallId": "tc-1",
+                "title": "Run git",
+                "kind": "execute",
+                "rawInput": { "command": "git commit -m test" }
+            }
+        });
+
+        let descriptor = extract_permission_operation(&params)
+            .expect("standard execute request must produce a descriptor");
+        assert_eq!(descriptor.operation_kind, "git");
+        assert_eq!(descriptor.executable.as_deref(), Some("git"));
     }
 
     #[test]
