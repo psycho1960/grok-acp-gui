@@ -40,6 +40,18 @@ const DEFAULT_PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// Maximum event window for snapshots.
 const SNAPSHOT_EVENT_LIMIT: u32 = 500;
 
+async fn approval_resolution_for_session(
+    locks: &Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
+    session_id: &SessionId,
+) -> Arc<Mutex<()>> {
+    locks
+        .lock()
+        .await
+        .entry(session_id.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 /// The concrete TaskRuntime implementation.
 pub struct TaskRuntimeImpl<A: AgentRuntime> {
     /// The repository (persistent state).
@@ -63,9 +75,10 @@ pub struct TaskRuntimeImpl<A: AgentRuntime> {
     /// Per-session semaphore permits. The permit is released back to the
     /// semaphore when the entry is removed (e.g. on session cancel/completion).
     permits: Mutex<HashMap<SessionId, tokio::sync::OwnedSemaphorePermit>>,
-    /// Serializes ACP resolution submission with the corresponding database
-    /// transition, preventing double-clicks from sending the same option twice.
-    approval_resolution: Arc<Mutex<()>>,
+    /// Per-session serialization of ACP resolution submission with the
+    /// corresponding database transition. Sessions stay isolated while a
+    /// double-click within one session still cannot send an option twice.
+    approval_resolutions: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
     /// Bridge event broadcaster (Renderer subscribes to this).
     event_broadcaster: tokio::sync::broadcast::Sender<crate::bridge::events::DesktopEvent>,
 }
@@ -110,7 +123,7 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
             mailboxes: Mutex::new(HashMap::new()),
             sequence_offsets: Mutex::new(HashMap::new()),
             permits: Mutex::new(HashMap::new()),
-            approval_resolution: Arc::new(Mutex::new(())),
+            approval_resolutions: Mutex::new(HashMap::new()),
             event_broadcaster: event_tx,
         }
     }
@@ -125,17 +138,22 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
         if let Some(mb) = mailboxes.get(session_id) {
             return mb.clone();
         }
+        let approval_resolution = self.approval_resolution_for(session_id).await;
         let mb = SessionMailbox::new(
             task_id.clone(),
             session_id.clone(),
             self.repo.clone(),
             self.event_broadcaster.clone(),
             self.agent_runtime.clone(),
-            self.approval_resolution.clone(),
+            approval_resolution,
             self.permission_timeout,
         );
         mailboxes.insert(session_id.clone(), mb.clone());
         mb
+    }
+
+    async fn approval_resolution_for(&self, session_id: &SessionId) -> Arc<Mutex<()>> {
+        approval_resolution_for_session(&self.approval_resolutions, session_id).await
     }
 
     /// Get the event broadcaster for subscribers.
@@ -543,7 +561,8 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             PermissionDecision, PermissionOptionAction, PermissionState,
         };
 
-        let _resolution = self.approval_resolution.lock().await;
+        let approval_resolution = self.approval_resolution_for(&request.session_id).await;
+        let _resolution = approval_resolution.lock().await;
         let pending = self
             .repo
             .get_permission(&request.request_id, &request.session_id.0)?;
@@ -686,7 +705,8 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         use crate::modules::agent_runtime::ClientRequest;
         use crate::modules::task_runtime::plan::{PlanDecision, PlanOptionAction, PlanState};
 
-        let _resolution = self.approval_resolution.lock().await;
+        let approval_resolution = self.approval_resolution_for(&request.session_id).await;
+        let _resolution = approval_resolution.lock().await;
         let pending = self
             .repo
             .get_plan(&request.request_id, &request.session_id.0)?;
@@ -806,5 +826,24 @@ mod tests {
                 "SNAPSHOT_EVENT_LIMIT must be <= 500"
             )
         };
+    }
+
+    #[tokio::test]
+    async fn approval_resolution_locks_are_isolated_by_session() {
+        let locks = Mutex::new(HashMap::new());
+        let first = approval_resolution_for_session(&locks, &SessionId::new("session-a")).await;
+        let second = approval_resolution_for_session(&locks, &SessionId::new("session-b")).await;
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "different sessions must not share an approval-resolution lock"
+        );
+        let _first_guard = first.lock().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), second.lock())
+                .await
+                .is_ok(),
+            "a busy session must not block a different session's resolution"
+        );
     }
 }
