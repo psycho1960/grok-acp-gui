@@ -132,6 +132,13 @@ async fn image_is_analyzed_by_luna_then_only_text_reaches_main_session() {
 
     runtime.shutdown_all("handoff test complete").await;
     vision_runtime.shutdown_all("handoff test complete").await;
-    assert_eq!(main_text, "MAIN_TEXT_ONLY_OK");
+    // The main session receives only the composed text marker — never the
+    // raw image (VISUAL_CONTEXT_OK). The fake agent may prefix an echo of
+    // the per-turn model/reasoning params before the marker.
+    assert!(
+        main_text.ends_with("MAIN_TEXT_ONLY_OK"),
+        "main session text was {main_text:?}"
+    );
+    assert!(!main_text.contains("VISUAL_CONTEXT_OK"));
     std::fs::remove_dir_all(temp).unwrap();
 }
