@@ -298,12 +298,21 @@ export interface SessionResumePayload {
 }
 
 export interface PermissionResolvePayload {
+  taskId: TaskId;
+  sessionId: SessionId;
   requestId: string;
+  correlationId: string;
+  /** Zero when the request is not bound to a Plan. */
+  expectedVersion: number;
   optionId: string;
 }
 
 export interface PlanResolvePayload {
+  taskId: TaskId;
+  sessionId: SessionId;
   requestId: string;
+  correlationId: string;
+  expectedVersion: number;
   /** ACP option ID, passed verbatim from the permission request. */
   optionId: string;
 }
@@ -437,9 +446,23 @@ export interface ActivityUpdatedPayload {
 
 export interface PermissionRequestedPayload {
   requestId: string;
+  correlationId: string;
+  expectedVersion: number | null;
+  expiresAtEpochSeconds: number;
   options: PermissionOption[];
   /** ACP ToolCallUpdate summary for the UI. */
   toolCall: ToolCallSummary;
+  operation: PermissionOperationView;
+}
+
+export interface PermissionOperationView {
+  category: "read_only" | "write" | "destructive" | "unknown";
+  executable?: string;
+  args?: string[];
+  cwd?: string;
+  readPaths?: string[];
+  writePaths?: string[];
+  risk: string;
 }
 
 export interface ToolCallSummary {
@@ -454,13 +477,21 @@ export interface PermissionOption {
   optionId: string;
   /** Human-readable label. */
   name: string;
-  /** ACP PermissionOptionKind. */
-  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+  /** Explicit ACP semantic field. Unknown values remain unknown. */
+  kind?: string;
 }
 
 export interface PlanUpdatedPayload {
   status: string;
-  detail: unknown;
+  detail: {
+    requestId?: string;
+    correlationId?: string;
+    version?: number;
+    summary?: string;
+    steps?: string[];
+    options?: PermissionOption[];
+    reason?: string;
+  };
 }
 
 export interface ChangesUpdatedPayload {

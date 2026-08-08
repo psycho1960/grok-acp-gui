@@ -15,6 +15,8 @@ defineProps<{
 const emit = defineEmits<{
   toggleTool: [id: string];
   toggleThinking: [id: string];
+  resolvePermission: [itemId: string, optionId: string];
+  resolvePlan: [itemId: string, optionId: string];
 }>();
 
 function formatTime(iso: string): string {
@@ -97,11 +99,11 @@ function formatTime(iso: string): string {
     </template>
 
     <template v-else-if="item.kind === 'permission'">
-      <PermissionSlot :slot-data="item.slot" />
+      <PermissionSlot :slot-data="item.slot" @resolve="emit('resolvePermission', item.id, $event)" />
     </template>
 
     <template v-else-if="item.kind === 'plan'">
-      <PlanSlot :slot-data="item.slot" />
+      <PlanSlot :slot-data="item.slot" @resolve="emit('resolvePlan', item.id, $event)" />
     </template>
 
     <template v-else-if="item.kind === 'artifact'">

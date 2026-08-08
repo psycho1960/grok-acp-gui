@@ -34,8 +34,23 @@ use crate::modules::task_runtime::TaskRuntime;
 /// Default maximum concurrent tasks (configurable via settings).
 const DEFAULT_MAX_CONCURRENT: u32 = 4;
 
+/// Default permission request timeout (300 seconds).
+const DEFAULT_PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Maximum event window for snapshots.
 const SNAPSHOT_EVENT_LIMIT: u32 = 500;
+
+async fn approval_resolution_for_session(
+    locks: &Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
+    session_id: &SessionId,
+) -> Arc<Mutex<()>> {
+    locks
+        .lock()
+        .await
+        .entry(session_id.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 /// The concrete TaskRuntime implementation.
 pub struct TaskRuntimeImpl<A: AgentRuntime> {
@@ -49,6 +64,9 @@ pub struct TaskRuntimeImpl<A: AgentRuntime> {
     semaphore: Arc<Semaphore>,
     /// Maximum permits on the semaphore.
     max_concurrent: u32,
+    /// How long a pending permission may stay unresolved before the mailbox
+    /// worker auto-rejects it with the ACP deny option.
+    permission_timeout: std::time::Duration,
     /// Per-session mailboxes, keyed by session_id.
     mailboxes: Mutex<HashMap<SessionId, SessionMailbox>>,
     /// Per-process generation offset used when a persisted session is
@@ -57,6 +75,10 @@ pub struct TaskRuntimeImpl<A: AgentRuntime> {
     /// Per-session semaphore permits. The permit is released back to the
     /// semaphore when the entry is removed (e.g. on session cancel/completion).
     permits: Mutex<HashMap<SessionId, tokio::sync::OwnedSemaphorePermit>>,
+    /// Per-session serialization of ACP resolution submission with the
+    /// corresponding database transition. Sessions stay isolated while a
+    /// double-click within one session still cannot send an option twice.
+    approval_resolutions: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
     /// Bridge event broadcaster (Renderer subscribes to this).
     event_broadcaster: tokio::sync::broadcast::Sender<crate::bridge::events::DesktopEvent>,
 }
@@ -73,6 +95,23 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
         agent_runtime: Arc<A>,
         max_concurrent: u32,
     ) -> Self {
+        Self::with_concurrency_and_permission_timeout(
+            repo,
+            agent_runtime,
+            max_concurrent,
+            DEFAULT_PERMISSION_TIMEOUT,
+        )
+    }
+
+    /// Create a new TaskRuntime with a specific concurrency limit and
+    /// permission timeout. Tests inject short timeouts so the auto-reject
+    /// path is exercised without waiting 300 seconds in real time.
+    pub fn with_concurrency_and_permission_timeout(
+        repo: Arc<dyn Repository>,
+        agent_runtime: Arc<A>,
+        max_concurrent: u32,
+        permission_timeout: std::time::Duration,
+    ) -> Self {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             repo,
@@ -80,9 +119,11 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
             forwarding_started: AtomicBool::new(false),
             semaphore: Arc::new(Semaphore::new(max_concurrent as usize)),
             max_concurrent,
+            permission_timeout,
             mailboxes: Mutex::new(HashMap::new()),
             sequence_offsets: Mutex::new(HashMap::new()),
             permits: Mutex::new(HashMap::new()),
+            approval_resolutions: Mutex::new(HashMap::new()),
             event_broadcaster: event_tx,
         }
     }
@@ -97,14 +138,22 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
         if let Some(mb) = mailboxes.get(session_id) {
             return mb.clone();
         }
+        let approval_resolution = self.approval_resolution_for(session_id).await;
         let mb = SessionMailbox::new(
             task_id.clone(),
             session_id.clone(),
             self.repo.clone(),
             self.event_broadcaster.clone(),
+            self.agent_runtime.clone(),
+            approval_resolution,
+            self.permission_timeout,
         );
         mailboxes.insert(session_id.clone(), mb.clone());
         mb
+    }
+
+    async fn approval_resolution_for(&self, session_id: &SessionId) -> Arc<Mutex<()>> {
+        approval_resolution_for_session(&self.approval_resolutions, session_id).await
     }
 
     /// Get the event broadcaster for subscribers.
@@ -386,6 +435,11 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
 
         let session_id = binding.session_id.clone();
 
+        // Close any nested ACP permission/Plan request before making the
+        // local task idle. This prevents the agent from retaining a suspended
+        // previous turn after the UI has cancelled it.
+        self.agent_runtime.cancel(session_id.clone(), None).await;
+
         // Update task status back to idle so it can be re-enqueued.
         self.repo
             .update_task_status(&task_id.0, "idle", Some("cancelled by user"))?;
@@ -501,6 +555,272 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
 
         Ok(enriched)
     }
+
+    async fn resolve_permission(
+        &self,
+        request: crate::modules::task_runtime::permission::PermissionResolutionRequest,
+    ) -> Result<crate::modules::task_runtime::permission::PermissionState, DomainError> {
+        use crate::modules::agent_runtime::requests::ResolvePermissionRequest;
+        use crate::modules::agent_runtime::ClientRequest;
+        use crate::modules::task_runtime::permission::{
+            PermissionDecision, PermissionOptionAction, PermissionState,
+        };
+
+        let approval_resolution = self.approval_resolution_for(&request.session_id).await;
+        let _resolution = approval_resolution.lock().await;
+        let pending = self
+            .repo
+            .get_permission(&request.request_id, &request.session_id.0)?;
+        let expected_plan_version =
+            (request.expected_version != 0).then_some(request.expected_version);
+        if pending.task_id != request.task_id
+            || pending.session_id != request.session_id
+            || pending.correlation_id != request.correlation_id
+            || pending.plan_version != expected_plan_version
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                "Permission request context or Plan version changed",
+            ));
+        }
+        let action = pending
+            .options
+            .iter()
+            .find(|option| option.option_id == request.option_id)
+            .map(|option| option.action)
+            .unwrap_or(PermissionOptionAction::Unknown);
+        if action == PermissionOptionAction::Unknown {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_DENIED,
+                "Permission option has no explicit ACP action",
+            ));
+        }
+        // The Plan gate comes before every other state check: while the
+        // current Plan is not approved for this permission's version, no
+        // allow-type option may be forwarded — including on records that a
+        // newer Plan already expired. Denial remains available because
+        // rejection is always safe.
+        if action != PermissionOptionAction::Deny
+            && self.repo.get_task(&request.task_id.0)?.mode.as_deref() == Some("plan")
+        {
+            let active_plan = self.repo.latest_plan(&request.task_id.0)?;
+            let approved = active_plan.as_ref().is_some_and(|plan| {
+                plan.state == crate::modules::task_runtime::plan::PlanState::Approved
+                    && Some(plan.version) == pending.plan_version
+            });
+            if !approved {
+                return Err(DomainError::new(
+                    crate::domain::error::codes::PLAN_NOT_APPROVED,
+                    "Plan is not approved for this permission request",
+                ));
+            }
+        }
+        if pending.state != PermissionState::Requested {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Permission request is no longer pending",
+            ));
+        }
+        // Fail closed: operations that cannot be safely classified (missing
+        // cwd, escaped paths, unknown category) are never authorizable. Only
+        // denial remains available because rejection is always safe.
+        if pending.category == crate::modules::task_runtime::permission::OperationCategory::Unknown
+            && action != PermissionOptionAction::Deny
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_DENIED,
+                "Operation cannot be classified safely; approval is blocked",
+            ));
+        }
+        if action == PermissionOptionAction::AllowScope
+            && pending.category
+                != crate::modules::task_runtime::permission::OperationCategory::ReadOnly
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_DENIED,
+                "Persistent approval is restricted to exact read-only operations",
+            ));
+        }
+        // Expiry must be checked before the ACP option is sent: an expired
+        // request must never reach the agent as an approval. The resolution
+        // mutex serializes this check with the send, leaving no window for a
+        // concurrent decision to slip in.
+        let now_epoch_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if pending.expires_at_epoch_seconds < now_epoch_seconds {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_EXPIRED,
+                "Permission request expired before it could be resolved",
+            ));
+        }
+        let binding = self
+            .repo
+            .get_binding_by_task(&request.task_id.0)?
+            .ok_or_else(|| {
+                DomainError::new(
+                    crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                    "Session binding is missing",
+                )
+            })?;
+        if binding.session_id != request.session_id
+            || binding.cwd.as_deref() != Some(&pending.workspace)
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                "Workspace binding changed",
+            ));
+        }
+
+        let decided_at = crate::domain::types::utc_now();
+        let decided = self.repo.decide_permission(&PermissionDecision {
+            request_id: request.request_id.clone(),
+            task_id: request.task_id.clone(),
+            session_id: request.session_id.clone(),
+            correlation_id: request.correlation_id,
+            workspace: pending.workspace,
+            expected_plan_version,
+            option_id: request.option_id.clone(),
+            decided_at,
+            decided_at_epoch_seconds: now_epoch_seconds,
+        })?;
+        // A durable decision must exist before the Agent receives an allow
+        // response. If SQLite rejects the transaction, fail closed without
+        // emitting any ACP approval that could authorize external I/O.
+        if let Err(error) = self
+            .agent_runtime
+            .send(
+                request.session_id.clone(),
+                ClientRequest::ResolvePermission(ResolvePermissionRequest {
+                    request_id: request.request_id.clone(),
+                    option_id: request.option_id.clone(),
+                }),
+            )
+            .await
+        {
+            if self
+                .repo
+                .revert_permission_decision(&request.request_id, &request.session_id.0)
+                .is_err()
+            {
+                let _ = self.repo.expire_session_permissions(
+                    &request.session_id.0,
+                    "ACP permission delivery failed",
+                );
+            }
+            return Err(error);
+        }
+        self.repo
+            .update_task_status(&request.task_id.0, "running", None)?;
+        Ok(decided.state)
+    }
+
+    async fn resolve_plan(
+        &self,
+        request: crate::modules::task_runtime::plan::PlanResolutionRequest,
+    ) -> Result<crate::modules::task_runtime::plan::PlanState, DomainError> {
+        use crate::modules::agent_runtime::requests::ResolvePlanRequest;
+        use crate::modules::agent_runtime::ClientRequest;
+        use crate::modules::task_runtime::plan::{PlanDecision, PlanOptionAction, PlanState};
+
+        let approval_resolution = self.approval_resolution_for(&request.session_id).await;
+        let _resolution = approval_resolution.lock().await;
+        let pending = self
+            .repo
+            .get_plan(&request.request_id, &request.session_id.0)?;
+        if pending.task_id != request.task_id
+            || pending.session_id != request.session_id
+            || pending.correlation_id != request.correlation_id
+            || pending.version != request.expected_version
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PLAN_VERSION_MISMATCH,
+                "Plan context or version changed",
+            ));
+        }
+        if pending.state != PlanState::Proposed {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Plan request is no longer pending",
+            ));
+        }
+        let action = pending
+            .options
+            .iter()
+            .find(|option| option.option_id == request.option_id)
+            .map(|option| option.action)
+            .unwrap_or(PlanOptionAction::Unknown);
+        if action == PlanOptionAction::Unknown {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_DENIED,
+                "Plan option has no explicit ACP action",
+            ));
+        }
+        let binding = self
+            .repo
+            .get_binding_by_task(&request.task_id.0)?
+            .ok_or_else(|| {
+                DomainError::new(
+                    crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                    "Session binding is missing",
+                )
+            })?;
+        if binding.session_id != request.session_id
+            || binding.cwd.as_deref() != Some(&pending.workspace)
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                "Workspace binding changed",
+            ));
+        }
+
+        let decided = self.repo.decide_plan(&PlanDecision {
+            request_id: request.request_id.clone(),
+            task_id: request.task_id.clone(),
+            session_id: request.session_id.clone(),
+            correlation_id: request.correlation_id,
+            workspace: pending.workspace,
+            expected_version: request.expected_version,
+            option_id: request.option_id.clone(),
+            decided_at: crate::domain::types::utc_now(),
+        })?;
+        // Persist before responding to the Agent for the same reason as a
+        // permission decision: an ACP approval must never outlive its local
+        // audit trail when storage fails.
+        if let Err(error) = self
+            .agent_runtime
+            .send(
+                request.session_id.clone(),
+                ClientRequest::ResolvePlan(ResolvePlanRequest {
+                    request_id: request.request_id.clone(),
+                    option_id: request.option_id.clone(),
+                }),
+            )
+            .await
+        {
+            if self
+                .repo
+                .revert_plan_decision(&request.request_id, &request.session_id.0)
+                .is_err()
+            {
+                let _ = self
+                    .repo
+                    .supersede_session_plans(&request.session_id.0, "ACP Plan delivery failed");
+            }
+            return Err(error);
+        }
+        self.repo.update_task_status(
+            &request.task_id.0,
+            if decided.state == PlanState::Rejected {
+                "idle"
+            } else {
+                "running"
+            },
+            None,
+        )?;
+        Ok(decided.state)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,5 +858,24 @@ mod tests {
                 "SNAPSHOT_EVENT_LIMIT must be <= 500"
             )
         };
+    }
+
+    #[tokio::test]
+    async fn approval_resolution_locks_are_isolated_by_session() {
+        let locks = Mutex::new(HashMap::new());
+        let first = approval_resolution_for_session(&locks, &SessionId::new("session-a")).await;
+        let second = approval_resolution_for_session(&locks, &SessionId::new("session-b")).await;
+
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "different sessions must not share an approval-resolution lock"
+        );
+        let _first_guard = first.lock().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), second.lock())
+                .await
+                .is_ok(),
+            "a busy session must not block a different session's resolution"
+        );
     }
 }

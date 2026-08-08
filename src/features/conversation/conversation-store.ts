@@ -25,6 +25,7 @@ import {
   setRunStatus,
   toggleThinkingExpanded,
   toggleToolExpanded,
+  updateApprovalDecision,
 } from "./reducer";
 import type {
   ComposerCapabilities,
@@ -395,6 +396,91 @@ export const useConversationStore = defineStore("conversation", () => {
     }
   }
 
+  async function resolvePermission(itemId: string, optionId: string): Promise<boolean> {
+    if (!facade) return false;
+    const item = timeline.value.items.find((candidate) => candidate.id === itemId);
+    if (!item || item.kind !== "permission" || item.slot.decisionState === "submitting") {
+      return false;
+    }
+    const slot = item.slot;
+    if (slot.expired || Date.now() / 1000 > slot.expiresAtEpochSeconds) {
+      commit(updateApprovalDecision(timeline.value, itemId, {
+        decisionState: "error",
+        errorMessage: "请求已失效",
+      }));
+      return false;
+    }
+    commit(updateApprovalDecision(timeline.value, itemId, {
+      decisionState: "submitting",
+      optionId,
+    }));
+    try {
+      const result = await facade.resolvePermission({
+        taskId: slot.taskId,
+        sessionId: slot.sessionId,
+        requestId: slot.requestId,
+        correlationId: slot.correlationId,
+        expectedVersion: slot.expectedVersion,
+        optionId,
+      });
+      if (result.success === "false") throw new Error(result.error.message);
+      commit(updateApprovalDecision(timeline.value, itemId, {
+        decisionState: "resolved",
+        optionId,
+      }));
+      return true;
+    } catch (error) {
+      commit(updateApprovalDecision(timeline.value, itemId, {
+        decisionState: "error",
+        optionId,
+        errorMessage: error instanceof Error ? error.message : "权限处理失败",
+      }));
+      return false;
+    }
+  }
+
+  async function resolvePlan(itemId: string, optionId: string): Promise<boolean> {
+    if (!facade) return false;
+    const item = timeline.value.items.find((candidate) => candidate.id === itemId);
+    if (!item || item.kind !== "plan" || item.slot.decisionState === "submitting") {
+      return false;
+    }
+    const slot = item.slot;
+    if (slot.approvalInvalidated) return false;
+    commit(updateApprovalDecision(timeline.value, itemId, {
+      decisionState: "submitting",
+      optionId,
+    }));
+    try {
+      const result = await facade.resolvePlan({
+        taskId: slot.taskId,
+        sessionId: slot.sessionId,
+        requestId: slot.requestId,
+        correlationId: slot.correlationId,
+        expectedVersion: slot.version,
+        optionId,
+      });
+      if (result.success === "false") throw new Error(result.error.message);
+      const state =
+        result.data && typeof result.data === "object" && "state" in result.data
+          ? String(result.data.state)
+          : "resolved";
+      commit(updateApprovalDecision(timeline.value, itemId, {
+        decisionState: "resolved",
+        optionId,
+        status: state,
+      }));
+      return true;
+    } catch (error) {
+      commit(updateApprovalDecision(timeline.value, itemId, {
+        decisionState: "error",
+        optionId,
+        errorMessage: error instanceof Error ? error.message : "Plan 处理失败",
+      }));
+      return false;
+    }
+  }
+
   async function resumeSession(): Promise<boolean> {
     if (!timeline.value.taskId || !facade) return false;
     sendError.value = null;
@@ -461,6 +547,8 @@ export const useConversationStore = defineStore("conversation", () => {
     sendMessage,
     cancelTurn,
     resumeSession,
+    resolvePermission,
+    resolvePlan,
     toggleTool,
     toggleThinking,
     setFocusEventSeq,

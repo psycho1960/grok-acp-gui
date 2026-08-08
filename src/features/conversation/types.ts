@@ -60,7 +60,12 @@ export interface ToolCallView {
 }
 
 export interface PermissionSlotView {
+  taskId: TaskId;
+  sessionId: SessionId;
   requestId: string;
+  correlationId: string;
+  expectedVersion: number;
+  expiresAtEpochSeconds: number;
   toolCall: {
     toolCallId: string;
     title?: string;
@@ -70,14 +75,29 @@ export interface PermissionSlotView {
   options: Array<{
     optionId: string;
     name: string;
-    kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+    kind?: string;
   }>;
+  operation: import("../../bridge/types").PermissionOperationView;
+  decisionState?: "pending" | "submitting" | "resolved" | "error";
+  selectedOptionId?: string;
+  errorMessage?: string;
   expired?: boolean;
 }
 
 export interface PlanSlotView {
+  taskId: TaskId;
+  sessionId: SessionId;
+  requestId: string;
+  correlationId: string;
+  version: number;
   status: string;
   detailSummary: string;
+  steps: string[];
+  options: Array<{ optionId: string; name: string; kind?: string }>;
+  decisionState?: "pending" | "submitting" | "resolved" | "error";
+  selectedOptionId?: string;
+  errorMessage?: string;
+  approvalInvalidated?: boolean;
 }
 
 export interface ArtifactSlotView {

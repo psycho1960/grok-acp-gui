@@ -379,7 +379,12 @@ function applyPermission(
     timestamp: event.timestamp,
     eventKey: eventKey(event.sessionId, event.seq),
     slot: {
+      taskId: event.taskId,
+      sessionId: event.sessionId,
       requestId: p.requestId,
+      correlationId: p.correlationId,
+      expectedVersion: p.expectedVersion ?? 0,
+      expiresAtEpochSeconds: p.expiresAtEpochSeconds,
       toolCall: {
         toolCallId: p.toolCall.toolCallId,
         title: p.toolCall.title,
@@ -391,6 +396,8 @@ function applyPermission(
         name: o.name,
         kind: o.kind,
       })),
+      operation: p.operation,
+      decisionState: "pending",
     },
   };
   return upsertItem(next, item);
@@ -405,18 +412,35 @@ function applyPlan(
   let detailSummary = "Plan 已更新";
   if (typeof detail === "string") detailSummary = detail;
   else if (detail && typeof detail === "object") {
-    detailSummary = "规划步骤已更新（详情见 Plan 面板）";
+    detailSummary = detail.summary ?? "规划步骤已更新（详情见 Plan 面板）";
   }
 
   const status = event.payload.status;
   if (
     status === "awaiting_approval" ||
     status === "waiting" ||
-    status === "pending"
+    status === "pending" ||
+    status === "proposed"
   ) {
     next = { ...next, status: "waiting_plan" };
   }
 
+  const version = detail.version ?? 0;
+  next = {
+    ...next,
+    items: next.items.map((item) =>
+      item.kind === "plan" && item.slot.version < version
+        ? {
+            ...item,
+            slot: {
+              ...item.slot,
+              approvalInvalidated: true,
+              status: "superseded",
+            },
+          }
+        : item,
+    ),
+  };
   const item: PlanItem = {
     id: itemId("plan", event.seq),
     kind: "plan",
@@ -424,9 +448,51 @@ function applyPlan(
     sessionId: event.sessionId,
     timestamp: event.timestamp,
     eventKey: eventKey(event.sessionId, event.seq),
-    slot: { status, detailSummary },
+    slot: {
+      taskId: event.taskId,
+      sessionId: event.sessionId,
+      requestId: detail.requestId ?? "",
+      correlationId: detail.correlationId ?? "",
+      version,
+      status,
+      detailSummary,
+      steps: detail.steps ?? [],
+      options: detail.options ?? [],
+      decisionState: "pending",
+    },
   };
   return upsertItem(next, item);
+}
+
+export function updateApprovalDecision(
+  state: ConversationState,
+  itemId: string,
+  update: {
+    decisionState: "submitting" | "resolved" | "error";
+    optionId?: string;
+    errorMessage?: string;
+    status?: string;
+  },
+): ConversationState {
+  return {
+    ...state,
+    status: update.decisionState === "resolved" ? "running" : state.status,
+    items: state.items.map((item) => {
+      if (item.id !== itemId || (item.kind !== "permission" && item.kind !== "plan")) {
+        return item;
+      }
+      return {
+        ...item,
+        slot: {
+          ...item.slot,
+          decisionState: update.decisionState,
+          selectedOptionId: update.optionId,
+          errorMessage: update.errorMessage,
+          ...(item.kind === "plan" && update.status ? { status: update.status } : {}),
+        },
+      } as TimelineItem;
+    }),
+  };
 }
 
 function applyArtifact(

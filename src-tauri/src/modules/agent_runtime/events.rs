@@ -228,6 +228,10 @@ pub struct PermissionRequestedPayload {
     pub tool_call: ToolEventPayload,
     /// Options presented by the agent, with original option IDs.
     pub options: Vec<PermissionOptionDescriptor>,
+    /// Structured internal operation details for the local execution guard.
+    /// This value is never copied wholesale into a DesktopEvent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<PermissionOperationDescriptor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +241,26 @@ pub struct PermissionOptionDescriptor {
     pub option_id: String,
     /// Human-readable label.
     pub name: String,
+    /// Explicit ACP semantic discriminator. Missing/unknown values stay
+    /// unknown; callers must never infer semantics from `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionOperationDescriptor {
+    pub operation_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub read_paths: Vec<String>,
+    #[serde(default)]
+    pub write_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -359,6 +383,7 @@ mod tests {
         let opt = PermissionOptionDescriptor {
             option_id: "opt-abc-123".into(),
             name: "Allow once".into(),
+            kind: Some("allow_once".into()),
         };
         let json = serde_json::to_string(&opt).unwrap();
         assert!(json.contains("\"optionId\":\"opt-abc-123\""));

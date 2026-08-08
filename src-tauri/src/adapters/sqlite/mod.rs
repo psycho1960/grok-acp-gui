@@ -20,7 +20,12 @@ use crate::domain::types::{
     WorktreeId, WorktreeOwnership, WorktreeRecord, WorktreeState,
 };
 use crate::modules::persistence::{RepoResult, Repository};
-use rusqlite::{params, Connection};
+use crate::modules::task_runtime::permission::{
+    ApprovalEvidence, ExecutionContext, OperationCategory, PermissionDecision,
+    PermissionOptionAction, PermissionRecord, PermissionState,
+};
+use crate::modules::task_runtime::plan::{PlanDecision, PlanOptionAction, PlanRecord, PlanState};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -167,6 +172,132 @@ fn row_to_setting(row: &rusqlite::Row) -> rusqlite::Result<Settings> {
     Ok(Settings {
         key: row.get(0)?,
         json_value,
+    })
+}
+
+fn permission_state(value: &str) -> rusqlite::Result<PermissionState> {
+    match value {
+        "requested" => Ok(PermissionState::Requested),
+        "approved_once" => Ok(PermissionState::ApprovedOnce),
+        "approved_scope" => Ok(PermissionState::ApprovedScope),
+        "denied" => Ok(PermissionState::Denied),
+        "expired" => Ok(PermissionState::Expired),
+        "cancelled" => Ok(PermissionState::Cancelled),
+        "consumed" => Ok(PermissionState::Consumed),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("unknown permission state '{other}'").into(),
+        )),
+    }
+}
+
+fn permission_state_str(value: PermissionState) -> &'static str {
+    match value {
+        PermissionState::Requested => "requested",
+        PermissionState::ApprovedOnce => "approved_once",
+        PermissionState::ApprovedScope => "approved_scope",
+        PermissionState::Denied => "denied",
+        PermissionState::Expired => "expired",
+        PermissionState::Cancelled => "cancelled",
+        PermissionState::Consumed => "consumed",
+    }
+}
+
+fn operation_category(value: &str) -> rusqlite::Result<OperationCategory> {
+    match value {
+        "read_only" => Ok(OperationCategory::ReadOnly),
+        "write" => Ok(OperationCategory::Write),
+        "destructive" => Ok(OperationCategory::Destructive),
+        "unknown" => Ok(OperationCategory::Unknown),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("unknown operation category '{other}'").into(),
+        )),
+    }
+}
+
+fn operation_category_str(value: OperationCategory) -> &'static str {
+    match value {
+        OperationCategory::ReadOnly => "read_only",
+        OperationCategory::Write => "write",
+        OperationCategory::Destructive => "destructive",
+        OperationCategory::Unknown => "unknown",
+    }
+}
+
+fn plan_state(value: &str) -> rusqlite::Result<PlanState> {
+    match value {
+        "draft" => Ok(PlanState::Draft),
+        "proposed" => Ok(PlanState::Proposed),
+        "approved" => Ok(PlanState::Approved),
+        "rejected" => Ok(PlanState::Rejected),
+        "revision_requested" => Ok(PlanState::RevisionRequested),
+        "superseded" => Ok(PlanState::Superseded),
+        "executing" => Ok(PlanState::Executing),
+        "completed" => Ok(PlanState::Completed),
+        "failed" => Ok(PlanState::Failed),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            format!("unknown plan state '{other}'").into(),
+        )),
+    }
+}
+
+fn plan_state_str(value: PlanState) -> &'static str {
+    match value {
+        PlanState::Draft => "draft",
+        PlanState::Proposed => "proposed",
+        PlanState::Approved => "approved",
+        PlanState::Rejected => "rejected",
+        PlanState::RevisionRequested => "revision_requested",
+        PlanState::Superseded => "superseded",
+        PlanState::Executing => "executing",
+        PlanState::Completed => "completed",
+        PlanState::Failed => "failed",
+    }
+}
+
+fn row_to_permission(row: &rusqlite::Row) -> rusqlite::Result<PermissionRecord> {
+    let options_json: String = row.get(9)?;
+    Ok(PermissionRecord {
+        request_id: row.get(0)?,
+        task_id: TaskId::new(row.get::<_, String>(1)?),
+        session_id: SessionId::new(row.get::<_, String>(2)?),
+        correlation_id: row.get(3)?,
+        workspace: row.get(4)?,
+        plan_version: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
+        operation_digest: row.get(6)?,
+        category: operation_category(&row.get::<_, String>(7)?)?,
+        summary_redacted: row.get(8)?,
+        options: serde_json::from_str(&options_json).unwrap_or_default(),
+        state: permission_state(&row.get::<_, String>(10)?)?,
+        expires_at_epoch_seconds: row.get::<_, i64>(11)? as u64,
+        decided_option_id: row.get(12)?,
+        consumed_at: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+    })
+}
+
+fn row_to_plan(row: &rusqlite::Row) -> rusqlite::Result<PlanRecord> {
+    let options_json: String = row.get(9)?;
+    Ok(PlanRecord {
+        request_id: row.get(0)?,
+        task_id: TaskId::new(row.get::<_, String>(1)?),
+        session_id: SessionId::new(row.get::<_, String>(2)?),
+        correlation_id: row.get(3)?,
+        workspace: row.get(4)?,
+        version: row.get::<_, i64>(5)? as u64,
+        plan_hash: row.get(6)?,
+        state: plan_state(&row.get::<_, String>(7)?)?,
+        summary_redacted: row.get(8)?,
+        options: serde_json::from_str(&options_json).unwrap_or_default(),
+        decided_option_id: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -1242,10 +1373,476 @@ impl Repository for SqliteRepository {
         })
     }
 
-    fn recover_interrupted_tasks(&self, reason: &str) -> RepoResult<u32> {
+    fn create_plan(&self, plan: &PlanRecord) -> RepoResult<()> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("create_plan transaction", &e))?;
+        tx.execute(
+            "UPDATE plans SET state = 'superseded', updated_at = ?1
+             WHERE task_id = ?2 AND state IN ('draft','proposed','approved','rejected','revision_requested')",
+            params![plan.updated_at, plan.task_id.0],
+        )
+        .map_err(|e| db_error("create_plan supersede", &e))?;
+        tx.execute(
+            "UPDATE permission_decisions SET state = 'expired', updated_at = ?1
+             WHERE task_id = ?2 AND state IN ('requested','approved_once','approved_scope')",
+            params![plan.updated_at, plan.task_id.0],
+        )
+        .map_err(|e| db_error("create_plan expire approvals", &e))?;
+        let options = serde_json::to_string(&plan.options).map_err(|e| {
+            DomainError::new("DB_QUERY_FAILED", format!("serialize plan options: {e}"))
+        })?;
+        tx.execute(
+            "INSERT INTO plans (request_id, task_id, session_id, correlation_id, workspace, version, plan_hash, state, summary_redacted, options_json, decided_option_id, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                plan.request_id, plan.task_id.0, plan.session_id.0, plan.correlation_id,
+                plan.workspace, plan.version as i64, plan.plan_hash, plan_state_str(plan.state),
+                plan.summary_redacted, options, plan.decided_option_id, plan.created_at, plan.updated_at
+            ],
+        )
+        .map_err(|e| db_error("create_plan insert", &e))?;
+        tx.execute(
+            "INSERT INTO approval_audit_events (task_id,session_id,request_id,event_kind,decision,plan_version,correlation_id,occurred_at)
+             VALUES (?1,?2,?3,'plan','proposed',?4,?5,?6)",
+            params![plan.task_id.0, plan.session_id.0, plan.request_id, plan.version as i64, plan.correlation_id, plan.created_at],
+        )
+        .map_err(|e| db_error("create_plan audit", &e))?;
+        tx.commit()
+            .map_err(|e| db_error("create_plan commit", &e))?;
+        Ok(())
+    }
+
+    fn get_plan(&self, request_id: &str, session_id: &str) -> RepoResult<PlanRecord> {
         let conn = self.lock()?;
-        let now = utc_now();
+        conn.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE request_id=?1 AND session_id=?2",
+            params![request_id, session_id],
+            row_to_plan,
+        )
+        .map_err(|e| db_error("get_plan", &e))
+    }
+
+    fn latest_plan_version(&self, task_id: &str) -> RepoResult<Option<u64>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT MAX(version) FROM plans WHERE task_id=?1",
+            params![task_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map(|value| value.map(|item| item as u64))
+        .map_err(|e| db_error("latest_plan_version", &e))
+    }
+
+    fn latest_plan(&self, task_id: &str) -> RepoResult<Option<PlanRecord>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE task_id=?1 ORDER BY version DESC LIMIT 1",
+            params![task_id],
+            row_to_plan,
+        )
+        .optional()
+        .map_err(|e| db_error("latest_plan", &e))
+    }
+
+    fn decide_plan(&self, decision: &PlanDecision) -> RepoResult<PlanRecord> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("decide_plan transaction", &e))?;
+        let mut plan = tx
+            .query_row(
+                "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE request_id=?1 AND session_id=?2",
+                params![decision.request_id, decision.session_id.0],
+                row_to_plan,
+            )
+            .map_err(|e| db_error("decide_plan load", &e))?;
+        if plan.task_id != decision.task_id
+            || plan.session_id != decision.session_id
+            || plan.correlation_id != decision.correlation_id
+            || plan.workspace != decision.workspace
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                "Plan decision context does not match",
+            ));
+        }
+        if plan.version != decision.expected_version {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PLAN_VERSION_MISMATCH,
+                "Plan version changed; approval is invalid",
+            ));
+        }
+        if plan.state != PlanState::Proposed {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Plan request is no longer pending",
+            ));
+        }
+        let action = plan
+            .options
+            .iter()
+            .find(|option| option.option_id == decision.option_id)
+            .map(|option| option.action)
+            .unwrap_or(PlanOptionAction::Unknown);
+        plan.state = match action {
+            PlanOptionAction::Approve => PlanState::Approved,
+            PlanOptionAction::RequestRevision => PlanState::RevisionRequested,
+            PlanOptionAction::Reject => PlanState::Rejected,
+            PlanOptionAction::Unknown => {
+                return Err(DomainError::new(
+                    crate::domain::error::codes::PERMISSION_DENIED,
+                    "Plan option has no explicit safe action",
+                ))
+            }
+        };
+        let changed = tx
+            .execute(
+                "UPDATE plans SET state=?1,decided_option_id=?2,updated_at=?3
+             WHERE request_id=?4 AND session_id=?5 AND version=?6 AND state='proposed'",
+                params![
+                    plan_state_str(plan.state),
+                    decision.option_id,
+                    decision.decided_at,
+                    decision.request_id,
+                    decision.session_id.0,
+                    decision.expected_version as i64
+                ],
+            )
+            .map_err(|e| db_error("decide_plan update", &e))?;
+        if changed != 1 {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Plan was resolved concurrently",
+            ));
+        }
+        tx.execute(
+            "INSERT INTO approval_audit_events (task_id,session_id,request_id,event_kind,decision,plan_version,correlation_id,occurred_at)
+             VALUES (?1,?2,?3,'plan',?4,?5,?6,?7)",
+            params![plan.task_id.0, plan.session_id.0, plan.request_id, plan_state_str(plan.state), plan.version as i64, plan.correlation_id, decision.decided_at],
+        ).map_err(|e| db_error("decide_plan audit", &e))?;
+        plan.decided_option_id = Some(decision.option_id.clone());
+        plan.updated_at = decision.decided_at.clone();
+        tx.commit()
+            .map_err(|e| db_error("decide_plan commit", &e))?;
+        Ok(plan)
+    }
+
+    fn revert_plan_decision(&self, request_id: &str, session_id: &str) -> RepoResult<PlanRecord> {
+        let conn = self.lock()?;
+        let changed = conn
+            .execute(
+                "UPDATE plans SET state='proposed',decided_option_id=NULL,updated_at=?1
+                 WHERE request_id=?2 AND session_id=?3
+                   AND state IN ('approved','rejected','revision_requested')",
+                params![utc_now(), request_id, session_id],
+            )
+            .map_err(|e| db_error("revert_plan_decision update", &e))?;
+        if changed != 1 {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Plan decision cannot be safely reverted",
+            ));
+        }
+        // Query on the already-held connection: get_plan() re-locks the mutex.
+        conn.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,version,plan_hash,state,summary_redacted,options_json,decided_option_id,created_at,updated_at FROM plans WHERE request_id=?1 AND session_id=?2",
+            params![request_id, session_id],
+            row_to_plan,
+        )
+        .map_err(|e| db_error("revert_plan_decision load", &e))
+    }
+
+    fn supersede_session_plans(&self, session_id: &str, _reason: &str) -> RepoResult<u32> {
+        let conn = self.lock()?;
         let count = conn
+            .execute(
+                "UPDATE plans SET state='superseded',updated_at=?1 WHERE session_id=?2 AND state='proposed'",
+                params![utc_now(), session_id],
+            )
+            .map_err(|e| db_error("supersede_session_plans", &e))?;
+        Ok(count as u32)
+    }
+
+    fn create_permission(&self, permission: &PermissionRecord) -> RepoResult<()> {
+        let conn = self.lock()?;
+        let options = serde_json::to_string(&permission.options).map_err(|e| {
+            DomainError::new(
+                "DB_QUERY_FAILED",
+                format!("serialize permission options: {e}"),
+            )
+        })?;
+        conn.execute(
+            "INSERT INTO permission_decisions (request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            params![permission.request_id, permission.task_id.0, permission.session_id.0, permission.correlation_id,
+                permission.workspace, permission.plan_version.map(|value| value as i64), permission.operation_digest,
+                operation_category_str(permission.category), permission.summary_redacted, options,
+                permission_state_str(permission.state), permission.expires_at_epoch_seconds as i64,
+                permission.decided_option_id, permission.consumed_at, permission.created_at, permission.updated_at],
+        ).map_err(|e| db_error("create_permission", &e))?;
+        Ok(())
+    }
+
+    fn get_permission(&self, request_id: &str, session_id: &str) -> RepoResult<PermissionRecord> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1 AND session_id=?2",
+            params![request_id, session_id], row_to_permission,
+        ).map_err(|e| db_error("get_permission", &e))
+    }
+
+    fn decide_permission(&self, decision: &PermissionDecision) -> RepoResult<PermissionRecord> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("decide_permission transaction", &e))?;
+        let mut permission = tx.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1 AND session_id=?2",
+            params![decision.request_id, decision.session_id.0], row_to_permission,
+        ).map_err(|e| db_error("decide_permission load", &e))?;
+        if permission.task_id != decision.task_id
+            || permission.session_id != decision.session_id
+            || permission.correlation_id != decision.correlation_id
+            || permission.workspace != decision.workspace
+            || permission.plan_version != decision.expected_plan_version
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_CONTEXT_MISMATCH,
+                "Permission decision context does not match",
+            ));
+        }
+        if permission.state != PermissionState::Requested {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Permission request is no longer pending",
+            ));
+        }
+        if permission.expires_at_epoch_seconds < decision.decided_at_epoch_seconds {
+            tx.execute("UPDATE permission_decisions SET state='expired',updated_at=?1 WHERE request_id=?2 AND session_id=?3 AND state='requested'", params![decision.decided_at, decision.request_id, decision.session_id.0])
+                .map_err(|e| db_error("decide_permission expire", &e))?;
+            tx.commit()
+                .map_err(|e| db_error("decide_permission expire commit", &e))?;
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_EXPIRED,
+                "Permission request expired",
+            ));
+        }
+        let action = permission
+            .options
+            .iter()
+            .find(|option| option.option_id == decision.option_id)
+            .map(|option| option.action)
+            .unwrap_or(PermissionOptionAction::Unknown);
+        permission.state = match action {
+            PermissionOptionAction::AllowOnce => PermissionState::ApprovedOnce,
+            PermissionOptionAction::AllowScope
+                if permission.category == OperationCategory::ReadOnly =>
+            {
+                PermissionState::ApprovedScope
+            }
+            PermissionOptionAction::AllowScope => {
+                return Err(DomainError::new(
+                    crate::domain::error::codes::PERMISSION_DENIED,
+                    "Persistent approval is restricted to exact read-only operations",
+                ))
+            }
+            PermissionOptionAction::Deny => PermissionState::Denied,
+            PermissionOptionAction::Unknown => {
+                return Err(DomainError::new(
+                    crate::domain::error::codes::PERMISSION_DENIED,
+                    "Permission option has no explicit safe action",
+                ))
+            }
+        };
+        let changed = tx.execute(
+            "UPDATE permission_decisions SET state=?1,decided_option_id=?2,scope_json=?3,updated_at=?4 WHERE request_id=?5 AND session_id=?6 AND state='requested'",
+            params![permission_state_str(permission.state), decision.option_id,
+                if permission.state == PermissionState::ApprovedScope { Some(format!("{{\"operationDigest\":\"{}\"}}", permission.operation_digest)) } else { None },
+                decision.decided_at, decision.request_id, decision.session_id.0],
+        ).map_err(|e| db_error("decide_permission update", &e))?;
+        if changed != 1 {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Permission was resolved concurrently",
+            ));
+        }
+        tx.execute(
+            "INSERT INTO approval_audit_events (task_id,session_id,request_id,event_kind,decision,operation_digest,plan_version,correlation_id,occurred_at)
+             VALUES (?1,?2,?3,'permission',?4,?5,?6,?7,?8)",
+            params![permission.task_id.0, permission.session_id.0, permission.request_id, permission_state_str(permission.state), permission.operation_digest,
+                permission.plan_version.map(|value| value as i64), permission.correlation_id, decision.decided_at],
+        ).map_err(|e| db_error("decide_permission audit", &e))?;
+        permission.decided_option_id = Some(decision.option_id.clone());
+        permission.updated_at = decision.decided_at.clone();
+        tx.commit()
+            .map_err(|e| db_error("decide_permission commit", &e))?;
+        Ok(permission)
+    }
+
+    fn revert_permission_decision(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> RepoResult<PermissionRecord> {
+        let conn = self.lock()?;
+        let changed = conn
+            .execute(
+                "UPDATE permission_decisions
+                 SET state='requested',decided_option_id=NULL,scope_json=NULL,updated_at=?1
+                 WHERE request_id=?2 AND session_id=?3
+                   AND state IN ('approved_once','approved_scope','denied')",
+                params![utc_now(), request_id, session_id],
+            )
+            .map_err(|e| db_error("revert_permission_decision update", &e))?;
+        if changed != 1 {
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                "Permission decision cannot be safely reverted",
+            ));
+        }
+        // Query on the already-held connection: get_permission() re-locks the mutex.
+        conn.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1 AND session_id=?2",
+            params![request_id, session_id],
+            row_to_permission,
+        )
+        .map_err(|e| db_error("revert_permission_decision load", &e))
+    }
+
+    fn expire_permission(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> RepoResult<Option<PermissionRecord>> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("expire_permission transaction", &e))?;
+        let permission = tx.query_row(
+            "SELECT request_id,task_id,session_id,correlation_id,workspace,plan_version,operation_digest,category,summary_redacted,options_json,state,expires_at_epoch,decided_option_id,consumed_at,created_at,updated_at FROM permission_decisions WHERE request_id=?1 AND session_id=?2 AND state='requested'",
+            params![request_id, session_id],
+            row_to_permission,
+        ).optional().map_err(|e| db_error("expire_permission load", &e))?;
+        let Some(permission) = permission else {
+            return Ok(None);
+        };
+        tx.execute(
+            "UPDATE permission_decisions SET state='expired', updated_at=?1 WHERE request_id=?2 AND session_id=?3 AND state='requested'",
+            params![utc_now(), request_id, session_id],
+        ).map_err(|e| db_error("expire_permission update", &e))?;
+        tx.commit()
+            .map_err(|e| db_error("expire_permission commit", &e))?;
+        Ok(Some(permission))
+    }
+
+    fn expire_session_permissions(&self, session_id: &str, _reason: &str) -> RepoResult<u32> {
+        let conn = self.lock()?;
+        let count = conn.execute(
+            "UPDATE permission_decisions SET state='expired',updated_at=?1 WHERE session_id=?2 AND state IN ('requested','approved_once')",
+            params![utc_now(), session_id],
+        ).map_err(|e| db_error("expire_session_permissions", &e))?;
+        Ok(count as u32)
+    }
+
+    fn consume_permission(
+        &self,
+        context: &ExecutionContext,
+        operation_digest: &str,
+        now_epoch_seconds: u64,
+    ) -> RepoResult<Option<ApprovalEvidence>> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("consume_permission transaction", &e))?;
+        let found = tx
+            .query_row(
+                "SELECT request_id,state,expires_at_epoch FROM permission_decisions
+             WHERE task_id=?1 AND session_id=?2 AND workspace=?3 AND operation_digest=?4
+               AND plan_version IS ?5 AND state IN ('approved_once','approved_scope')
+             ORDER BY CASE state WHEN 'approved_once' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1",
+                params![
+                    context.task_id.0,
+                    context.session_id.0,
+                    context.workspace,
+                    operation_digest,
+                    context.plan_version.map(|value| value as i64)
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| db_error("consume_permission load", &e))?;
+        let Some((request_id, state, expires_at)) = found else {
+            return Ok(None);
+        };
+        if expires_at < now_epoch_seconds as i64 {
+            tx.execute(
+                "UPDATE permission_decisions SET state='expired',updated_at=?1 WHERE request_id=?2 AND session_id=?3",
+                params![utc_now(), request_id, context.session_id.0],
+            )
+            .map_err(|e| db_error("consume_permission expire", &e))?;
+            tx.commit()
+                .map_err(|e| db_error("consume_permission expire commit", &e))?;
+            return Err(DomainError::new(
+                crate::domain::error::codes::PERMISSION_EXPIRED,
+                "Approval expired",
+            ));
+        }
+        let consumed_at = utc_now();
+        if state == "approved_once" {
+            let changed = tx.execute(
+                "UPDATE permission_decisions SET state='consumed',consumed_at=?1,updated_at=?1 WHERE request_id=?2 AND session_id=?3 AND state='approved_once'",
+                params![consumed_at, request_id, context.session_id.0],
+            ).map_err(|e| db_error("consume_permission update", &e))?;
+            if changed != 1 {
+                return Err(DomainError::new(
+                    crate::domain::error::codes::PERMISSION_ALREADY_RESOLVED,
+                    "Approval was already consumed",
+                ));
+            }
+        }
+        tx.execute(
+            "INSERT INTO approval_audit_events (task_id,session_id,request_id,event_kind,decision,operation_digest,plan_version,correlation_id,occurred_at)
+             SELECT task_id,session_id,request_id,'permission','consumed',operation_digest,plan_version,correlation_id,?1 FROM permission_decisions WHERE request_id=?2 AND session_id=?3",
+            params![consumed_at, request_id, context.session_id.0],
+        ).map_err(|e| db_error("consume_permission audit", &e))?;
+        tx.commit()
+            .map_err(|e| db_error("consume_permission commit", &e))?;
+        Ok(Some(ApprovalEvidence {
+            permission_id: request_id,
+            session_id: context.session_id.clone(),
+            workspace: context.workspace.clone(),
+            operation_digest: operation_digest.to_string(),
+            plan_version: context.plan_version,
+            expires_at_epoch_seconds: expires_at as u64,
+        }))
+    }
+
+    fn recover_interrupted_tasks(&self, reason: &str) -> RepoResult<u32> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("recover_interrupted_tasks transaction", &e))?;
+        let now = utc_now();
+        tx.execute(
+            "UPDATE permission_decisions SET state='expired',updated_at=?1
+             WHERE state IN ('requested','approved_once')",
+            params![now],
+        )
+        .map_err(|e| db_error("recover_interrupted_tasks approvals", &e))?;
+        tx.execute(
+            "UPDATE plans SET state='failed',updated_at=?1 WHERE state='proposed'",
+            params![now],
+        )
+        .map_err(|e| db_error("recover_interrupted_tasks plans", &e))?;
+        let count = tx
             .execute(
                 "UPDATE tasks
                  SET status = 'interrupted', interrupt_reason = ?1, updated_at = ?2
@@ -1273,6 +1870,8 @@ impl Repository for SqliteRepository {
                 params![reason, now],
             )
             .map_err(|e| db_error("recover_interrupted_tasks", &e))?;
+        tx.commit()
+            .map_err(|e| db_error("recover_interrupted_tasks commit", &e))?;
         Ok(count as u32)
     }
 }

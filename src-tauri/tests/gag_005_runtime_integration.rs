@@ -411,23 +411,43 @@ async fn permission_scenario_emits_permission_event() {
     let _ = runtime.send(session_id.clone(), request).await;
 
     // Wait for a permission event.
-    let mut got_permission = false;
+    let mut pending_permission = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 
     while tokio::time::Instant::now() < deadline {
         if let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
             if let AgentEvent::PermissionRequested(p) = event.event {
-                got_permission = true;
                 assert!(!p.request_id.is_empty());
                 assert!(!p.options.is_empty());
                 // Option IDs must be preserved verbatim.
                 assert!(p.options.iter().all(|o| o.option_id.starts_with("opt-")));
+                pending_permission = Some((p.request_id, p.options[0].option_id.clone()));
                 break;
             }
         }
     }
 
-    assert!(got_permission, "should have received a permission request");
+    let (request_id, option_id) = pending_permission.expect("permission request");
+    let resolved = runtime
+        .send(
+            session_id.clone(),
+            ClientRequest::ResolvePermission(
+                grok_acp_gui_lib::modules::agent_runtime::requests::ResolvePermissionRequest {
+                    request_id,
+                    option_id,
+                },
+            ),
+        )
+        .await;
+    assert!(
+        resolved.is_ok(),
+        "resolution must be accepted while Turn is busy"
+    );
+    assert_eq!(
+        runtime.session_state(&session_id),
+        Some(grok_acp_gui_lib::modules::agent_runtime::RuntimeState::Busy),
+        "resolution must not start or complete a second Turn"
+    );
 
     runtime.shutdown(session_id.clone(), "done").await;
 }

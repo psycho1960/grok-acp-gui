@@ -32,6 +32,14 @@ pub enum FakeScenario {
     UnknownMethod,
     Permission,
     Plan,
+    PlanPermission,
+    ProcessWrite,
+    ProcessEscape,
+    ReadEscape,
+    SecretDisplayFields,
+    DuplicatePermission,
+    DuplicatePlan,
+    SetModeError,
 }
 
 impl FakeScenario {
@@ -47,6 +55,14 @@ impl FakeScenario {
             FakeScenario::UnknownMethod => "unknown-method",
             FakeScenario::Permission => "permission",
             FakeScenario::Plan => "plan",
+            FakeScenario::PlanPermission => "plan-permission",
+            FakeScenario::ProcessWrite => "process-write",
+            FakeScenario::ProcessEscape => "process-escape",
+            FakeScenario::ReadEscape => "read-escape",
+            FakeScenario::SecretDisplayFields => "secret-display-fields",
+            FakeScenario::DuplicatePermission => "duplicate-permission",
+            FakeScenario::DuplicatePlan => "duplicate-plan",
+            FakeScenario::SetModeError => "set-mode-error",
         }
     }
 }
