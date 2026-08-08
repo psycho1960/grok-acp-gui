@@ -28,7 +28,11 @@ export function createConversationSeedSnapshot(): BootstrapSnapshot {
         { modelId: "deepseek", name: "deepseek (deepseek-v4-pro)", reasoningEffort: "max" },
         { modelId: "luna", name: "gpt-5.6-luna", reasoningEffort: "medium" },
       ],
-      modes: [{ id: "agent", name: "智能体" }],
+      modes: [
+        { id: "agent", name: "智能体" },
+        { id: "plan", name: "计划" },
+        { id: "ask", name: "问答" },
+      ],
       slashCommands: [
         { name: "init", description: "初始化一个新项目", acceptsInput: false },
         { name: "plan", description: "为变更制定计划", acceptsInput: true },
@@ -83,6 +87,7 @@ export function createSeedTimeline(
     status: "running",
     cursor: 5,
     attempt: 1,
+    mode: "agent",
     model: "grok-4.5",
     reasoning: "high",
   });

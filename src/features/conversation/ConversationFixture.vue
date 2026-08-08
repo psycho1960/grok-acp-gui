@@ -28,6 +28,7 @@ const conversationEvents = fixtureConversationEvents();
 
 // Persist the per-task selection across reloads (the real backend persists
 // it in SQLite; localStorage simulates that for the browser fixture).
+const MODE_STORAGE_KEY = "gag010:fixture-mode";
 const MODEL_STORAGE_KEY = "gag010:fixture-model";
 const REASONING_STORAGE_KEY = "gag010:fixture-reasoning";
 function readStoredSelection(key: string, fallback: string | null): string | null {
@@ -56,6 +57,7 @@ const snapshot = props.bulkEvents > 0
       title: `Perf ${props.bulkEvents}`,
     })
   : fixtureSessionSnapshot({
+      mode: readStoredSelection(MODE_STORAGE_KEY, "agent"),
       model: readStoredSelection(MODEL_STORAGE_KEY, "grok-4.5"),
       reasoning: readStoredSelection(REASONING_STORAGE_KEY, "high"),
     });
@@ -63,6 +65,7 @@ const snapshot = props.bulkEvents > 0
 const sentMessages: string[] = [];
 let cancelCount = 0;
 let interactiveSeq = snapshot.cursor;
+let configuredMode: string | null = snapshot.mode ?? null;
 let configuredModel: string | null = snapshot.model ?? null;
 let configuredReasoning: string | null = snapshot.reasoning ?? null;
 let blobImportCount = 0;
@@ -77,6 +80,10 @@ const bridge = createFakeDesktopBridge({
   onExecute(command) {
     if (command.type === "session.configure") {
       const settings = command.payload.settings ?? {};
+      if (typeof settings.mode === "string") {
+        configuredMode = settings.mode;
+        writeStoredSelection(MODE_STORAGE_KEY, configuredMode);
+      }
       if (typeof settings.model === "string") {
         configuredModel = settings.model;
         writeStoredSelection(MODEL_STORAGE_KEY, configuredModel);
@@ -87,7 +94,12 @@ const bridge = createFakeDesktopBridge({
       }
       return {
         success: "true",
-        data: { taskId: command.payload.taskId, model: configuredModel, reasoning: configuredReasoning },
+        data: {
+          taskId: command.payload.taskId,
+          mode: configuredMode,
+          model: configuredModel,
+          reasoning: configuredReasoning,
+        },
       };
     }
     if (command.type === "artifact.import.blob") {
@@ -131,7 +143,7 @@ const bridge = createFakeDesktopBridge({
           seq: nextInteractiveSeq(),
           timestamp: new Date().toISOString(),
           payload: {
-            text: `回复：${command.payload.message} [model=${configuredModel ?? "-"} reasoning=${configuredReasoning ?? "-"}]`,
+            text: `回复：${command.payload.message} [mode=${configuredMode ?? "-"} model=${configuredModel ?? "-"} reasoning=${configuredReasoning ?? "-"}]`,
           },
         });
         push({
@@ -178,6 +190,7 @@ const bridge = createFakeDesktopBridge({
           taskId: command.payload.taskId,
           title: "对话演示",
           status: "running",
+          mode: configuredMode,
           model: configuredModel,
           reasoning: configuredReasoning,
         },

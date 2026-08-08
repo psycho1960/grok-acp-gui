@@ -6,6 +6,7 @@ import type {
   ArtifactBlobInput,
   DesktopBridge,
   ArtifactDescriptor,
+  ModeInfo,
   ModelInfo,
   ReasoningEffort,
   SlashCommandInfo,
@@ -69,8 +70,12 @@ export const useConversationStore = defineStore("conversation", () => {
   const foldExplores = ref(true);
   /** Runtime model capabilities (from bootstrap capability snapshot). */
   const models = ref<ModelInfo[]>([]);
+  /** Runtime session modes (from bootstrap capability snapshot). */
+  const modes = ref<ModeInfo[]>([]);
   /** Slash commands discovered from ACP `available_commands`. */
   const slashCommands = ref<SlashCommandInfo[]>([]);
+  /** Per-task session mode selection persisted via session.configure. */
+  const selectedMode = ref<string | null>(null);
   /** Per-task model selection persisted via session.configure. */
   const selectedModel = ref<string | null>(null);
   /** Per-task reasoning effort selection persisted via session.configure. */
@@ -230,18 +235,24 @@ export const useConversationStore = defineStore("conversation", () => {
         }
         handleDesktopEvent(evt.event);
       });
-      // Load runtime capabilities (models + slash commands). Failures only
-      // degrade to empty lists; the conversation itself stays usable.
+      // Load runtime capabilities (models, modes, slash commands). Failures
+      // only degrade to empty lists; the conversation itself stays usable.
       try {
         const snapshot = await facade.bootstrap();
         models.value = Array.isArray(snapshot.capabilities?.models)
           ? snapshot.capabilities.models
+          : [];
+        modes.value = Array.isArray(snapshot.capabilities?.modes)
+          ? snapshot.capabilities.modes
           : [];
         slashCommands.value = Array.isArray(snapshot.capabilities?.slashCommands)
           ? snapshot.capabilities.slashCommands
           : [];
         if (snapshot.capabilities?.modelState?.currentModelId) {
           selectedModel.value = snapshot.capabilities.modelState.currentModelId;
+        }
+        if (snapshot.capabilities?.modeState?.currentModeId) {
+          selectedMode.value = snapshot.capabilities.modeState.currentModeId;
         }
       } catch {
         // non-fatal
@@ -268,6 +279,7 @@ export const useConversationStore = defineStore("conversation", () => {
       unsubscribe = null;
     }
     facade = null;
+    selectedMode.value = null;
     selectedModel.value = null;
     selectedReasoning.value = null;
   }
@@ -281,6 +293,7 @@ export const useConversationStore = defineStore("conversation", () => {
     sendError.value = null;
     loadState.value = "ready";
     errorMessage.value = null;
+    if (snapshot.mode !== undefined) selectedMode.value = snapshot.mode ?? null;
     if (snapshot.model !== undefined) selectedModel.value = snapshot.model ?? null;
     if (snapshot.reasoning !== undefined) {
       selectedReasoning.value = normalizeReasoning(snapshot.reasoning);
@@ -333,6 +346,7 @@ export const useConversationStore = defineStore("conversation", () => {
                   data.status === "conflicted"
                 ? "error"
                 : "idle";
+        if (data.mode !== undefined) selectedMode.value = data.mode ?? null;
         if (data.model !== undefined) selectedModel.value = data.model ?? null;
         if (data.reasoning !== undefined) {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
@@ -345,10 +359,12 @@ export const useConversationStore = defineStore("conversation", () => {
           cursor,
           events: data.events,
           attempt: data.attempt,
+          mode: data.mode,
           model: data.model,
           reasoning: data.reasoning,
         });
       } else if (data?.title) {
+        if (data.mode !== undefined) selectedMode.value = data.mode ?? null;
         if (data.model !== undefined) selectedModel.value = data.model ?? null;
         if (data.reasoning !== undefined) {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
@@ -441,6 +457,27 @@ export const useConversationStore = defineStore("conversation", () => {
       return false;
     } finally {
       attachmentPending.value = false;
+    }
+  }
+
+  /**
+   * Persist the session mode for the current task (agent/plan/ask). Every
+   * following turn then sends session/set_mode with the new modeId.
+   */
+  async function configureMode(mode: string | null): Promise<boolean> {
+    const previous = selectedMode.value;
+    selectedMode.value = mode;
+    if (!timeline.value.taskId || !facade) return false;
+    try {
+      const result = await facade.configureSession(timeline.value.taskId, {
+        mode,
+      });
+      if (result.success === "false") throw new Error(result.error.message);
+      return true;
+    } catch (error) {
+      selectedMode.value = previous;
+      sendError.value = error instanceof Error ? error.message : "模式切换失败";
+      return false;
     }
   }
 
@@ -724,7 +761,9 @@ export const useConversationStore = defineStore("conversation", () => {
     focusEventSeq,
     foldExplores,
     models,
+    modes,
     slashCommands,
+    selectedMode,
     selectedModel,
     selectedReasoning,
     composerCapabilities,
@@ -736,6 +775,7 @@ export const useConversationStore = defineStore("conversation", () => {
     setDraft,
     importAttachmentPaths,
     importAttachmentBlobs,
+    configureMode,
     configureModel,
     configureReasoning,
     removeAttachment,

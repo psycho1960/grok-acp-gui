@@ -4,7 +4,7 @@ import Badge from "../../shared/ui/Badge.vue";
 import Button from "../../shared/ui/Button.vue";
 import Select from "../../shared/ui/Select.vue";
 import StatusIcon from "../../shared/ui/StatusIcon.vue";
-import type { ModelInfo, ReasoningEffort } from "../../bridge/types";
+import type { ModeInfo, ModelInfo, ReasoningEffort } from "../../bridge/types";
 import type { ConversationRunStatus } from "./types";
 
 const props = defineProps<{
@@ -13,7 +13,9 @@ const props = defineProps<{
   attempt?: number;
   canCancel?: boolean;
   needsRefresh?: boolean;
+  modes?: ModeInfo[];
   models?: ModelInfo[];
+  selectedMode?: string | null;
   selectedModel?: string | null;
   selectedReasoning?: ReasoningEffort | null;
   settingsDisabled?: boolean;
@@ -23,6 +25,7 @@ const emit = defineEmits<{
   cancel: [];
   refresh: [];
   resume: [];
+  "update:mode": [mode: string | null];
   "update:model": [model: string | null];
   "update:reasoning": [reasoning: ReasoningEffort];
 }>();
@@ -78,12 +81,33 @@ const modelOptions = computed(() => [
     })),
 ]);
 
+/** 中文模式标签：capability 名称优先，应用自有词汇兜底。 */
+const MODE_LABEL_FALLBACK: Record<string, string> = {
+  agent: "智能体",
+  plan: "计划",
+  ask: "问答",
+};
+
+const modeOptions = computed(() => [
+  { value: "", label: "使用会话默认模式" },
+  ...(props.modes ?? [])
+    .filter((mode) => mode.id.trim().length > 0)
+    .map((mode) => ({
+      value: mode.id,
+      label: mode.name || MODE_LABEL_FALLBACK[mode.id] || mode.id,
+    })),
+]);
+
 const reasoningOptions = computed(() => [
   { value: "low", label: "低" },
   { value: "medium", label: "中" },
   { value: "high", label: "高" },
   { value: "max", label: "最高" },
 ]);
+
+function onModeChange(value: string): void {
+  emit("update:mode", value === "" ? null : value);
+}
 
 function onModelChange(value: string): void {
   emit("update:model", value === "" ? null : value);
@@ -106,6 +130,15 @@ function onReasoningChange(value: string): void {
     </div>
     <div class="right">
       <div class="settings" aria-label="对话设置">
+        <Select
+          class="settings-select"
+          data-testid="conversation-mode-select"
+          label="模式"
+          :model-value="selectedMode ?? ''"
+          :options="modeOptions"
+          :disabled="settingsDisabled"
+          @update:model-value="onModeChange"
+        />
         <Select
           class="settings-select"
           data-testid="conversation-model-select"

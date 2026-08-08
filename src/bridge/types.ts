@@ -581,6 +581,8 @@ export interface TaskOpenResult {
   taskId: TaskId;
   title: string;
   status: string;
+  /** Persisted session mode selection (restored for the conversation controls). */
+  mode?: string | null;
   /** Persisted model selection (restored for the conversation controls). */
   model?: string | null;
   /** Persisted reasoning effort selection. */
