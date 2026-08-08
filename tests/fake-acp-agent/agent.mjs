@@ -155,13 +155,14 @@ function handleSessionNew(id, params) {
         { id: 'default', name: 'Default' },
         { id: 'plan', name: 'Plan' },
         { id: 'code', name: 'Code' },
+        { id: 'ask', name: 'Ask' },
       ],
     },
   });
 }
 
 function handleSetMode(id, params) {
-  const allowed = new Set(['default', 'plan', 'code']);
+  const allowed = new Set(['default', 'plan', 'code', 'ask']);
   if (params?.sessionId !== activeSessionId || !allowed.has(params?.modeId)) {
     sendError(id, -32602, 'sessionId and an advertised modeId are required');
     return;
