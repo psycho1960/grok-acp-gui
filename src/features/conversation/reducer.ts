@@ -158,6 +158,7 @@ function applyMessageDelta(
       timestamp: event.timestamp,
       eventKey: eventKey(event.sessionId, event.seq),
       text,
+      attachments: optimistic?.attachments,
       pending: false,
       failed: false,
       errorMessage: undefined,
@@ -804,7 +805,12 @@ export function applySnapshot(
 export function appendUserMessage(
   state: ConversationState,
   text: string,
-  opts: { id?: string; pending?: boolean; timestamp?: string } = {},
+  opts: {
+    id?: string;
+    pending?: boolean;
+    timestamp?: string;
+    attachments?: UserMessageItem["attachments"];
+  } = {},
 ): ConversationState {
   if (!state.sessionId && !state.taskId) {
     // Still allow local message before session binds
@@ -820,6 +826,7 @@ export function appendUserMessage(
     timestamp,
     eventKey: `user:${id}`,
     text,
+    attachments: opts.attachments?.map((attachment) => ({ ...attachment })),
     pending: opts.pending ?? false,
   };
   return upsertItem(state, item);

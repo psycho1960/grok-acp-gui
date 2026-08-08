@@ -5,6 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptImage {
+    pub mime_type: String,
+    pub base64_data: String,
+}
+
 use super::events::RequestId;
 
 /// A request the caller wants the agent to process.
@@ -29,9 +36,10 @@ pub enum ClientRequest {
 pub struct PromptRequest {
     /// The user's message text.
     pub message: String,
-    /// Attachment IDs managed by the artifacts module (optional).
+    /// Images resolved from managed artifact IDs by the bridge. Their bytes
+    /// are serialised only in the ACP `session/prompt` request.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
-    pub attachments: Vec<String>,
+    pub attachments: Vec<PromptImage>,
     /// Mode override (e.g. "code", "ask"). When `None`, uses session default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
@@ -76,7 +84,10 @@ mod tests {
     fn prompt_request_round_trip() {
         let req = ClientRequest::Prompt(PromptRequest {
             message: "fix the bug".into(),
-            attachments: vec!["att-1".into()],
+            attachments: vec![PromptImage {
+                mime_type: "image/png".into(),
+                base64_data: "cG5n".into(),
+            }],
             mode: Some("code".into()),
             model: None,
             reasoning: Some("high".into()),
@@ -84,6 +95,7 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"kind\":\"prompt\""));
         assert!(json.contains("\"message\":\"fix the bug\""));
+        assert!(json.contains("\"mimeType\":\"image/png\""));
         let back: ClientRequest = serde_json::from_str(&json).unwrap();
         match back {
             ClientRequest::Prompt(p) => {

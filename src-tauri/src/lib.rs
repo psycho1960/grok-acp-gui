@@ -3,6 +3,7 @@ pub mod bridge;
 pub mod domain;
 pub mod modules {
     pub mod agent_runtime;
+    pub mod artifacts;
     pub mod persistence;
     pub mod task_runtime;
 }

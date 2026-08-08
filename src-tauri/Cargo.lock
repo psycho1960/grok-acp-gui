@@ -1167,6 +1167,7 @@ name = "grok-acp-gui"
 version = "0.1.16"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "rusqlite",
  "serde",
  "serde_json",

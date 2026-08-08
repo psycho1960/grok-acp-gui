@@ -322,6 +322,16 @@ export interface ArtifactImportPayload {
   paths: string[];
 }
 
+/** Metadata-only Artifact DTO. Cache paths and bytes never cross DesktopBridge. */
+export interface ArtifactDescriptor {
+  artifactId: string;
+  displayName: string;
+  mimeType: string;
+  bytes: number;
+  state: "ready" | "rejected" | "failed" | "missing" | "quarantined" | string;
+  previewCapability: "inline" | "onDemand" | "none" | string;
+}
+
 export interface ArtifactSavePayload {
   taskId: TaskId;
   artifactIds: string[];
@@ -553,6 +563,10 @@ export interface TurnSendResult {
   requestId?: number;
   /** Compatibility with the original mock response. */
   seq?: number;
+}
+
+export interface ArtifactImportResult {
+  artifacts: ArtifactDescriptor[];
 }
 
 export interface WorkspaceInspectResult {

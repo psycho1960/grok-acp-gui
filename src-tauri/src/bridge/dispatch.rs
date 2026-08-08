@@ -350,7 +350,7 @@ async fn dispatch(
         }
         DesktopCommand::PlanResolve(payload) => plan_resolve(task_runtime, payload).await,
 
-        DesktopCommand::ArtifactImport(_) => not_implemented("artifact.import"),
+        DesktopCommand::ArtifactImport(payload) => artifact_import(repo, payload),
         DesktopCommand::ArtifactSave(_) => not_implemented("artifact.save"),
 
         DesktopCommand::WorkspaceInspect(payload) => workspace_inspect(payload),
@@ -366,6 +366,18 @@ async fn dispatch(
 
         DesktopCommand::RecoveryRestore(_) => not_implemented("recovery.restore"),
         DesktopCommand::RecoveryDelete(_) => not_implemented("recovery.delete"),
+    }
+}
+
+fn artifact_import(
+    repo: &dyn Repository,
+    payload: &super::commands::ArtifactImportPayload,
+) -> DesktopResult {
+    use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
+
+    match ManagedArtifactService::new().import_images(repo, &payload.task_id, &payload.paths) {
+        Ok(artifacts) => DesktopResult::ok(serde_json::json!({ "artifacts": artifacts })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }
 
@@ -782,6 +794,8 @@ async fn turn_send(
 ) -> DesktopResult {
     use crate::modules::agent_runtime::requests::PromptRequest;
     use crate::modules::agent_runtime::ClientRequest;
+    use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
+    use base64::Engine as _;
 
     let session_id = match ensure_task_session(repo, task_runtime, &payload.task_id).await {
         Ok(session_id) => session_id,
@@ -794,13 +808,31 @@ async fn turn_send(
     if let Err(error) = repo.update_task_status(&payload.task_id.0, "running", None) {
         return DesktopResult::err(AppError::new(error.code, error.message));
     }
+    let attachments = match payload.attachments.as_deref() {
+        Some(ids) if !ids.is_empty() => {
+            match ManagedArtifactService::new().resolve_images(repo, &payload.task_id, ids) {
+                Ok(images) => images
+                    .into_iter()
+                    .map(
+                        |image| crate::modules::agent_runtime::requests::PromptImage {
+                            mime_type: image.descriptor.mime_type,
+                            base64_data: base64::engine::general_purpose::STANDARD
+                                .encode(image.bytes),
+                        },
+                    )
+                    .collect(),
+                Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+            }
+        }
+        _ => Vec::new(),
+    };
 
     match runtime
         .send(
             session_id,
             ClientRequest::Prompt(PromptRequest {
                 message: payload.message.clone(),
-                attachments: payload.attachments.clone().unwrap_or_default(),
+                attachments,
                 mode: task.mode,
                 model: task.model,
                 reasoning: task.reasoning,

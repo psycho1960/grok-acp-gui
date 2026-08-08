@@ -4,6 +4,7 @@ import EmptyState from "../../shared/ui/EmptyState.vue";
 import ErrorState from "../../shared/ui/ErrorState.vue";
 import Skeleton from "../../shared/ui/Skeleton.vue";
 import type { DesktopBridge, TaskId } from "../../bridge/types";
+import { pickImages } from "../../bridge/image-picker";
 import { useConversationStore } from "./conversation-store";
 import Composer from "./Composer.vue";
 import ConversationHeader from "./ConversationHeader.vue";
@@ -104,6 +105,16 @@ async function onCancel(): Promise<void> {
 async function onResume(): Promise<void> {
   await store.resumeSession();
 }
+
+async function onAddAttachments(): Promise<void> {
+  const result = await pickImages();
+  if (result.error) store.sendError = result.error;
+  else await store.importAttachmentPaths(result.paths);
+}
+
+async function onDropAttachments(paths: string[]): Promise<void> {
+  await store.importAttachmentPaths(paths);
+}
 </script>
 
 <template>
@@ -160,9 +171,14 @@ async function onResume(): Promise<void> {
       :capabilities="store.composerCapabilities"
       :send-error="store.sendError"
       :send-pending="store.sendPending"
+      :attachment-pending="store.attachmentPending"
+      :attachments="store.attachments"
       @update:model-value="store.setDraft"
       @send="onSend"
       @cancel="onCancel"
+      @add-attachments="onAddAttachments"
+      @drop-attachments="onDropAttachments"
+      @remove-attachment="store.removeAttachment"
     />
   </section>
 </template>
