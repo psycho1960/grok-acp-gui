@@ -717,6 +717,17 @@ fn extract_permission_operation(
         .or_else(|| params.get("toolCall").and_then(|tool| tool.get("rawInput")))?;
     let raw_command = source.get("command").and_then(|value| value.as_str());
     let parsed_command = raw_command.and_then(parse_safe_command);
+    if let Some((parsed_executable, parsed_args)) = parsed_command.as_ref() {
+        let executable_matches = source
+            .get("executable")
+            .and_then(|value| value.as_str())
+            .is_none_or(|explicit| explicit.eq_ignore_ascii_case(parsed_executable));
+        let args_match =
+            source.get("args").is_none() || string_array(source.get("args")) == *parsed_args;
+        if !executable_matches || !args_match {
+            return None;
+        }
+    }
     let operation_kind = source
         .get("operationKind")
         .or_else(|| source.get("kind"))
@@ -1313,6 +1324,26 @@ mod tests {
             vec!["commit".to_string(), "-m".to_string(), "test".to_string()]
         );
         assert_eq!(descriptor.operation_kind, "git");
+    }
+
+    #[test]
+    fn extract_permission_operation_rejects_raw_command_and_args_mismatch() {
+        let params = json!({
+            "toolCall": {
+                "toolCallId": "tc-1",
+                "title": "Read files",
+                "kind": "bash",
+                "rawInput": {
+                    "command": "rg --pre evil secret",
+                    "args": []
+                }
+            }
+        });
+
+        assert!(
+            extract_permission_operation(&params).is_none(),
+            "inconsistent raw command and explicit argv must fail closed"
+        );
     }
 
     #[test]
