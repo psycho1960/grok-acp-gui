@@ -20,9 +20,9 @@ onMounted(() => {
 </script>
 
 <template>
-  <section ref="root" class="plan-slot surface-card" data-testid="plan-slot" aria-label="Plan 审批">
+  <section ref="root" class="plan-slot surface-card" data-testid="plan-slot" aria-label="计划审批">
     <header>
-      <Badge tone="info">Plan</Badge>
+      <Badge tone="info">计划</Badge>
       <span class="status">{{ slotData.status }}</span>
       <Badge tone="neutral">v{{ slotData.version }}</Badge>
       <Badge v-if="slotData.approvalInvalidated" tone="danger">批准已失效</Badge>

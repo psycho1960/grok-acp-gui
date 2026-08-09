@@ -1,6 +1,13 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import Button from "../../shared/ui/Button.vue";
+import type { SlashCommandInfo } from "../../bridge/types";
+import { extractImageFiles } from "./clipboard-images";
+import {
+  filterSlashCommands,
+  insertSlashCommand,
+  slashMenuState,
+} from "./slash-commands";
 import type { ComposerAttachment, ComposerCapabilities } from "./types";
 
 const props = defineProps<{
@@ -12,6 +19,8 @@ const props = defineProps<{
   attachments?: ComposerAttachment[];
   /** Native (OS-level) drag-over highlight driven by the parent view. */
   dropActive?: boolean;
+  /** grok build quick commands discovered from ACP available_commands. */
+  slashCommands?: SlashCommandInfo[];
 }>();
 
 const emit = defineEmits<{
@@ -20,14 +29,98 @@ const emit = defineEmits<{
   cancel: [];
   addAttachments: [];
   dropAttachments: [paths: string[]];
+  pasteImages: [files: File[]];
   removeAttachment: [artifactId: string];
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
 const hoverDropActive = ref(false);
+const slashOpen = ref(false);
+const slashQuery = ref("");
+const slashLineStart = ref(0);
+const slashIndex = ref(0);
+/** Suppress slash-menu syncs until the next real input event (an Esc close
+ *  or a selection must not be undone by the keyup that follows it). */
+let slashEscapeLock = false;
 const hasContent = computed(() => props.modelValue.trim().length > 0 || (props.attachments?.length ?? 0) > 0);
 
+const filteredCommands = computed(() =>
+  filterSlashCommands(props.slashCommands ?? [], slashQuery.value),
+);
+
+function syncSlashMenu(): void {
+  if (slashEscapeLock) return;
+  const el = textarea.value;
+  if (!el) return;
+  const state = slashMenuState(el.value, el.selectionStart);
+  slashOpen.value = state.open;
+  slashQuery.value = state.query;
+  slashLineStart.value = state.lineStart;
+  if (slashIndex.value >= filteredCommands.value.length) {
+    slashIndex.value = 0;
+  }
+  if (state.open) void nextTick(scrollSlashItemIntoView);
+}
+
+function closeSlashMenu(): void {
+  slashOpen.value = false;
+  slashQuery.value = "";
+  slashEscapeLock = true;
+}
+
+function scrollSlashItemIntoView(): void {
+  document
+    .querySelector('[data-testid="slash-menu-item"].active')
+    ?.scrollIntoView({ block: "nearest" });
+}
+
+function applySlashCommand(command: SlashCommandInfo): void {
+  const el = textarea.value;
+  if (!el) return;
+  const { text, cursor } = insertSlashCommand(el.value, el.selectionStart, command.name);
+  el.value = text;
+  el.setSelectionRange(cursor, cursor);
+  emit("update:modelValue", text);
+  closeSlashMenu();
+  void nextTick(() => el.focus());
+}
+
 function onKeydown(event: KeyboardEvent): void {
+  if (slashOpen.value) {
+    const commands = filteredCommands.value;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      slashIndex.value = commands.length ? (slashIndex.value + 1) % commands.length : 0;
+      void nextTick(scrollSlashItemIntoView);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      slashIndex.value = commands.length
+        ? (slashIndex.value - 1 + commands.length) % commands.length
+        : 0;
+      void nextTick(scrollSlashItemIntoView);
+      return;
+    }
+    if (event.key === "Enter") {
+      const command = commands[slashIndex.value];
+      if (command) {
+        event.preventDefault();
+        applySlashCommand(command);
+        return;
+      }
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSlashMenu();
+      return;
+    }
+    if (event.key === "Tab" && commands.length > 0) {
+      event.preventDefault();
+      applySlashCommand(commands[slashIndex.value] ?? commands[0]);
+      return;
+    }
+  }
   if (event.key === "Escape") {
     if (props.capabilities.canCancel) {
       event.preventDefault();
@@ -43,16 +136,43 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
+function onInput(event: Event): void {
+  slashEscapeLock = false;
+  const value = (event.target as HTMLTextAreaElement).value;
+  emit("update:modelValue", value);
+  void nextTick(syncSlashMenu);
+}
+
+function onSelectionChange(): void {
+  if (slashOpen.value) syncSlashMenu();
+}
+
 function pathsFromTransfer(transfer: DataTransfer | null): string[] {
   return Array.from(transfer?.files ?? [])
     .map((file) => (file as File & { path?: string }).path)
     .filter((path): path is string => typeof path === "string" && path.length > 0);
 }
 
-function onDrop(event: DragEvent | ClipboardEvent): void {
+function onPaste(event: ClipboardEvent): void {
+  // 1) Clipboard images (Win+Shift+S): blob items with no filesystem path.
+  const images = extractImageFiles(event.clipboardData);
+  if (images.length > 0) {
+    event.preventDefault();
+    emit("pasteImages", images.map((image) => image.file));
+    return;
+  }
+  // 2) Path-backed files (older drag sources) reuse the drop pipeline.
+  const paths = pathsFromTransfer(event.clipboardData);
+  if (paths.length) {
+    event.preventDefault();
+    emit("dropAttachments", paths);
+  }
+}
+
+function onDrop(event: DragEvent): void {
   event.preventDefault();
   hoverDropActive.value = false;
-  const paths = "dataTransfer" in event ? pathsFromTransfer(event.dataTransfer) : pathsFromTransfer(event.clipboardData);
+  const paths = pathsFromTransfer(event.dataTransfer);
   if (paths.length) emit("dropAttachments", paths);
 }
 
@@ -84,24 +204,55 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
       {{ sendError }}
     </p>
     <div class="row">
-      <label class="sr-only" for="composer-input">消息</label>
-      <textarea
-        id="composer-input"
-        ref="textarea"
-        class="input"
-        data-testid="composer-input"
-        rows="3"
-        :value="modelValue"
-        :disabled="!capabilities.canSend && !capabilities.canCancel"
-        :placeholder="
-          capabilities.bridgeOnline
-            ? '输入消息 · Enter 发送 · Shift+Enter 换行 · Esc 停止'
-            : 'Bridge 离线 — 草稿仍会保留'
-        "
-        @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
-        @keydown="onKeydown"
-        @paste="onDrop"
-      />
+      <div class="composer-input-wrap">
+        <div
+          v-if="slashOpen"
+          class="slash-menu"
+          data-testid="slash-menu"
+          role="listbox"
+          aria-label="快捷指令"
+        >
+          <p v-if="filteredCommands.length === 0" class="slash-empty" role="status">
+            没有匹配的快捷指令
+          </p>
+          <button
+            v-for="(command, index) in filteredCommands"
+            :key="command.name"
+            type="button"
+            class="slash-item"
+            :class="{ active: index === slashIndex }"
+            data-testid="slash-menu-item"
+            role="option"
+            :aria-selected="index === slashIndex"
+            @mouseenter="slashIndex = index"
+            @click="applySlashCommand(command)"
+          >
+            <span class="slash-name">/{{ command.name }}</span>
+            <span class="slash-desc">{{ command.description || "（无描述）" }}</span>
+          </button>
+        </div>
+        <label class="sr-only" for="composer-input">消息</label>
+        <textarea
+          id="composer-input"
+          ref="textarea"
+          class="input"
+          data-testid="composer-input"
+          rows="3"
+          :value="modelValue"
+          :disabled="!capabilities.canSend && !capabilities.canCancel"
+          :placeholder="
+            capabilities.bridgeOnline
+              ? '输入消息 · Enter 发送 · Shift+Enter 换行 · Esc 停止 · / 呼出快捷指令'
+              : 'Bridge 离线 — 草稿仍会保留'
+          "
+          @input="onInput"
+          @keydown="onKeydown"
+          @paste="onPaste"
+          @keyup="syncSlashMenu"
+          @click="onSelectionChange"
+          @select="onSelectionChange"
+        />
+      </div>
       <div class="actions">
         <Button data-testid="composer-add-attachment" :disabled="!capabilities.canSend || sendPending" :state="attachmentPending ? 'loading' : 'default'" @click="emit('addAttachments')">添加图片</Button>
         <Button
@@ -147,6 +298,60 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
   grid-template-columns: 1fr auto;
   gap: var(--space-2);
   align-items: end;
+}
+.composer-input-wrap {
+  position: relative;
+  display: grid;
+}
+.slash-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  display: grid;
+  gap: 2px;
+  width: min(420px, 100%);
+  max-height: 240px;
+  padding: var(--space-1);
+  overflow-y: auto;
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--radius-control);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+}
+.slash-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+  color: var(--ctp-text);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+}
+.slash-item:hover,
+.slash-item.active {
+  background: color-mix(in srgb, var(--ctp-blue) 18%, var(--ctp-surface0));
+}
+.slash-name {
+  font-weight: 600;
+  color: var(--ctp-blue);
+}
+.slash-desc {
+  overflow: hidden;
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-empty {
+  margin: 0;
+  padding: var(--space-2);
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
 }
 .input {
   width: 100%;

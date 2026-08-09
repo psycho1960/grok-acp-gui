@@ -99,16 +99,16 @@ describe("GAG-002 AppShell responsive behavior", () => {
   it("adjusts both side panels by keyboard and removes the Inspector column when collapsed", async () => {
     const wrapper = mountShell({ width: 1440 });
     const left = wrapper.get('[aria-label="调整左侧栏宽度"]');
-    const right = wrapper.get('[aria-label="调整 Inspector 宽度"]');
+    const right = wrapper.get('[aria-label="调整检查器宽度"]');
     await left.trigger("keydown", { key: "ArrowRight" });
     await right.trigger("keydown", { key: "ArrowLeft" });
     expect(left.attributes("aria-valuenow")).toBe("272");
     expect(right.attributes("aria-valuenow")).toBe("392");
-    await wrapper.get('[aria-label="打开 Inspector"]').trigger("click");
+    await wrapper.get('[aria-label="打开检查器"]').trigger("click");
     expect(wrapper.emitted("update:inspectorOpen")?.[0]).toEqual([false]);
     await wrapper.setProps({ inspectorOpen: false });
     expect(wrapper.find(".shell-columns").classes()).not.toContain("has-inspector");
-    expect(wrapper.find('[aria-label="调整 Inspector 宽度"]').exists()).toBe(false);
+    expect(wrapper.find('[aria-label="调整检查器宽度"]').exists()).toBe(false);
   });
 
   for (const viewport of [{ width: 1440 }, { width: 1200 }, { width: 1024 }, { width: 1440, dppx: 2 }]) {
@@ -119,7 +119,7 @@ describe("GAG-002 AppShell responsive behavior", () => {
         hasLeftPanel: wrapper.find(".shell-left").exists(),
         hasInspectorPanel: wrapper.find(".shell-inspector").exists(),
         hasNavigationToggle: wrapper.find('[aria-label="打开任务导航"]').exists(),
-        hasInspectorToggle: wrapper.find('[aria-label="打开 Inspector"]').exists(),
+        hasInspectorToggle: wrapper.find('[aria-label="打开检查器"]').exists(),
       };
       expect(summary.hasInspectorToggle).toBe(true);
       if (viewport.dppx) {

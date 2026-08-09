@@ -12,10 +12,10 @@ test.describe("GAG-009 permission and Plan approval", () => {
     await page.keyboard.press("Control+.");
     await expect(page.getByRole("button", { name: "继续规划" })).toBeFocused();
 
-    const reject = permission.getByRole("button", { name: "Reject" });
+    const reject = permission.getByRole("button", { name: "拒绝" });
     await reject.dblclick();
     await expect(permission.getByText("决定已提交")).toBeVisible();
-    await expect(permission.getByRole("button", { name: "Allow once" })).toBeDisabled();
+    await expect(permission.getByRole("button", { name: "允许一次" })).toBeDisabled();
   });
 
   test("renders versioned Plan steps and resolves the exact capability option", async ({ page }) => {

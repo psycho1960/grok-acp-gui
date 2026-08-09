@@ -341,7 +341,14 @@ fn interpret_session_update(
     }
 
     match update_type.as_str() {
-        "agent_thought_chunk" | "available_commands_update" => InterpretationResult::NoEvent,
+        "agent_thought_chunk" => InterpretationResult::NoEvent,
+
+        "available_commands_update" | "available_commands" => {
+            let commands = extract_available_commands(update, params);
+            let event = AgentEvent::CommandsUpdated(CommandsUpdatedPayload { commands });
+            let meta = EventMeta::new(session_id.clone(), ctx.next_seq());
+            InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
+        }
 
         "user_message_chunk" => {
             let text = extract_nested_string(update, &["content", "text"])
@@ -485,6 +492,51 @@ fn extract_string_field(params: &serde_json::Value, field: &str) -> Option<Strin
         .get(field)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+/// Extract the ACP `available_commands_update` command list.
+///
+/// ACP v1 carries the list under `update.availableCommands`; older fixtures
+/// used a top-level `commands` array. Each entry is `{ name, description,
+/// input }` where a non-null `input` means the command accepts text.
+/// Descriptions are redacted because they are agent-provided display text.
+fn extract_available_commands(
+    update: &serde_json::Value,
+    params: &serde_json::Value,
+) -> Vec<AvailableCommandDescriptor> {
+    let source = update
+        .get("availableCommands")
+        .or_else(|| params.get("availableCommands"))
+        .or_else(|| update.get("commands"))
+        .or_else(|| params.get("commands"));
+    let Some(serde_json::Value::Array(entries)) = source else {
+        return Vec::new();
+    };
+    let mut commands = Vec::new();
+    for entry in entries.iter().take(64) {
+        let Some(name) = entry.get("name").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let description = entry
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(redact_visible_text)
+            .unwrap_or_default();
+        let accepts_input = entry
+            .get("input")
+            .map(|value| !value.is_null())
+            .unwrap_or(false);
+        commands.push(AvailableCommandDescriptor {
+            name: name.to_string(),
+            description,
+            accepts_input,
+        });
+    }
+    commands
 }
 
 fn find_numeric_field(value: &serde_json::Value, names: &[&str], depth: u8) -> Option<i64> {
@@ -1001,18 +1053,105 @@ mod tests {
     #[test]
     fn non_user_visible_session_updates_are_ignored_without_consuming_sequence() {
         let mut c = ctx();
-        for update_type in ["agent_thought_chunk", "available_commands_update"] {
-            let notif = AcpNotification {
-                jsonrpc: "2.0".into(),
-                method: "session/update".into(),
-                params: json!({"type": update_type, "content": {"text": "private"}}),
-            };
-            assert!(matches!(
-                interpret(&AcpMessage::Notification(notif), &sid(), &mut c),
-                InterpretationResult::NoEvent
-            ));
-        }
+        let update_type = "agent_thought_chunk";
+        let notif = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: json!({"type": update_type, "content": {"text": "private"}}),
+        };
+        assert!(matches!(
+            interpret(&AcpMessage::Notification(notif), &sid(), &mut c),
+            InterpretationResult::NoEvent
+        ));
         assert_eq!(c.next_sequence, 0);
+    }
+
+    #[test]
+    fn available_commands_update_parses_typed_command_list() {
+        let notif = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        { "name": "init", "description": "Initialize a new project", "input": null },
+                        { "name": "share", "description": "Share the current session", "input": { "unstructured": true } }
+                    ]
+                }
+            }),
+        };
+        let mut c = ctx();
+        let result = interpret(&AcpMessage::Notification(notif), &sid(), &mut c);
+        match result {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::CommandsUpdated(updated) => {
+                    assert_eq!(updated.commands.len(), 2);
+                    assert_eq!(updated.commands[0].name, "init");
+                    assert_eq!(updated.commands[0].description, "Initialize a new project");
+                    assert!(!updated.commands[0].accepts_input);
+                    assert_eq!(updated.commands[1].name, "share");
+                    assert!(updated.commands[1].accepts_input);
+                }
+                other => panic!("expected CommandsUpdated, got {:?}", other),
+            },
+            other => panic!("expected Events, got {:?}", other),
+        }
+        // The event consumes a sequence number like other session events.
+        assert_eq!(c.next_sequence, 1);
+    }
+
+    #[test]
+    fn available_commands_update_accepts_legacy_commands_array() {
+        let notif = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: json!({
+                "type": "available_commands_update",
+                "commands": [{ "name": "plan", "description": "Plan a change", "input": null }]
+            }),
+        };
+        let mut c = ctx();
+        let result = interpret(&AcpMessage::Notification(notif), &sid(), &mut c);
+        match result {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::CommandsUpdated(updated) => {
+                    assert_eq!(updated.commands.len(), 1);
+                    assert_eq!(updated.commands[0].name, "plan");
+                }
+                other => panic!("expected CommandsUpdated, got {:?}", other),
+            },
+            other => panic!("expected Events, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn available_commands_update_drops_malformed_entries() {
+        let notif = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: json!({
+                "type": "available_commands_update",
+                "commands": [
+                    { "description": "missing name" },
+                    { "name": "  ", "description": "blank name" },
+                    { "name": "ok", "description": "valid" }
+                ]
+            }),
+        };
+        let mut c = ctx();
+        let result = interpret(&AcpMessage::Notification(notif), &sid(), &mut c);
+        match result {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::CommandsUpdated(updated) => {
+                    assert_eq!(updated.commands.len(), 1);
+                    assert_eq!(updated.commands[0].name, "ok");
+                }
+                other => panic!("expected CommandsUpdated, got {:?}", other),
+            },
+            other => panic!("expected Events, got {:?}", other),
+        }
     }
 
     #[test]

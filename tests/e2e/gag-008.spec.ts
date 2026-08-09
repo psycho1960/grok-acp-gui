@@ -32,7 +32,7 @@ test.describe("GAG-008 conversation timeline", () => {
     await input.fill("one visible user turn");
     await page.getByTestId("composer-send").click();
     await expect(page.getByTestId("user-message").filter({ hasText: "one visible user turn" })).toHaveCount(1);
-    await expect(page.getByTestId("assistant-message").filter({ hasText: "Echo: one visible user turn" })).toBeVisible();
+    await expect(page.getByTestId("assistant-message").filter({ hasText: "回复：one visible user turn" })).toBeVisible();
     await expect(page.getByText("空闲", { exact: true }).first()).toBeVisible();
   });
 

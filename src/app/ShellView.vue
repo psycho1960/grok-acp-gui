@@ -163,9 +163,9 @@ const main = computed(() => {
 
 const inspector = computed(() =>
   h("section", { class: "inspector-content" }, [
-    h("h2", "Inspector"),
+    h("h2", "检查器"),
     h(StatusIcon, { status: "waiting", label: "等待选择任务" }),
-    h("p", "变更、Diff、Artifacts 和 Worktree 信息将在选择任务后显示。"),
+    h("p", "变更、Diff、制品和 Worktree 信息将在选择任务后显示。"),
     h(Badge, { tone: "neutral" }, { default: () => "空状态" }),
   ]),
 );

@@ -58,7 +58,7 @@ describe("GAG-007 first-use closed loop", () => {
     await Promise.resolve();
     expect(wrapper.find('[data-testid="header-create-task"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="empty-create-task"]').exists()).toBe(true);
-    expect(store.modelOptions).toContainEqual({ value: "grok", label: "Grok" });
+    expect(store.modelOptions).toContainEqual({ value: "grok-4.5", label: "grok-4.5", reasoningEffort: "high" });
     wrapper.unmount();
   });
 

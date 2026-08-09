@@ -23,6 +23,7 @@ import {
   groupTasks,
 } from "./grouping";
 import { isKnownTaskStatus, presentTaskStatus } from "./status-map";
+import { deriveTaskTitle } from "./title";
 import {
   DEFAULT_FILTERS,
   type TaskCenterFilters,
@@ -631,10 +632,11 @@ export const useTaskCenterStore = defineStore("task-center", () => {
       createTaskError.value = "请填写任务目标（必填）";
       return { ok: false, message: createTaskError.value };
     }
-    const title =
-      (input.title?.trim() ||
-        prompt.split(/\r?\n/).find((l) => l.trim())?.trim() ||
-        "未命名任务").slice(0, 120);
+    // Title is optional: derive it from the first sentence of the prompt.
+    const title = (input.title?.trim() || deriveTaskTitle(prompt)).slice(
+      0,
+      120,
+    );
 
     createTaskPending.value = true;
     try {

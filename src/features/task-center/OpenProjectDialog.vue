@@ -74,7 +74,7 @@ function onSubmit(): void {
   <Dialog
     :model-value="open"
     title="选择项目"
-    description="打开本地文件夹作为工作项目。Agent 可能读写文件并执行命令。"
+    description="打开本地文件夹作为工作项目。智能体可能读写文件并执行命令。"
     data-testid="open-project-dialog"
     @update:model-value="emit('update:open', $event)"
   >
@@ -104,7 +104,7 @@ function onSubmit(): void {
           data-testid="project-trust"
         />
         <span>
-          我信任此目录。Agent 可能读写文件、执行命令。路径：
+          我信任此目录。智能体可能读写文件、执行命令。路径：
           <strong>{{ path.trim() || "（尚未选择）" }}</strong>
         </span>
       </label>

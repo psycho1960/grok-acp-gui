@@ -602,6 +602,9 @@ function applySequencedEvent(
       return applyArtifact(next, event);
     case "changes.updated":
       return applyChanges(next, event);
+    case "session.commands.updated":
+      // Capability metadata — advance the sequence cursor but render nothing.
+      return markSeen(next, sessionId, seq);
     case "task.snapshot":
       // Full task list snapshots are handled at store layer; ignore here.
       return markSeen(next, sessionId, seq);

@@ -33,6 +33,9 @@ pub struct ProjectForgetPayload {
 #[serde(rename_all = "camelCase")]
 pub struct TaskCreatePayload {
     pub project_id: super::types::ProjectId,
+    /// Optional: when empty the backend derives a title from the prompt's
+    /// first sentence (frontend also derives before sending).
+    #[serde(default)]
     pub title: String,
     /// Initial prompt text (FR-TASK-001). Required.
     pub prompt: String,
@@ -116,6 +119,23 @@ pub struct PlanResolvePayload {
 pub struct ArtifactImportPayload {
     pub task_id: super::types::TaskId,
     pub paths: Vec<String>,
+}
+
+/// One clipboard image blob (no filesystem path) submitted by the Renderer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactBlobInput {
+    /// Display name used for the managed attachment (e.g. "截图.png").
+    pub display_name: String,
+    /// Base64-encoded image bytes (PNG/JPEG/GIF/WebP/BMP/ICO/TIFF/AVIF).
+    pub base64_data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactImportBlobPayload {
+    pub task_id: super::types::TaskId,
+    pub blobs: Vec<ArtifactBlobInput>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +259,8 @@ pub enum DesktopCommand {
 
     #[serde(rename = "artifact.import")]
     ArtifactImport(ArtifactImportPayload),
+    #[serde(rename = "artifact.import.blob")]
+    ArtifactImportBlob(ArtifactImportBlobPayload),
     #[serde(rename = "artifact.list")]
     ArtifactList(ArtifactListPayload),
     #[serde(rename = "artifact.preview")]
@@ -294,6 +316,7 @@ pub fn is_known_command(cmd_type: &str) -> bool {
             | "permission.resolve"
             | "plan.resolve"
             | "artifact.import"
+            | "artifact.import.blob"
             | "artifact.list"
             | "artifact.preview"
             | "artifact.reveal"
@@ -350,7 +373,7 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             reject_base64_image(&p.prompt)?;
             validate_enum_opt(
                 p.reasoning.as_deref(),
-                &["low", "medium", "high"],
+                &["low", "medium", "high", "max"],
                 "reasoning",
             )?;
             validate_enum_opt(
@@ -423,6 +446,32 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             }
             for path in &p.paths {
                 validate_non_empty_path(path)?;
+            }
+            Ok(())
+        }
+
+        DesktopCommand::ArtifactImportBlob(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            if p.blobs.is_empty() {
+                return Err(validation_err(
+                    "artifact.import.blob requires at least one image",
+                ));
+            }
+            if p.blobs.len() > 20 {
+                return Err(validation_err(
+                    "artifact.import.blob accepts at most 20 images",
+                ));
+            }
+            for blob in &p.blobs {
+                let name = blob.display_name.trim();
+                if name.is_empty() || name.chars().count() > 255 {
+                    return Err(validation_err(
+                        "blob display name must be between 1 and 255 characters",
+                    ));
+                }
+                if blob.base64_data.is_empty() {
+                    return Err(validation_err("blob image data must not be empty"));
+                }
             }
             Ok(())
         }

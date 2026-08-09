@@ -109,7 +109,7 @@ const fake = createFakeDesktopBridge({
       activeTasks.unshift({
         id,
         projectId: command.payload.projectId,
-        title: command.payload.title,
+        title: command.payload.title ?? "未命名任务",
         status: "preparing",
         workspaceKind: "worktree",
         mode: command.payload.mode,

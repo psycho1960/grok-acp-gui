@@ -254,6 +254,14 @@ export interface SessionTimelineSnapshot {
   /** Optional pre-built items for pure history without replaying deltas. */
   items?: TimelineItem[];
   attempt?: number;
+  /** Persisted session mode selection (restores the conversation controls). */
+  mode?: string | null;
+  /** Persisted workspace strategy (restores the conversation controls). */
+  workspaceStrategy?: import("./mode-workspace").WorkspaceStrategy | string | null;
+  /** Persisted model selection (restores the conversation controls). */
+  model?: string | null;
+  /** Persisted reasoning effort selection. */
+  reasoning?: import("../../bridge/types").ReasoningEffort | string | null;
 }
 
 export interface ConversationState {

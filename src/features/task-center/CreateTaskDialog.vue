@@ -6,6 +6,7 @@ import Input from "../../shared/ui/Input.vue";
 import Select from "../../shared/ui/Select.vue";
 import Textarea from "../../shared/ui/Textarea.vue";
 import type { ReasoningEffort } from "../../bridge/types";
+import { deriveTaskTitle } from "./title";
 
 type ModelOption = {
   value: string;
@@ -40,7 +41,6 @@ const emit = defineEmits<{
 
 const prompt = ref("");
 const title = ref("");
-const titleTouched = ref(false);
 const mode = ref("ask");
 const model = ref("");
 const reasoning = ref<ReasoningEffort>("medium");
@@ -48,16 +48,16 @@ const workspaceStrategy = ref<"worktree" | "readonly" | "direct">("direct");
 const localError = ref<string | null>(null);
 
 const modeOptions = [
-  { value: "agent", label: "Agent" },
-  { value: "plan", label: "Plan" },
-  { value: "ask", label: "Ask" },
+  { value: "agent", label: "智能体" },
+  { value: "plan", label: "计划" },
+  { value: "ask", label: "问答" },
 ];
 
 const reasoningOptions = [
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "max", label: "Max" },
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+  { value: "max", label: "最高" },
 ];
 
 const workspaceOptions = computed(() => [
@@ -72,7 +72,6 @@ watch(
     if (v) {
       prompt.value = "";
       title.value = "";
-      titleTouched.value = false;
       mode.value = "ask";
       model.value = "";
       reasoning.value = "medium";
@@ -81,12 +80,6 @@ watch(
     }
   },
 );
-
-watch(prompt, (text) => {
-  if (titleTouched.value) return;
-  const first = text.split(/\r?\n/).find((l) => l.trim())?.trim() ?? "";
-  title.value = first.slice(0, 120);
-});
 
 watch(mode, (m) => {
   // Ask defaults to current dir; Agent/Plan to worktree
@@ -112,10 +105,8 @@ function onSubmit(): void {
     localError.value = "任务目标为必填项";
     return;
   }
-  const t =
-    title.value.trim() ||
-    prompt.value.split(/\r?\n/).find((l) => l.trim())?.trim() ||
-    "未命名任务";
+  // 标题为可选字段：留空时由首句自动提炼生成。
+  const t = title.value.trim() || deriveTaskTitle(prompt.value);
   emit("create", {
     prompt: prompt.value.trim(),
     title: t.slice(0, 120),
@@ -141,19 +132,16 @@ function onSubmit(): void {
         <Textarea
           :model-value="prompt"
           label="任务目标（必填）"
-          placeholder="描述你希望 Agent 完成的工作…"
+          placeholder="描述你希望智能体完成的工作…"
           data-testid="create-task-prompt"
           @update:model-value="prompt = $event"
         />
         <Input
           :model-value="title"
-          label="标题"
-          placeholder="默认取首行"
+          label="标题（可选）"
+          placeholder="留空将根据首句自动生成"
           data-testid="create-task-title"
-          @update:model-value="
-            title = $event;
-            titleTouched = true;
-          "
+          @update:model-value="title = $event"
         />
       </section>
 

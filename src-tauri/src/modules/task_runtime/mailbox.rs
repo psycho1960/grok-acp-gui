@@ -847,6 +847,10 @@ pub fn map_stored_event_to_bridge(
         "permission_requested" => (event_types::PERMISSION_REQUESTED, stored.payload.clone()),
         "plan_proposed" => (event_types::PLAN_UPDATED, stored.payload.clone()),
         "artifact_announced" => (event_types::ARTIFACT_AVAILABLE, stored.payload.clone()),
+        "commands_updated" => (
+            event_types::SESSION_COMMANDS_UPDATED,
+            serde_json::json!({ "commands": field("commands") }),
+        ),
         "request_failed" => (
             event_types::ACTIVITY_UPDATED,
             serde_json::json!({

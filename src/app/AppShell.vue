@@ -115,19 +115,19 @@ onBeforeUnmount(() => {
         <span class="project-name" data-testid="topbar-project" :title="projectLabel">{{ projectLabel }}</span>
         <span class="branch" data-testid="topbar-workspace" :title="workspaceLabel">{{ workspaceLabel }}</span>
         <span class="topbar-spacer" />
-        <IconButton v-if="inspector" label="打开 Inspector" :aria-expanded="drawerLayout ? inspectorDrawerOpen : inspectorOpen" @click="toggleInspector">☷</IconButton>
+        <IconButton v-if="inspector" label="打开检查器" :aria-expanded="drawerLayout ? inspectorDrawerOpen : inspectorOpen" @click="toggleInspector">☷</IconButton>
       </slot>
     </header>
     <div class="shell-columns" :class="columnsClass">
       <aside v-if="showLeftPanel" class="shell-left" aria-label="任务导航"><RenderVNode :node="left" /></aside>
       <div v-if="showLeftResizer" class="resizer left-resizer" role="separator" aria-orientation="vertical" aria-label="调整左侧栏宽度" :aria-valuemin="220" :aria-valuemax="360" :aria-valuenow="leftWidth" tabindex="0" @pointerdown.prevent="startResize('left')" @keydown="resizeLeftWithKeyboard" />
       <main class="shell-main" aria-label="主内容"><RenderVNode :node="main" /></main>
-      <div v-if="showInspectorPanel" class="resizer right-resizer" role="separator" aria-orientation="vertical" aria-label="调整 Inspector 宽度" :aria-valuemin="320" :aria-valuemax="600" :aria-valuenow="rightWidth" tabindex="0" @pointerdown.prevent="startResize('right')" @keydown="resizeRightWithKeyboard" />
-      <aside v-if="showInspectorPanel" class="shell-inspector" aria-label="Inspector"><RenderVNode :node="inspector!" /></aside>
+      <div v-if="showInspectorPanel" class="resizer right-resizer" role="separator" aria-orientation="vertical" aria-label="调整检查器宽度" :aria-valuemin="320" :aria-valuemax="600" :aria-valuenow="rightWidth" tabindex="0" @pointerdown.prevent="startResize('right')" @keydown="resizeRightWithKeyboard" />
+      <aside v-if="showInspectorPanel" class="shell-inspector" aria-label="检查器"><RenderVNode :node="inspector!" /></aside>
     </div>
     <footer class="shell-statusbar"><slot name="statusbar"><RenderVNode v-if="statusBar" :node="statusBar" /></slot></footer>
     <Drawer v-if="compactLayout" :model-value="navigationOpen" title="任务导航" @update:model-value="navigationOpen = $event"><RenderVNode :node="left" /></Drawer>
-    <Drawer v-if="inspector && drawerLayout" :model-value="inspectorDrawerOpen" title="Inspector" @update:model-value="inspectorDrawerOpen = $event"><RenderVNode :node="inspector" /></Drawer>
+    <Drawer v-if="inspector && drawerLayout" :model-value="inspectorDrawerOpen" title="检查器" @update:model-value="inspectorDrawerOpen = $event"><RenderVNode :node="inspector" /></Drawer>
   </section>
 </template>
 

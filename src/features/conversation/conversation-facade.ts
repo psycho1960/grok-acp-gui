@@ -2,13 +2,15 @@
 // Never calls shell, git, or sqlite directly.
 
 import type {
+  ArtifactBlobInput,
+  ArtifactImportResult,
+  ArtifactListResult,
+  ArtifactPreviewResult,
+  BootstrapSnapshot,
   DesktopBridge,
   DesktopResult,
   TaskId,
   TurnSendResult,
-  ArtifactImportResult,
-  ArtifactListResult,
-  ArtifactPreviewResult,
   TypedDesktopEvent,
   Unsubscribe,
 } from "../../bridge/types";
@@ -18,6 +20,7 @@ export type ConversationFacadeEvent =
   | { kind: "bridge_error"; message: string };
 
 export interface ConversationFacade {
+  bootstrap(): Promise<BootstrapSnapshot>;
   sendTurn(
     taskId: TaskId,
     message: string,
@@ -26,7 +29,15 @@ export interface ConversationFacade {
   cancelTurn(taskId: TaskId): Promise<DesktopResult>;
   resumeSession(taskId: TaskId): Promise<DesktopResult>;
   openTask(taskId: TaskId): Promise<DesktopResult>;
+  configureSession(
+    taskId: TaskId,
+    settings: Record<string, string | null>,
+  ): Promise<DesktopResult>;
   importArtifacts(taskId: TaskId, paths: string[]): Promise<DesktopResult<ArtifactImportResult>>;
+  importArtifactBlobs(
+    taskId: TaskId,
+    blobs: ArtifactBlobInput[],
+  ): Promise<DesktopResult<ArtifactImportResult>>;
   listArtifacts(taskId: TaskId): Promise<DesktopResult<ArtifactListResult>>;
   previewArtifact(taskId: TaskId, artifactId: string): Promise<DesktopResult<ArtifactPreviewResult>>;
   revealArtifact(taskId: TaskId, artifactId: string): Promise<DesktopResult>;
@@ -41,6 +52,10 @@ export function createConversationFacade(
   bridge: DesktopBridge,
 ): ConversationFacade {
   return {
+    async bootstrap() {
+      return bridge.bootstrap();
+    },
+
     async sendTurn(taskId, message, attachments) {
       return bridge.execute({
         type: "turn.send",
@@ -69,8 +84,19 @@ export function createConversationFacade(
       });
     },
 
+    async configureSession(taskId, settings) {
+      return bridge.execute({
+        type: "session.configure",
+        payload: { taskId, settings },
+      });
+    },
+
     async importArtifacts(taskId, paths) {
       return bridge.execute({ type: "artifact.import", payload: { taskId, paths } }) as Promise<DesktopResult<ArtifactImportResult>>;
+    },
+
+    async importArtifactBlobs(taskId, blobs) {
+      return bridge.execute({ type: "artifact.import.blob", payload: { taskId, blobs } }) as Promise<DesktopResult<ArtifactImportResult>>;
     },
 
     async listArtifacts(taskId) {

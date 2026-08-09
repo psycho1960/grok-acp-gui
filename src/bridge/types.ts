@@ -230,6 +230,7 @@ export type DesktopCommand =
   | { type: "permission.resolve"; payload: PermissionResolvePayload }
   | { type: "plan.resolve"; payload: PlanResolvePayload }
   | { type: "artifact.import"; payload: ArtifactImportPayload }
+  | { type: "artifact.import.blob"; payload: ArtifactImportBlobPayload }
   | { type: "artifact.list"; payload: ArtifactListPayload }
   | { type: "artifact.preview"; payload: ArtifactIdPayload }
   | { type: "artifact.reveal"; payload: ArtifactIdPayload }
@@ -258,7 +259,8 @@ export interface ProjectForgetPayload {
 
 export interface TaskCreatePayload {
   projectId: ProjectId;
-  title: string;
+  /** Optional — when empty the backend derives it from the prompt's first sentence. */
+  title?: string;
   /** Initial prompt text (FR-TASK-001). Required. */
   prompt: string;
   /** Attachments referenced by artifact ID. */
@@ -323,6 +325,19 @@ export interface PlanResolvePayload {
 export interface ArtifactImportPayload {
   taskId: TaskId;
   paths: string[];
+}
+
+/** One clipboard image blob (no filesystem path) submitted by the Renderer. */
+export interface ArtifactBlobInput {
+  /** Display name used for the managed attachment (e.g. "截图.png"). */
+  displayName: string;
+  /** Base64-encoded image bytes. */
+  base64Data: string;
+}
+
+export interface ArtifactImportBlobPayload {
+  taskId: TaskId;
+  blobs: ArtifactBlobInput[];
 }
 
 export interface ArtifactListPayload { taskId: TaskId; }
@@ -415,7 +430,8 @@ export type TypedDesktopEvent =
   | { type: "permission.requested"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: PermissionRequestedPayload }
   | { type: "plan.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: PlanUpdatedPayload }
   | { type: "changes.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ChangesUpdatedPayload }
-  | { type: "artifact.available"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ArtifactAvailablePayload };
+  | { type: "artifact.available"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ArtifactAvailablePayload }
+  | { type: "session.commands.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: SessionCommandsUpdatedPayload };
 
 /**
  * Session-scoped event envelope with required taskId/sessionId/seq.
@@ -523,6 +539,11 @@ export interface ArtifactAvailablePayload {
   state?: "ready" | "quarantined" | "missing" | string;
 }
 
+/** The ACP session published or changed its slash commands. */
+export interface SessionCommandsUpdatedPayload {
+  commands: SlashCommandInfo[];
+}
+
 export interface ResourceWarningPayload {
   message: string;
   resource: string;
@@ -560,6 +581,14 @@ export interface TaskOpenResult {
   taskId: TaskId;
   title: string;
   status: string;
+  /** Persisted session mode selection (restored for the conversation controls). */
+  mode?: string | null;
+  /** Persisted workspace strategy (restored for the conversation controls). */
+  workspaceStrategy?: "worktree" | "readonly" | "direct" | string | null;
+  /** Persisted model selection (restored for the conversation controls). */
+  model?: string | null;
+  /** Persisted reasoning effort selection. */
+  reasoning?: ReasoningEffort | string | null;
   sessionId?: SessionId;
   cursor?: number | { lastSeq?: number; snapshotSeq?: number };
   events?: TypedDesktopEvent[];
@@ -644,6 +673,7 @@ export const EventTypes = {
   PLAN_UPDATED: "plan.updated",
   CHANGES_UPDATED: "changes.updated",
   ARTIFACT_AVAILABLE: "artifact.available",
+  SESSION_COMMANDS_UPDATED: "session.commands.updated",
   RESOURCE_WARNING: "resource.warning",
   DIAGNOSTIC_NOTICE: "diagnostic.notice",
 } as const;
