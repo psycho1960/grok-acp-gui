@@ -103,6 +103,35 @@ pub enum WorkspaceKind {
     Direct,
 }
 
+impl WorkspaceKind {
+    /// Safe default for a conversation mode. Unknown or absent modes stay
+    /// isolated so compatibility records can never silently become direct.
+    pub fn default_for_mode(mode: Option<&str>) -> Self {
+        match mode {
+            Some("ask") => Self::Direct,
+            Some("agent" | "plan") => Self::Worktree,
+            _ => Self::Worktree,
+        }
+    }
+
+    /// Default only when the mode is one of the mapped built-ins.
+    pub fn default_for_known_mode(mode: Option<&str>) -> Option<Self> {
+        match mode {
+            Some("ask") => Some(Self::Direct),
+            Some("agent" | "plan") => Some(Self::Worktree),
+            _ => None,
+        }
+    }
+
+    pub fn as_bridge_str(self) -> &'static str {
+        match self {
+            Self::Worktree => "worktree",
+            Self::Readonly => "readonly",
+            Self::Direct => "direct",
+        }
+    }
+}
+
 /// Ownership classification for a Worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

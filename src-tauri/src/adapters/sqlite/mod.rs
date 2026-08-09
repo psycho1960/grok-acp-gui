@@ -765,6 +765,31 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
+    fn update_task_configuration(
+        &self,
+        id: &str,
+        workspace_kind: WorkspaceKind,
+        mode: Option<&str>,
+        model: Option<&str>,
+        reasoning: Option<&str>,
+        updated_at: &str,
+    ) -> RepoResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE tasks SET workspace_kind = ?1, mode = ?2, model = ?3, reasoning = ?4, updated_at = ?5 WHERE id = ?6",
+            params![
+                workspace_kind_to_str(workspace_kind),
+                mode,
+                model,
+                reasoning,
+                updated_at,
+                id,
+            ],
+        )
+        .map_err(|e| db_error("update_task_configuration", &e))?;
+        Ok(())
+    }
+
     fn update_task_status(&self, id: &str, status: &str, reason: Option<&str>) -> RepoResult<()> {
         let conn = self.lock()?;
         let now = utc_now();
@@ -1937,6 +1962,64 @@ mod tests {
         repo.create_task(&t).unwrap();
         let got = repo.get_task("t1").unwrap();
         assert_eq!(got.status, TaskStatus::Preparing);
+    }
+
+    #[test]
+    fn legacy_missing_workspace_kind_defaults_to_worktree() {
+        let repo = make_test_repo();
+        repo.create_project(&make_project("legacy-project", "/home/legacy"))
+            .unwrap();
+        repo.create_task(&make_task(
+            "legacy-task",
+            "legacy-project",
+            TaskStatus::Idle,
+        ))
+        .unwrap();
+
+        repo.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE tasks SET workspace_kind = '' WHERE id = 'legacy-task'",
+                [],
+            )
+            .expect("simulate a pre-field/unknown workspace value");
+
+        assert_eq!(
+            repo.get_task("legacy-task").unwrap().workspace_kind,
+            WorkspaceKind::Worktree,
+            "legacy records must never degrade to direct"
+        );
+    }
+
+    #[test]
+    fn configuration_update_never_overwrites_runtime_status() {
+        let repo = make_test_repo();
+        repo.create_project(&make_project("config-project", "/home/config"))
+            .unwrap();
+        repo.create_task(&make_task(
+            "config-task",
+            "config-project",
+            TaskStatus::Idle,
+        ))
+        .unwrap();
+        repo.update_task_status("config-task", "interrupted", Some("process exited"))
+            .unwrap();
+
+        repo.update_task_configuration(
+            "config-task",
+            WorkspaceKind::Readonly,
+            Some("plan"),
+            Some("model-a"),
+            Some("high"),
+            &utc_now(),
+        )
+        .unwrap();
+
+        let task = repo.get_task("config-task").unwrap();
+        assert_eq!(task.status, TaskStatus::Interrupted);
+        assert_eq!(task.workspace_kind, WorkspaceKind::Readonly);
+        assert_eq!(task.mode.as_deref(), Some("plan"));
     }
 
     #[test]

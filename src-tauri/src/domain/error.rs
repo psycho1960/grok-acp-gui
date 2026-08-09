@@ -25,6 +25,7 @@ pub mod codes {
 
     pub const WORKTREE_ALREADY_EXISTS: &str = "WORKTREE_ALREADY_EXISTS";
     pub const WORKTREE_OUTSIDE_REPO: &str = "WORKTREE_OUTSIDE_REPO";
+    pub const WORKTREE_NOT_READY: &str = "WORKTREE_NOT_READY";
 
     pub const INTEGRATION_CONFLICT: &str = "INTEGRATION_CONFLICT";
     pub const INTEGRATION_DIRTY: &str = "INTEGRATION_DIRTY";

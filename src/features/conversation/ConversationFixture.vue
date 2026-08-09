@@ -60,6 +60,8 @@ const snapshot = props.bulkEvents > 0
   : fixtureSessionSnapshot({
       mode: readStoredSelection(MODE_STORAGE_KEY, "agent"),
       workspaceStrategy: readStoredSelection(WORKSPACE_STORAGE_KEY, "worktree"),
+      workspaceAvailable:
+        readStoredSelection(WORKSPACE_STORAGE_KEY, "worktree") !== "worktree",
       model: readStoredSelection(MODEL_STORAGE_KEY, "grok-4.5"),
       reasoning: readStoredSelection(REASONING_STORAGE_KEY, "high"),
     });
@@ -105,6 +107,7 @@ const bridge = createFakeDesktopBridge({
           taskId: command.payload.taskId,
           mode: configuredMode,
           workspaceStrategy: configuredWorkspace,
+          workspaceAvailable: configuredWorkspace !== "worktree",
           model: configuredModel,
           reasoning: configuredReasoning,
         },
@@ -200,6 +203,7 @@ const bridge = createFakeDesktopBridge({
           status: "running",
           mode: configuredMode,
           workspaceStrategy: configuredWorkspace,
+          workspaceAvailable: configuredWorkspace !== "worktree",
           model: configuredModel,
           reasoning: configuredReasoning,
         },

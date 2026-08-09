@@ -1,8 +1,19 @@
-// GAG-010 / goal: mode ↔ workspace strategy linkage — pure logic, no Tauri
-// dependencies. Mirrors the create-task dialog's established mapping:
+// GAG-010B / goal: the single Renderer mapping for Create Task and Conversation.
+// Pure logic only; the backend independently validates and resolves the real cwd:
 // ask → direct (可写当前目录), agent/plan → worktree (隔离 Worktree).
 
-export type WorkspaceStrategy = "worktree" | "readonly" | "direct";
+import type { WorkspaceStrategy } from "../../bridge/types";
+
+export type { WorkspaceStrategy } from "../../bridge/types";
+
+export const WORKTREE_NOT_READY_MESSAGE =
+  "隔离 Worktree 尚未创建，本任务不会回落到原工作区。";
+
+export const MODE_WORKSPACE_DEFAULTS = Object.freeze({
+  ask: "direct",
+  agent: "worktree",
+  plan: "worktree",
+} satisfies Record<string, WorkspaceStrategy>);
 
 /** Chinese labels for the workspace strategy control. */
 export const WORKSPACE_STRATEGY_OPTIONS: Array<{
@@ -22,15 +33,8 @@ export const WORKSPACE_STRATEGY_OPTIONS: Array<{
 export function workspaceStrategyForMode(
   mode: string | null | undefined,
 ): WorkspaceStrategy | null {
-  switch (mode) {
-    case "ask":
-      return "direct";
-    case "agent":
-    case "plan":
-      return "worktree";
-    default:
-      return null;
-  }
+  if (!mode) return null;
+  return MODE_WORKSPACE_DEFAULTS[mode as keyof typeof MODE_WORKSPACE_DEFAULTS] ?? null;
 }
 
 /** Whether a strategy string is a valid persisted value. */

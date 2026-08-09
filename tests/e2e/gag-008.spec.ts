@@ -92,6 +92,20 @@ test.describe("GAG-008 conversation timeline", () => {
       el.dispatchEvent(new Event("scroll"));
     });
     await expect(page.getByTestId("jump-to-bottom")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const key = Object.keys(window.localStorage).find((candidate) =>
+            candidate.startsWith("gag008:scroll:"),
+          );
+          if (!key) return null;
+          return JSON.parse(window.localStorage.getItem(key) ?? "null") as {
+            scrollTop?: number;
+            stickToBottom?: boolean;
+          };
+        }),
+      )
+      .toMatchObject({ scrollTop: 100, stickToBottom: false });
 
     await page.reload();
     const restored = page.getByTestId("conversation-virtual-list");

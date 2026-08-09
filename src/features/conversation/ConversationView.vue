@@ -189,15 +189,24 @@ function onOpenArtifact(artifactId: string): void {
       :selected-workspace-strategy="store.workspaceStrategy"
       :selected-model="store.selectedModel"
       :selected-reasoning="store.selectedReasoning"
-      :settings-disabled="store.sendPending"
+      :settings-disabled="store.sendPending || store.settingsPending || store.isRunning"
       @cancel="onCancel"
       @refresh="props.taskId && store.openTask(props.taskId as TaskId)"
       @resume="onResume"
-      @update:mode="(mode: string | null) => void store.configureMode(mode)"
+      @update:mode="(mode, strategy) => void store.configureMode(mode, strategy)"
       @update:workspace-strategy="(strategy) => void store.configureWorkspaceStrategy(strategy)"
       @update:model="(model: string | null) => void store.configureModel(model)"
       @update:reasoning="(reasoning) => void store.configureReasoning(reasoning)"
     />
+
+    <p
+      v-if="store.workspaceNotice"
+      class="workspace-notice"
+      role="status"
+      data-testid="conversation-workspace-notice"
+    >
+      {{ store.workspaceNotice }}
+    </p>
 
     <div class="content-layout">
       <div class="body">
@@ -268,10 +277,18 @@ function onOpenArtifact(artifactId: string): void {
 <style scoped>
 .conversation {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto;
   height: 100%;
   min-height: 0;
   background: var(--ctp-base);
+}
+.workspace-notice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--ctp-yellow);
+  background: color-mix(in srgb, var(--ctp-yellow) 10%, var(--ctp-base));
+  border-bottom: 1px solid var(--ctp-surface0);
+  font-size: var(--font-small);
 }
 .content-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); min-height: 0; overflow: hidden; }
 .body {
