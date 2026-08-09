@@ -255,6 +255,10 @@ GAG-011 的生产 Git Adapter 固定使用 `git` 可执行文件加 argv 数组�
 
 在受管 Worktree 中仅 `git add -- <selected paths>`，确认 staged set 与选择一致，再提交。未选变化保留。Git identity 缺失时不改全局配置，只返回指引。
 
+GAG-012 将 Review Interface 固定为 `get_worktree_status`、`get_diff`、`validate_selection`、`create_checkpoint` 与 `list_checkpoints`。Renderer 通过 `review.status`、`review.diff`、`review.validate`、`review.checkpoint`、`review.checkpoints` 使用 `FileChange`、`DiffDocument`、`CheckpointSelection`、`CheckpointReceipt` DTO；不得接触 Git argv 或绝对 Worktree 路径。选择项绑定相对路径和内容/模式 fingerprint，暂存状态本身不改变 fingerprint。
+
+Checkpoint 在任务 Worktree 锁内重新读取 HEAD/status，拒绝预存 index，验证 fingerprint 后使用 `git add -- <exact paths>`，再以 `git diff --cached --name-only -z` 校验 index 与选择 manifest 完全一致。commit 前再次校验 HEAD 与文件版本；失败不执行 reset/clean，若 index 已产生则以结构化错误明确报告保留状态。成功后将 commit/tree/head-before、attempt、selection manifest/hash 追加到 `0005_checkpoints.sql`，Git commit 仍是内容事实来源。
+
 ### Squash 集成
 
 1. 取得仓库级互斥锁。

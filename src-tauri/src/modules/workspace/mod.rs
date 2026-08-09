@@ -1,5 +1,11 @@
 //! MOD-WORKSPACE public interface for managed Git worktree lifecycle.
 
+mod review;
+pub use review::{
+    CheckpointReceipt, CheckpointSelection, DiffDocument, FileChange, ReviewSnapshot,
+    SelectionValidation,
+};
+
 use crate::adapters::filesystem::{
     canonicalize_existing_directory, validate_managed_worktree_target,
 };
@@ -111,6 +117,28 @@ pub trait WorkspaceService: Send + Sync {
     ) -> Result<WorktreeRecord, WorkspaceError>;
     fn inspect_worktree(&self, task_id: &str) -> Result<WorktreeRecord, WorkspaceError>;
     fn reconcile_registry(&self) -> Result<Vec<WorktreeRecord>, WorkspaceError>;
+    fn get_worktree_status(&self, task_id: &str) -> Result<ReviewSnapshot, WorkspaceError>;
+    fn get_diff(
+        &self,
+        task_id: &str,
+        path: &str,
+        fingerprint: &str,
+    ) -> Result<DiffDocument, WorkspaceError>;
+    fn validate_selection(
+        &self,
+        task_id: &str,
+        selection: &[CheckpointSelection],
+    ) -> Result<SelectionValidation, WorkspaceError>;
+    fn create_checkpoint(
+        &self,
+        task_id: &str,
+        message: &str,
+        selection: &[CheckpointSelection],
+    ) -> Result<CheckpointReceipt, WorkspaceError>;
+    fn list_checkpoints(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<crate::domain::types::CheckpointRecord>, WorkspaceError>;
 }
 
 pub struct ManagedWorkspaceService {
@@ -177,6 +205,39 @@ impl ManagedWorkspaceService {
 impl WorkspaceService for ManagedWorkspaceService {
     fn inspect_repository(&self, path: &Path) -> Result<RepositoryInspection, WorkspaceError> {
         self.git.inspect_repository(path).map_err(map_git_error)
+    }
+
+    fn get_worktree_status(&self, task_id: &str) -> Result<ReviewSnapshot, WorkspaceError> {
+        self.review_status(task_id)
+    }
+    fn get_diff(
+        &self,
+        task_id: &str,
+        path: &str,
+        fingerprint: &str,
+    ) -> Result<DiffDocument, WorkspaceError> {
+        self.review_diff(task_id, path, fingerprint)
+    }
+    fn validate_selection(
+        &self,
+        task_id: &str,
+        selection: &[CheckpointSelection],
+    ) -> Result<SelectionValidation, WorkspaceError> {
+        self.validate_review_selection(task_id, selection)
+    }
+    fn create_checkpoint(
+        &self,
+        task_id: &str,
+        message: &str,
+        selection: &[CheckpointSelection],
+    ) -> Result<CheckpointReceipt, WorkspaceError> {
+        self.create_review_checkpoint(task_id, message, selection)
+    }
+    fn list_checkpoints(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<crate::domain::types::CheckpointRecord>, WorkspaceError> {
+        self.review_checkpoints(task_id)
     }
 
     fn create_managed_worktree(
