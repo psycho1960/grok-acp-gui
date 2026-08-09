@@ -122,6 +122,12 @@ describe("DesktopCommand round-trip", () => {
       "artifact.import.blob",
       "artifact.save",
       "workspace.inspect",
+      "worktree.create",
+      "worktree.inspect",
+      "worktree.reconcile",
+      "worktree.prepareRemoval",
+      "worktree.prepareAdoption",
+      "worktree.remove",
       "worktree.adopt",
       "review.diff",
       "review.checkpoint",
@@ -131,9 +137,9 @@ describe("DesktopCommand round-trip", () => {
       "recovery.restore",
       "recovery.delete",
     ];
-    expect(allTypes).toHaveLength(25);
+    expect(allTypes).toHaveLength(31);
     // No duplicates
-    expect(new Set(allTypes).size).toBe(25);
+    expect(new Set(allTypes).size).toBe(31);
   });
 
   it("parses artifact.import.blob with base64 clipboard images", () => {
