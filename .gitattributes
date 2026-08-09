@@ -1,4 +1,5 @@
 # 固定为 LF 行尾（Windows autocrlf 下保持稳定换行，避免跨平台 diff 噪声）
+/.gitattributes text eol=lf
 /src-tauri/tests/gag_010_chat_settings.rs text eol=lf
 /src/features/conversation/ConversationHeader.vue text eol=lf
 /src/features/conversation/mode-workspace.ts text eol=lf
