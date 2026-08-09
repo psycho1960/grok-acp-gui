@@ -37,6 +37,7 @@ const scrollTop = ref(0);
 const viewportHeight = ref(400);
 const anchor = ref<ScrollAnchor>(loadScrollAnchor(props.sessionKey));
 let prevCount = props.items.length;
+let pendingRestoredScrollTop: number | null = null;
 const layoutRevision = ref(0);
 const measuredHeights = new Map<string, number>();
 
@@ -105,6 +106,11 @@ function persist(): void {
 function onScroll(): void {
   if (!root.value) return;
   scrollTop.value = root.value.scrollTop;
+  if (pendingRestoredScrollTop != null) {
+    const restoredScrollTop = pendingRestoredScrollTop;
+    pendingRestoredScrollTop = null;
+    if (Math.abs(root.value.scrollTop - restoredScrollTop) < 1) return;
+  }
   const topIndex = indexAt(root.value.scrollTop);
   const itemTop = layout.value.tops[topIndex] ?? 0;
   const next = onUserScroll(
@@ -136,10 +142,15 @@ function restoreSavedPosition(): void {
   }
   root.value.scrollTop = top;
   scrollTop.value = root.value.scrollTop;
+  // Assigning scrollTop emits a normal scroll event in Chromium. That event is
+  // programmatic, so it must not reinterpret the persisted reading anchor from
+  // incomplete layout geometry and accidentally switch back to stick-to-bottom.
+  pendingRestoredScrollTop = root.value.scrollTop;
 }
 
 function scrollToBottom(smooth = false): void {
   if (!root.value) return;
+  pendingRestoredScrollTop = null;
   const top = Math.max(0, root.value.scrollHeight - root.value.clientHeight);
   if (smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     root.value.scrollTo({ top, behavior: "smooth" });
@@ -154,6 +165,7 @@ function scrollToBottom(smooth = false): void {
 function scrollToSeq(seq: number): void {
   const idx = props.items.findIndex((i) => i.seq === seq);
   if (idx < 0 || !root.value) return;
+  pendingRestoredScrollTop = null;
   const top = layout.value.tops[idx] ?? idx * props.itemHeight;
   root.value.scrollTop = top;
   scrollTop.value = top;
