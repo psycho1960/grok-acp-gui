@@ -379,12 +379,16 @@ pub enum DesktopCommand {
     IntegrationExecute(IntegrationExecutePayload),
     #[serde(rename = "integration.status")]
     IntegrationStatus(IntegrationAttemptPayload),
+    #[serde(rename = "integration.active")]
+    IntegrationActive(WorktreeTaskPayload),
     #[serde(rename = "integration.abort")]
     IntegrationAbort(IntegrationAttemptPayload),
     #[serde(rename = "integration.publish")]
     IntegrationPublish(IntegrationPublishPayload),
     #[serde(rename = "integration.cleanup")]
     IntegrationCleanup(IntegrationAttemptPayload),
+    #[serde(rename = "integration.openWorktree")]
+    IntegrationOpenWorktree(IntegrationAttemptPayload),
 
     #[serde(rename = "worktree.cleanup")]
     WorktreeCleanup(WorktreeCleanupPayload),
@@ -437,9 +441,11 @@ pub fn is_known_command(cmd_type: &str) -> bool {
             | "integration.preflight"
             | "integration.execute"
             | "integration.status"
+            | "integration.active"
             | "integration.abort"
             | "integration.publish"
             | "integration.cleanup"
+            | "integration.openWorktree"
             | "worktree.cleanup"
             | "recovery.restore"
             | "recovery.delete"
@@ -676,7 +682,9 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             Ok(())
         }
 
-        DesktopCommand::ReviewStatus(p) | DesktopCommand::ReviewCheckpoints(p) => {
+        DesktopCommand::ReviewStatus(p)
+        | DesktopCommand::ReviewCheckpoints(p)
+        | DesktopCommand::IntegrationActive(p) => {
             validate_id_non_empty(&p.task_id.0)?;
             Ok(())
         }
@@ -705,7 +713,8 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
         }
         DesktopCommand::IntegrationStatus(p)
         | DesktopCommand::IntegrationAbort(p)
-        | DesktopCommand::IntegrationCleanup(p) => {
+        | DesktopCommand::IntegrationCleanup(p)
+        | DesktopCommand::IntegrationOpenWorktree(p) => {
             validate_id_non_empty(&p.attempt_id)?;
             Ok(())
         }

@@ -34,6 +34,11 @@ const integrationAttempt = ref<IntegrationAttempt>();
 const integrationApproved = ref(false);
 const integrating = ref(false);
 
+const conflictFiles = computed<string[]>(() => parseStringArray(integrationAttempt.value?.conflictSummaryJson));
+const validationResults = computed<string[]>(() => parseValidationResults(integrationAttempt.value?.validationResultJson));
+const activeAttemptId = computed(() => integrationAttempt.value?.id ?? integrationPlan.value?.attemptId);
+const activeApprovalDigest = computed(() => integrationAttempt.value?.approvalDigest ?? integrationPlan.value?.approvalDigest);
+
 const visibleFiles = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase();
   return (snapshot.value?.files ?? []).filter((file) =>
@@ -48,14 +53,20 @@ const selectableCount = computed(() => selection.value.length);
 async function load(): Promise<void> {
   loading.value = true;
   error.value = "";
-  const [statusResult, historyResult] = await Promise.all([
+  const [statusResult, historyResult, integrationResult] = await Promise.all([
     props.bridge.execute({ type: "review.status", payload: { taskId: props.taskId } }),
     props.bridge.execute({ type: "review.checkpoints", payload: { taskId: props.taskId } }),
+    props.bridge.execute({ type: "integration.active", payload: { taskId: props.taskId } }),
   ]);
   if (statusResult.success === "false") error.value = statusResult.error.message;
   else snapshot.value = (statusResult.data as { snapshot: ReviewSnapshot }).snapshot;
   if (historyResult.success === "true") {
     checkpoints.value = (historyResult.data as { checkpoints: CheckpointRecord[] }).checkpoints;
+  }
+  if (integrationResult.success === "true") {
+    integrationAttempt.value = (integrationResult.data as { attempt?: IntegrationAttempt }).attempt;
+  } else if (!error.value) {
+    error.value = integrationResult.error.message;
   }
   loading.value = false;
 }
@@ -115,11 +126,39 @@ async function createCheckpoint(): Promise<void> {
 }
 
 async function prepareIntegration(): Promise<void> {
-  integrating.value = true; error.value = ""; integrationApproved.value = false;
+  integrating.value = true; error.value = ""; integrationApproved.value = false; integrationAttempt.value = undefined;
   const result = await props.bridge.execute({ type: "integration.preflight", payload: { taskId: props.taskId, commitMessage: integrationMessage.value } });
   if (result.success === "false") error.value = result.error.message;
   else integrationPlan.value = (result.data as { plan: IntegrationPlan }).plan;
   integrating.value = false;
+}
+
+function resetIntegration(): void {
+  integrationPlan.value = undefined;
+  integrationAttempt.value = undefined;
+  integrationApproved.value = false;
+  error.value = "";
+}
+
+function parseStringArray(value?: string): string[] {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseValidationResults(value?: string): string[] {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((item) => typeof item === "string" ? item : JSON.stringify(item));
+  } catch {
+    return ["验证结果格式无效"];
+  }
 }
 
 async function startIntegration(): Promise<void> {
@@ -132,36 +171,43 @@ async function startIntegration(): Promise<void> {
 }
 
 async function publishIntegration(): Promise<void> {
-  if (!integrationPlan.value || integrationAttempt.value?.state !== "ready_to_publish") return;
+  if (!activeAttemptId.value || !activeApprovalDigest.value || integrationAttempt.value?.state !== "ready_to_publish") return;
   integrating.value = true; error.value = "";
-  const result = await props.bridge.execute({ type: "integration.publish", payload: { attemptId: integrationPlan.value.attemptId, approvalDigest: integrationPlan.value.approvalDigest } });
+  const result = await props.bridge.execute({ type: "integration.publish", payload: { attemptId: activeAttemptId.value, approvalDigest: activeApprovalDigest.value } });
   if (result.success === "false") { error.value = result.error.message; await refreshIntegrationStatus(); }
   else integrationAttempt.value = (result.data as { attempt: IntegrationAttempt }).attempt;
   integrating.value = false;
 }
 
 async function refreshIntegrationStatus(): Promise<void> {
-  if (!integrationPlan.value) return;
-  const result = await props.bridge.execute({ type: "integration.status", payload: { attemptId: integrationPlan.value.attemptId } });
+  if (!activeAttemptId.value) return;
+  const result = await props.bridge.execute({ type: "integration.status", payload: { attemptId: activeAttemptId.value } });
   if (result.success === "true") integrationAttempt.value = (result.data as { attempt: IntegrationAttempt }).attempt;
 }
 
 async function abortIntegration(): Promise<void> {
-  if (!integrationPlan.value) return;
+  if (!activeAttemptId.value) return;
   integrating.value = true; error.value = "";
-  const result = await props.bridge.execute({ type: "integration.abort", payload: { attemptId: integrationPlan.value.attemptId } });
+  const result = await props.bridge.execute({ type: "integration.abort", payload: { attemptId: activeAttemptId.value } });
   if (result.success === "false") error.value = result.error.message;
   else integrationAttempt.value = (result.data as { attempt: IntegrationAttempt }).attempt;
   integrating.value = false;
 }
 
 async function cleanupIntegration(): Promise<void> {
-  if (!integrationPlan.value) return;
+  if (!activeAttemptId.value) return;
   integrating.value = true; error.value = "";
-  const result = await props.bridge.execute({ type: "integration.cleanup", payload: { attemptId: integrationPlan.value.attemptId } });
+  const result = await props.bridge.execute({ type: "integration.cleanup", payload: { attemptId: activeAttemptId.value } });
   if (result.success === "false") error.value = result.error.message;
   else integrationAttempt.value = (result.data as { attempt: IntegrationAttempt }).attempt;
   integrating.value = false;
+}
+
+async function openIntegrationWorktree(): Promise<void> {
+  if (!activeAttemptId.value) return;
+  error.value = "";
+  const result = await props.bridge.execute({ type: "integration.openWorktree", payload: { attemptId: activeAttemptId.value } });
+  if (result.success === "false") error.value = result.error.message;
 }
 
 onMounted(load);
@@ -207,18 +253,25 @@ onMounted(load);
         <section class="history"><h3>历史</h3><p v-if="!checkpoints.length">尚无 Checkpoint</p><ol v-else><li v-for="item in checkpoints" :key="item.id"><code>{{ item.commitSha.slice(0, 10) }}</code><span>{{ item.message }}</span></li></ol></section>
         <section class="integration" aria-labelledby="integration-title">
           <h3 id="integration-title">Squash 集成</h3>
-          <label>集成提交说明<textarea v-model="integrationMessage" rows="3" :disabled="integrating || !!integrationPlan" /></label>
-          <Button v-if="!integrationPlan" variant="secondary" :disabled="integrating || !checkpoints.length" @click="prepareIntegration">集成预检</Button>
+          <label>集成提交说明<textarea v-model="integrationMessage" rows="3" :disabled="integrating || !!integrationPlan || !!integrationAttempt" /></label>
+          <Button v-if="!integrationPlan && !integrationAttempt" variant="secondary" :disabled="integrating || !checkpoints.length" @click="prepareIntegration">集成预检</Button>
           <template v-else>
-            <dl><dt>来源</dt><dd><code>{{ integrationPlan.sourceTipSha.slice(0, 12) }}</code>（{{ integrationPlan.sourceRange.length }} 个 Checkpoint）</dd><dt>未选择变更</dt><dd>{{ integrationPlan.sourceDirty ? "存在；保留在来源 Worktree，不进入本次 Squash，状态变化会使审批失效" : "无" }}</dd><dt>目标</dt><dd>{{ integrationPlan.targetRef }} @ <code>{{ integrationPlan.expectedTargetSha.slice(0, 12) }}</code></dd><dt>验证</dt><dd>{{ integrationPlan.validationCommands.length ? integrationPlan.validationCommands.map((item) => item.join(" ")).join("；") : "无已配置命令" }}</dd></dl>
-            <label v-if="!integrationAttempt"><input v-model="integrationApproved" type="checkbox" /> 我确认以上 source、target、提交说明与操作摘要</label>
-            <Button v-if="!integrationAttempt" variant="primary" :disabled="!integrationApproved || integrating" @click="startIntegration">{{ integrating ? "正在隔离试合并…" : "开始隔离 Squash" }}</Button>
+            <template v-if="integrationPlan">
+              <dl><dt>来源</dt><dd><code>{{ integrationPlan.sourceTipSha.slice(0, 12) }}</code>（{{ integrationPlan.sourceRange.length }} 个 Checkpoint）</dd><dt>未选择变更</dt><dd>{{ integrationPlan.sourceDirty ? "存在；保留在来源 Worktree，不进入本次 Squash，状态变化会使审批失效" : "无" }}</dd><dt>目标</dt><dd>{{ integrationPlan.targetRef }} @ <code>{{ integrationPlan.expectedTargetSha.slice(0, 12) }}</code></dd><dt>预计文件</dt><dd><ul><li v-for="file in integrationPlan.expectedFiles" :key="file"><code>{{ file }}</code></li></ul></dd><dt>验证</dt><dd>{{ integrationPlan.validationCommands.length ? integrationPlan.validationCommands.map((item) => item.join(" ")).join("；") : "无已配置命令" }}</dd></dl>
+              <ul class="preflight-checklist" aria-label="集成预检清单"><li>来源 Checkpoint 范围已冻结</li><li>目标引用与 HEAD 已校验</li><li>目标分支未在 Worktree 中检出</li><li>来源未选择变更摘要已绑定审批</li></ul>
+              <label v-if="!integrationAttempt"><input v-model="integrationApproved" type="checkbox" /> 我确认以上 source、target、提交说明与操作摘要</label>
+              <Button v-if="!integrationAttempt" variant="primary" :disabled="!integrationApproved || integrating" @click="startIntegration">{{ integrating ? "正在隔离试合并…" : "开始隔离 Squash" }}</Button>
+            </template>
+            <p v-if="integrationAttempt && !integrationPlan" class="notice">已恢复未完成的集成尝试。</p>
             <p v-if="integrationAttempt" class="integration-state" role="status">阶段：{{ integrationAttempt.state }}</p>
-            <p v-if="integrationAttempt?.state === 'conflicted'">冲突文件：{{ JSON.parse(integrationAttempt.conflictSummaryJson ?? "[]").join("、") }}<br />临时 Worktree：{{ integrationAttempt.temporaryWorktreePath }}</p>
+            <p v-if="integrationAttempt?.state === 'conflicted'">冲突文件：{{ conflictFiles.join("、") }}<br />临时 Worktree：{{ integrationAttempt.temporaryWorktreePath }}</p>
+            <Button v-if="integrationAttempt?.state === 'conflicted'" variant="secondary" :disabled="integrating" @click="openIntegrationWorktree">打开临时 Worktree 人工处理</Button>
+            <div v-if="validationResults.length"><h4>验证结果</h4><ul><li v-for="result in validationResults" :key="result">{{ result }}</li></ul></div>
             <p v-if="integrationAttempt?.state === 'completed'">已发布 {{ integrationAttempt.resultCommitSha?.slice(0, 12) }}；来源 Worktree 保留，清理状态 {{ integrationAttempt.cleanupStatus }}。</p>
             <Button v-if="integrationAttempt?.state === 'ready_to_publish'" variant="primary" :disabled="integrating" @click="publishIntegration">原子发布到目标引用</Button>
             <Button v-if="integrationAttempt && !['completed','aborted'].includes(integrationAttempt.state)" variant="secondary" :disabled="integrating" @click="abortIntegration">中止并保留恢复包</Button>
-            <Button v-if="integrationAttempt && ['completed','aborted','conflicted','validation_failed','publish_rejected','cleanup_required'].includes(integrationAttempt.state) && integrationAttempt.cleanupStatus !== 'completed'" variant="secondary" :disabled="integrating" @click="cleanupIntegration">清理临时资源</Button>
+            <Button v-if="integrationAttempt && ['completed','aborted','conflicted','validation_failed','publish_rejected','cleanup_required','staging'].includes(integrationAttempt.state) && integrationAttempt.cleanupStatus !== 'completed'" variant="secondary" :disabled="integrating" @click="cleanupIntegration">清理临时资源</Button>
+            <Button v-if="integrationAttempt?.cleanupStatus === 'completed' && ['publish_rejected','preflight_failed','aborted'].includes(integrationAttempt.state)" variant="secondary" :disabled="integrating" @click="resetIntegration">目标或来源已变化，重新预检</Button>
           </template>
         </section>
       </aside>

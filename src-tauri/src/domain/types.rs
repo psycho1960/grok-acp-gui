@@ -325,12 +325,80 @@ pub struct CheckpointRecord {
 }
 
 /// Durable state for one isolated squash integration attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationState {
+    Draft,
+    Preflight,
+    Staging,
+    Conflicted,
+    Validating,
+    ReadyToPublish,
+    Publishing,
+    Completed,
+    PreflightFailed,
+    ValidationFailed,
+    PublishRejected,
+    CleanupRequired,
+    Aborted,
+}
+
+impl IntegrationState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Preflight => "preflight",
+            Self::Staging => "staging",
+            Self::Conflicted => "conflicted",
+            Self::Validating => "validating",
+            Self::ReadyToPublish => "ready_to_publish",
+            Self::Publishing => "publishing",
+            Self::Completed => "completed",
+            Self::PreflightFailed => "preflight_failed",
+            Self::ValidationFailed => "validation_failed",
+            Self::PublishRejected => "publish_rejected",
+            Self::CleanupRequired => "cleanup_required",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
+impl std::str::FromStr for IntegrationState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "draft" => Self::Draft,
+            "preflight" => Self::Preflight,
+            "staging" => Self::Staging,
+            "conflicted" => Self::Conflicted,
+            "validating" => Self::Validating,
+            "ready_to_publish" => Self::ReadyToPublish,
+            "publishing" => Self::Publishing,
+            "completed" => Self::Completed,
+            "preflight_failed" => Self::PreflightFailed,
+            "validation_failed" => Self::ValidationFailed,
+            "publish_rejected" => Self::PublishRejected,
+            "cleanup_required" => Self::CleanupRequired,
+            "aborted" => Self::Aborted,
+            other => return Err(format!("unknown integration state: {other}")),
+        })
+    }
+}
+
+impl PartialEq<&str> for IntegrationState {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationAttempt {
     pub id: IntegrationId,
     pub task_id: TaskId,
     pub repo_root: String,
+    pub repo_identity: String,
     pub source_ref: String,
     pub source_tip_sha: String,
     pub source_range: String,
@@ -342,7 +410,7 @@ pub struct IntegrationAttempt {
     pub validation_commands_json: String,
     pub validation_digest: String,
     pub approval_digest: String,
-    pub state: String,
+    pub state: IntegrationState,
     pub temporary_worktree_id: Option<String>,
     pub temporary_worktree_path: Option<String>,
     pub temporary_branch: Option<String>,

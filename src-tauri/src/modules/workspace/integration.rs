@@ -1,7 +1,7 @@
 //! GAG-013 isolated squash integration and compare-and-swap publication.
 
 use super::*;
-use crate::domain::types::{utc_now, IntegrationAttempt, IntegrationId};
+use crate::domain::types::{utc_now, IntegrationAttempt, IntegrationId, IntegrationState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -16,6 +16,7 @@ pub struct IntegrationPlan {
     pub source_range: Vec<String>,
     pub source_dirty: bool,
     pub source_worktree_digest: String,
+    pub expected_files: Vec<String>,
     pub target_ref: String,
     pub expected_target_sha: String,
     pub commit_message: String,
@@ -43,6 +44,17 @@ impl ManagedWorkspaceService {
         })?;
         validate_integration_message(&request.commit_message)?;
         let record = active_managed_record(self.repo.as_ref(), &request.task_id.0)?;
+        if self
+            .repo
+            .get_active_integration_by_repo(&record.repo_identity, &record.repo_root)
+            .map_err(map_repo_error)?
+            .is_some()
+        {
+            return Err(integration_error(
+                "INTEGRATION_LOCKED",
+                "Repository already has an integration awaiting cleanup",
+            ));
+        }
         let source_root = self.prove_registered_target(&record)?;
         let source = self
             .git
@@ -124,6 +136,26 @@ impl ManagedWorkspaceService {
                 "Source range contains a commit that is not a recorded Checkpoint",
             ));
         }
+        let expected_files = split_nul_owned(
+            self.git
+                .capture(
+                    &source_root,
+                    &[
+                        "diff",
+                        "--name-only",
+                        "-z",
+                        &expected_target_sha,
+                        &source_tip_sha,
+                    ],
+                )
+                .map_err(map_git_error)?,
+        )?;
+        let expected_files_json = serde_json::to_string(&expected_files).map_err(|_| {
+            integration_error(
+                "INTEGRATION_PLAN_INVALID",
+                "Expected file list could not be encoded",
+            )
+        })?;
         let validation_commands: Vec<Vec<String>> = Vec::new();
         let validation_json = serde_json::to_string(&validation_commands).map_err(|_| {
             integration_error(
@@ -140,22 +172,24 @@ impl ManagedWorkspaceService {
             )
         })?;
         let approval_digest = sha256_text(&format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
             record.repo_identity,
             source_tip_sha,
             source_range_json,
             source.dirty,
             source_worktree_digest,
+            expected_files_json,
             target_ref,
             expected_target_sha,
             request.commit_message,
             validation_digest
         ));
         let now = utc_now();
-        let attempt = IntegrationAttempt {
+        let mut attempt = IntegrationAttempt {
             id: IntegrationId::new(attempt_id.clone()),
             task_id: request.task_id.clone(),
             repo_root: record.repo_root,
+            repo_identity: record.repo_identity,
             source_ref: format!("refs/heads/{}", record.branch),
             source_tip_sha: source_tip_sha.clone(),
             source_range: source_range_json,
@@ -167,7 +201,7 @@ impl ManagedWorkspaceService {
             validation_commands_json: validation_json,
             validation_digest: validation_digest.clone(),
             approval_digest: approval_digest.clone(),
-            state: "preflight".into(),
+            state: IntegrationState::Draft,
             temporary_worktree_id: None,
             temporary_worktree_path: None,
             temporary_branch: None,
@@ -179,9 +213,23 @@ impl ManagedWorkspaceService {
             created_at: now.clone(),
             updated_at: now,
         };
-        self.repo
-            .create_integration_attempt(&attempt)
-            .map_err(map_repo_error)?;
+        if let Err(error) = self.repo.create_integration_attempt(&attempt) {
+            if self
+                .repo
+                .get_active_integration_by_repo(&attempt.repo_identity, &attempt.repo_root)
+                .map_err(map_repo_error)?
+                .is_some()
+            {
+                return Err(integration_error(
+                    "INTEGRATION_LOCKED",
+                    "Repository already has an integration awaiting cleanup",
+                ));
+            }
+            return Err(map_repo_error(error));
+        }
+        attempt.state = IntegrationState::Preflight;
+        attempt.updated_at = utc_now();
+        self.save_attempt(&attempt, "{\"stage\":\"preflight_complete\"}")?;
         Ok(IntegrationPlan {
             attempt_id,
             task_id: request.task_id,
@@ -190,6 +238,7 @@ impl ManagedWorkspaceService {
             source_range,
             source_dirty: source.dirty,
             source_worktree_digest,
+            expected_files,
             target_ref,
             expected_target_sha,
             commit_message: request.commit_message,
@@ -223,7 +272,18 @@ impl ManagedWorkspaceService {
             &attempt,
             "{\"approval\":\"accepted\",\"source\":\"review_ui\"}",
         )?;
-        self.revalidate_frozen_refs(&attempt, true)?;
+        if let Err(error) = self.revalidate_frozen_refs(&attempt, true) {
+            attempt.state = IntegrationState::PreflightFailed;
+            attempt.cleanup_status = "completed".into();
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"reason\":\"preflight_changed\"}")?;
+            let _ = self.repo.update_task_status(
+                &attempt.task_id.0,
+                "ready_for_review",
+                Some("integration preflight invalidated"),
+            );
+            return Err(error);
+        }
         self.repo
             .update_task_status(&attempt.task_id.0, "integrating", None)
             .map_err(map_repo_error)?;
@@ -253,6 +313,12 @@ impl ManagedWorkspaceService {
         }
         let temp_branch = format!("gag-integration/{}", attempt.id.0);
         let temp_arg = temp_path.to_string_lossy().into_owned();
+        attempt.state = IntegrationState::Staging;
+        attempt.temporary_worktree_id = Some(temp_id);
+        attempt.temporary_worktree_path = Some(temp_arg.clone());
+        attempt.temporary_branch = Some(temp_branch.clone());
+        attempt.updated_at = utc_now();
+        self.save_attempt(&attempt, "{\"stage\":\"worktree_planned\"}")?;
         let args = [
             "worktree",
             "add",
@@ -263,6 +329,9 @@ impl ManagedWorkspaceService {
         ];
         authorize_managed_git(Path::new(&attempt.repo_root), &args, &[&temp_path])?;
         if let Err(error) = self.git.run_checked(Path::new(&attempt.repo_root), &args) {
+            attempt.state = IntegrationState::CleanupRequired;
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"reason\":\"worktree_add_failed\"}")?;
             let _ = self.repo.update_task_status(
                 &attempt.task_id.0,
                 "ready_for_review",
@@ -293,15 +362,14 @@ impl ManagedWorkspaceService {
                 "ready_for_review",
                 Some("integration Worktree verification failed"),
             );
+            attempt.state = IntegrationState::CleanupRequired;
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"reason\":\"worktree_verification_failed\"}")?;
             return Err(integration_error(
                 "INTEGRATION_STAGING_FAILED",
                 "Created integration Worktree failed Git metadata verification",
             ));
         }
-        attempt.state = "staging".into();
-        attempt.temporary_worktree_id = Some(temp_id);
-        attempt.temporary_worktree_path = Some(temp_arg.clone());
-        attempt.temporary_branch = Some(temp_branch);
         attempt.updated_at = utc_now();
         if let Err(error) = self.save_attempt(&attempt, "{\"stage\":\"worktree_created\"}") {
             rollback_created_worktree(
@@ -328,7 +396,7 @@ impl ManagedWorkspaceService {
         let merge = match self.git.capture_allow_status(temp, &merge_args, &[0, 1]) {
             Ok(output) => output,
             Err(error) => {
-                attempt.state = "cleanup_required".into();
+                attempt.state = IntegrationState::CleanupRequired;
                 attempt.updated_at = utc_now();
                 self.save_attempt(&attempt, "{\"reason\":\"squash_command_failed\"}")?;
                 return Err(map_git_error(error));
@@ -346,7 +414,7 @@ impl ManagedWorkspaceService {
                     "Squash failed without a structured conflict list",
                 ));
             }
-            attempt.state = "conflicted".into();
+            attempt.state = IntegrationState::Conflicted;
             attempt.conflict_summary_json =
                 Some(serde_json::to_string(&conflicts).unwrap_or_else(|_| "[]".into()));
             attempt.updated_at = utc_now();
@@ -363,7 +431,7 @@ impl ManagedWorkspaceService {
             .capture_allow_status(temp, &["diff", "--cached", "--quiet"], &[0, 1])
             .map_err(map_git_error)?;
         if staged.status == 0 {
-            attempt.state = "validation_failed".into();
+            attempt.state = IntegrationState::ValidationFailed;
             attempt.updated_at = utc_now();
             self.save_attempt(&attempt, "{\"reason\":\"empty_squash\"}")?;
             return Err(integration_error(
@@ -371,8 +439,69 @@ impl ManagedWorkspaceService {
                 "Squash produced no staged changes",
             ));
         }
-        attempt.state = "validating".into();
-        attempt.validation_result_json = Some("[]".into());
+        let mut expected_files = split_nul_owned(
+            self.git
+                .capture(
+                    Path::new(&attempt.repo_root),
+                    &[
+                        "diff",
+                        "--name-only",
+                        "-z",
+                        attempt.expected_target_sha.as_str(),
+                        attempt.source_tip_sha.as_str(),
+                    ],
+                )
+                .map_err(map_git_error)?,
+        )?;
+        let mut staged_files = split_nul_owned(
+            self.git
+                .capture(
+                    temp,
+                    &[
+                        "diff",
+                        "--cached",
+                        "--name-only",
+                        "-z",
+                        attempt.expected_target_sha.as_str(),
+                    ],
+                )
+                .map_err(map_git_error)?,
+        )?;
+        expected_files.sort();
+        staged_files.sort();
+        if staged_files != expected_files {
+            attempt.state = IntegrationState::ValidationFailed;
+            attempt.validation_result_json = Some("[{\"status\":\"preview_mismatch\"}]".into());
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"reason\":\"staged_files_mismatch\"}")?;
+            return Err(integration_error(
+                "INTEGRATION_PREVIEW_MISMATCH",
+                "Staged files no longer match the approved integration preview",
+            ));
+        }
+        let staged_patch = self
+            .git
+            .capture(
+                temp,
+                &[
+                    "diff",
+                    "--cached",
+                    "--binary",
+                    "--full-index",
+                    "--no-ext-diff",
+                    attempt.expected_target_sha.as_str(),
+                ],
+            )
+            .map_err(map_git_error)?;
+        let staged_patch_digest = sha256_bytes(&staged_patch);
+        attempt.state = IntegrationState::Validating;
+        attempt.validation_result_json = Some(
+            serde_json::json!([{
+                "status": "staged_verified",
+                "patchDigest": staged_patch_digest,
+            }])
+            .to_string(),
+        );
         attempt.updated_at = utc_now();
         self.save_attempt(&attempt, "{\"commands\":[]}")?;
         let commit_args = [
@@ -383,7 +512,7 @@ impl ManagedWorkspaceService {
         ];
         authorize_managed_git(temp, &commit_args, &[temp])?;
         if let Err(error) = self.git.run_checked(temp, &commit_args) {
-            attempt.state = "validation_failed".into();
+            attempt.state = IntegrationState::ValidationFailed;
             attempt.validation_result_json = Some("[{\"status\":\"commit_failed\"}]".into());
             attempt.updated_at = utc_now();
             self.save_attempt(&attempt, "{\"reason\":\"commit_failed\"}")?;
@@ -400,7 +529,7 @@ impl ManagedWorkspaceService {
                 .map_err(map_git_error)?,
         )?;
         if parent != attempt.expected_target_sha {
-            attempt.state = "cleanup_required".into();
+            attempt.state = IntegrationState::CleanupRequired;
             attempt.updated_at = utc_now();
             self.save_attempt(&attempt, "{\"reason\":\"parent_mismatch\"}")?;
             return Err(integration_error(
@@ -408,8 +537,33 @@ impl ManagedWorkspaceService {
                 "Integration commit parent is not the frozen target HEAD",
             ));
         }
+        let committed_patch = self
+            .git
+            .capture(
+                temp,
+                &[
+                    "diff",
+                    "--binary",
+                    "--full-index",
+                    "--no-ext-diff",
+                    attempt.expected_target_sha.as_str(),
+                    result.as_str(),
+                ],
+            )
+            .map_err(map_git_error)?;
+        if committed_patch != staged_patch {
+            attempt.result_commit_sha = Some(result);
+            attempt.state = IntegrationState::ValidationFailed;
+            attempt.validation_result_json = Some("[{\"status\":\"commit_tree_mismatch\"}]".into());
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"reason\":\"commit_tree_mismatch\"}")?;
+            return Err(integration_error(
+                "INTEGRATION_COMMIT_CHANGED",
+                "Commit hooks changed the approved staged integration content",
+            ));
+        }
         attempt.result_commit_sha = Some(result);
-        attempt.state = "ready_to_publish".into();
+        attempt.state = IntegrationState::ReadyToPublish;
         attempt.updated_at = utc_now();
         self.save_attempt(&attempt, "{\"stage\":\"ready_to_publish\"}")?;
         Ok(attempt)
@@ -419,7 +573,38 @@ impl ManagedWorkspaceService {
         &self,
         id: &str,
     ) -> Result<IntegrationAttempt, WorkspaceError> {
-        self.load_attempt(id)
+        let mut attempt = self.load_attempt(id)?;
+        if attempt.state == IntegrationState::Validating {
+            let _lock = self.lifecycle_lock.lock().map_err(|_| {
+                integration_error(
+                    "INTEGRATION_LOCKED",
+                    "Repository integration lock is unavailable",
+                )
+            })?;
+            attempt = self.load_attempt(id)?;
+            attempt = self.reconcile_validating_attempt_locked(attempt)?;
+        }
+        if attempt.state != IntegrationState::Publishing {
+            return Ok(attempt);
+        }
+        match self.publish_integration_attempt(id, &attempt.approval_digest) {
+            Ok(reconciled) => Ok(reconciled),
+            Err(_) => self.load_attempt(id),
+        }
+    }
+
+    pub(super) fn active_integration_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<IntegrationAttempt>, WorkspaceError> {
+        validate_identifier(task_id, "task ID")?;
+        let attempt = self
+            .repo
+            .get_active_integration_by_task(task_id)
+            .map_err(map_repo_error)?;
+        attempt
+            .map(|item| self.integration_status(&item.id.0))
+            .transpose()
     }
 
     pub(super) fn publish_integration_attempt(
@@ -434,28 +619,50 @@ impl ManagedWorkspaceService {
             )
         })?;
         let mut attempt = self.load_attempt(id)?;
-        require_state(&attempt, &["ready_to_publish"])?;
+        if attempt.state == IntegrationState::Validating {
+            attempt = self.reconcile_validating_attempt_locked(attempt)?;
+        }
+        require_state(&attempt, &["ready_to_publish", "publishing"])?;
         if !constant_time_equal(&attempt.approval_digest, approval_digest) {
             return Err(integration_error(
                 "INTEGRATION_APPROVAL_INVALID",
                 "Integration approval no longer matches the plan",
             ));
         }
-        if let Err(error) = self.revalidate_frozen_refs(&attempt, true) {
-            attempt.state = "publish_rejected".into();
-            attempt.updated_at = utc_now();
-            self.save_attempt(&attempt, "{\"reason\":\"frozen_ref_changed\"}")?;
-            return Err(error);
-        }
-        attempt.state = "publishing".into();
-        attempt.updated_at = utc_now();
-        self.save_attempt(&attempt, "{\"stage\":\"publishing\"}")?;
         let result = attempt.result_commit_sha.clone().ok_or_else(|| {
             integration_error(
                 "INTEGRATION_RESULT_MISSING",
                 "Integration result commit is missing",
             )
         })?;
+        let current_target = required_utf8_line(
+            self.git
+                .capture(
+                    Path::new(&attempt.repo_root),
+                    &["rev-parse", "--verify", attempt.target_ref.as_str()],
+                )
+                .map_err(map_git_error)?,
+        )?;
+        if attempt.state == IntegrationState::Publishing && current_target == result {
+            attempt.state = IntegrationState::Completed;
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"stage\":\"published_reconciled\"}")?;
+            let _ = self
+                .repo
+                .update_task_status(&attempt.task_id.0, "merged", None);
+            return Ok(attempt);
+        }
+        if let Err(error) = self.revalidate_frozen_refs(&attempt, true) {
+            attempt.state = IntegrationState::PublishRejected;
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"reason\":\"frozen_ref_changed\"}")?;
+            return Err(error);
+        }
+        if attempt.state != IntegrationState::Publishing {
+            attempt.state = IntegrationState::Publishing;
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"stage\":\"publishing\"}")?;
+        }
         let args = [
             "update-ref",
             attempt.target_ref.as_str(),
@@ -472,7 +679,7 @@ impl ManagedWorkspaceService {
             .run_checked(Path::new(&attempt.repo_root), &args)
             .is_err()
         {
-            attempt.state = "publish_rejected".into();
+            attempt.state = IntegrationState::PublishRejected;
             attempt.updated_at = utc_now();
             self.save_attempt(&attempt, "{\"reason\":\"cas_failed\"}")?;
             return Err(integration_error(
@@ -480,7 +687,7 @@ impl ManagedWorkspaceService {
                 "Target ref changed before atomic publication",
             ));
         }
-        attempt.state = "completed".into();
+        attempt.state = IntegrationState::Completed;
         attempt.updated_at = utc_now();
         self.save_attempt(&attempt, "{\"stage\":\"published\"}")?;
         let _ = self
@@ -500,20 +707,27 @@ impl ManagedWorkspaceService {
             )
         })?;
         let mut attempt = self.load_attempt(id)?;
+        if attempt.state == IntegrationState::Validating {
+            attempt = self.reconcile_validating_attempt_locked(attempt)?;
+        }
         if matches!(attempt.state.as_str(), "completed" | "aborted") {
             return Err(integration_error(
                 "INTEGRATION_INVALID_STATE",
                 "Completed or aborted integration cannot be aborted",
             ));
         }
-        if attempt.temporary_worktree_path.is_some() {
+        if attempt
+            .temporary_worktree_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).exists())
+        {
             attempt.recovery_bundle_path = Some(
                 self.create_integration_recovery(&attempt)?
                     .to_string_lossy()
                     .into_owned(),
             );
         }
-        attempt.state = "aborted".into();
+        attempt.state = IntegrationState::Aborted;
         attempt.updated_at = utc_now();
         self.save_attempt(&attempt, "{\"stage\":\"aborted\"}")?;
         let _ = self.repo.update_task_status(
@@ -544,6 +758,7 @@ impl ManagedWorkspaceService {
                 "validation_failed",
                 "publish_rejected",
                 "cleanup_required",
+                "staging",
             ],
         )?;
         let Some(raw_path) = attempt.temporary_worktree_path.clone() else {
@@ -563,44 +778,190 @@ impl ManagedWorkspaceService {
         let listed = self
             .git
             .list_worktrees(Path::new(&attempt.repo_root))
-            .map_err(map_git_error)?;
-        if !listed.iter().any(|item| {
-            same_path_identity(&item.path, &target)
-                && item.branch.as_deref() == attempt.temporary_branch.as_deref()
-        }) {
+            .map_err(|_| {
+                integration_error(
+                    "INTEGRATION_CLEANUP_INSPECTION_FAILED",
+                    "Git Worktree metadata could not be inspected during cleanup",
+                )
+            })?;
+        let worktree_present = listed
+            .iter()
+            .any(|item| same_path_identity(&item.path, &target));
+        if let Some(item) = listed
+            .iter()
+            .find(|item| same_path_identity(&item.path, &target))
+        {
+            if item.branch.as_deref() != attempt.temporary_branch.as_deref() {
+                return Err(integration_error(
+                    "INTEGRATION_CLEANUP_REJECTED",
+                    "Temporary Worktree ownership proof no longer matches Git metadata",
+                ));
+            }
+        } else if target.exists() {
             return Err(integration_error(
                 "INTEGRATION_CLEANUP_REJECTED",
-                "Temporary Worktree ownership proof no longer matches Git metadata",
+                "Unregistered content remains at the temporary Worktree path",
             ));
         }
-        if attempt.state != "completed" && attempt.recovery_bundle_path.is_none() {
+        let branch_head = if let Some(branch) = attempt.temporary_branch.as_deref() {
+            let branch_ref = format!("refs/heads/{branch}");
+            let output = self
+                .git
+                .capture_allow_status(
+                    Path::new(&attempt.repo_root),
+                    &["rev-parse", "--verify", "--quiet", branch_ref.as_str()],
+                    &[0, 1],
+                )
+                .map_err(|_| {
+                    integration_error(
+                        "INTEGRATION_CLEANUP_INSPECTION_FAILED",
+                        "Temporary branch metadata could not be inspected during cleanup",
+                    )
+                })?;
+            (output.status == 0)
+                .then(|| required_utf8_line(output.stdout))
+                .transpose()?
+        } else {
+            None
+        };
+        if attempt.result_commit_sha.is_none() {
+            if let Some(head) = branch_head.as_deref() {
+                if head != attempt.expected_target_sha {
+                    let parent = required_utf8_line(
+                        self.git
+                            .capture(
+                                Path::new(&attempt.repo_root),
+                                &["rev-parse", &format!("{head}^")],
+                            )
+                            .map_err(map_git_error)?,
+                    )?;
+                    if parent != attempt.expected_target_sha {
+                        return Err(integration_error(
+                            "INTEGRATION_CLEANUP_REJECTED",
+                            "Temporary branch moved outside the frozen integration result",
+                        ));
+                    }
+                    attempt.result_commit_sha = Some(head.to_owned());
+                    attempt.updated_at = utc_now();
+                    self.save_attempt(&attempt, "{\"cleanup\":\"commit_receipt_reconciled\"}")?;
+                }
+            }
+        }
+        if !worktree_present && branch_head.is_none() {
+            attempt.cleanup_status = "completed".into();
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"cleanup\":\"planned_resources_absent\"}")?;
+            return Ok(attempt);
+        }
+        if attempt.state != IntegrationState::Completed && attempt.recovery_bundle_path.is_none() {
+            if !worktree_present {
+                return Err(integration_error(
+                    "INTEGRATION_RECOVERY_FAILED",
+                    "Temporary branch remains but its Worktree is unavailable for recovery",
+                ));
+            }
             attempt.recovery_bundle_path = Some(
                 self.create_integration_recovery(&attempt)?
                     .to_string_lossy()
                     .into_owned(),
             );
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"cleanup\":\"recovery_verified\"}")?;
         }
-        let target_arg = target.to_string_lossy().into_owned();
-        let args = ["worktree", "remove", "--force", target_arg.as_str()];
-        authorize_managed_git(Path::new(&attempt.repo_root), &args, &[&target])?;
-        self.git
-            .run_checked(Path::new(&attempt.repo_root), &args)
-            .map_err(map_git_error)?;
-        if let Some(branch) = attempt.temporary_branch.as_deref() {
-            let branch_args = ["branch", "-D", branch];
-            authorize_managed_git(
-                Path::new(&attempt.repo_root),
-                &branch_args,
-                &[Path::new(&attempt.repo_root)],
-            )?;
+        if worktree_present {
+            let target_arg = target.to_string_lossy().into_owned();
+            let args = ["worktree", "remove", "--force", target_arg.as_str()];
+            authorize_managed_git(Path::new(&attempt.repo_root), &args, &[&target])?;
             self.git
-                .run_checked(Path::new(&attempt.repo_root), &branch_args)
+                .run_checked(Path::new(&attempt.repo_root), &args)
                 .map_err(map_git_error)?;
+            attempt.cleanup_status = "worktree_removed".into();
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"cleanup\":\"worktree_removed\"}")?;
         }
+        if let Some(branch) = attempt.temporary_branch.as_deref() {
+            if let Some(head) = branch_head {
+                let owned = head == attempt.expected_target_sha
+                    || attempt.result_commit_sha.as_deref() == Some(head.as_str());
+                if !owned {
+                    return Err(integration_error(
+                        "INTEGRATION_CLEANUP_REJECTED",
+                        "Temporary branch moved outside the frozen integration result",
+                    ));
+                }
+                let branch_ref = format!("refs/heads/{branch}");
+                let branch_args = ["update-ref", "-d", branch_ref.as_str(), head.as_str()];
+                authorize_managed_git(
+                    Path::new(&attempt.repo_root),
+                    &branch_args,
+                    &[Path::new(&attempt.repo_root)],
+                )?;
+                self.git
+                    .run_checked(Path::new(&attempt.repo_root), &branch_args)
+                    .map_err(map_git_error)?;
+            }
+        }
+        attempt.cleanup_status = "branch_removed".into();
+        attempt.updated_at = utc_now();
+        self.save_attempt(&attempt, "{\"cleanup\":\"branch_removed\"}")?;
         attempt.cleanup_status = "completed".into();
         attempt.updated_at = utc_now();
         self.save_attempt(&attempt, "{\"cleanup\":\"completed\"}")?;
         Ok(attempt)
+    }
+
+    pub(super) fn open_integration_worktree_attempt(&self, id: &str) -> Result<(), WorkspaceError> {
+        let _lock = self.lifecycle_lock.lock().map_err(|_| {
+            integration_error(
+                "INTEGRATION_LOCKED",
+                "Repository integration lock is unavailable",
+            )
+        })?;
+        let attempt = self.load_attempt(id)?;
+        require_state(
+            &attempt,
+            &[
+                "conflicted",
+                "validation_failed",
+                "cleanup_required",
+                "ready_to_publish",
+            ],
+        )?;
+        let raw_path = attempt.temporary_worktree_path.as_deref().ok_or_else(|| {
+            integration_error(
+                "INTEGRATION_WORKTREE_MISSING",
+                "Temporary integration Worktree path is missing",
+            )
+        })?;
+        let managed_root = self.ensure_managed_root()?;
+        let target =
+            validate_managed_worktree_target(&managed_root, Path::new(raw_path)).map_err(|_| {
+                integration_error(
+                    "INTEGRATION_PATH_REJECTED",
+                    "Temporary Worktree failed managed-root path proof",
+                )
+            })?;
+        let owned = self
+            .git
+            .list_worktrees(Path::new(&attempt.repo_root))
+            .map_err(map_git_error)?
+            .into_iter()
+            .any(|item| {
+                same_path_identity(&item.path, &target)
+                    && item.branch.as_deref() == attempt.temporary_branch.as_deref()
+            });
+        if !owned {
+            return Err(integration_error(
+                "INTEGRATION_WORKTREE_MISSING",
+                "Temporary integration Worktree ownership could not be verified",
+            ));
+        }
+        reveal_managed_directory(&target, &managed_root).map_err(|_| {
+            integration_error(
+                "INTEGRATION_OPEN_FAILED",
+                "Temporary integration Worktree could not be opened",
+            )
+        })
     }
 
     fn load_attempt(&self, id: &str) -> Result<IntegrationAttempt, WorkspaceError> {
@@ -617,6 +978,101 @@ impl ManagedWorkspaceService {
         self.repo
             .update_integration_attempt(attempt, detail)
             .map_err(map_repo_error)
+    }
+
+    fn reconcile_validating_attempt_locked(
+        &self,
+        mut attempt: IntegrationAttempt,
+    ) -> Result<IntegrationAttempt, WorkspaceError> {
+        if attempt.state != IntegrationState::Validating || attempt.result_commit_sha.is_some() {
+            return Ok(attempt);
+        }
+        let raw_path = attempt.temporary_worktree_path.as_deref().ok_or_else(|| {
+            integration_error(
+                "INTEGRATION_RESULT_MISSING",
+                "Validating integration has no temporary Worktree",
+            )
+        })?;
+        let managed_root = self.ensure_managed_root()?;
+        let target =
+            validate_managed_worktree_target(&managed_root, Path::new(raw_path)).map_err(|_| {
+                integration_error(
+                    "INTEGRATION_PATH_REJECTED",
+                    "Temporary Worktree failed managed-root path proof",
+                )
+            })?;
+        let owned = self
+            .git
+            .list_worktrees(Path::new(&attempt.repo_root))
+            .map_err(map_git_error)?
+            .into_iter()
+            .any(|item| {
+                same_path_identity(&item.path, &target)
+                    && item.branch.as_deref() == attempt.temporary_branch.as_deref()
+            });
+        if !owned {
+            return Err(integration_error(
+                "INTEGRATION_WORKTREE_MISSING",
+                "Temporary integration Worktree ownership could not be verified",
+            ));
+        }
+        let head = required_utf8_line(
+            self.git
+                .capture(&target, &["rev-parse", "HEAD"])
+                .map_err(map_git_error)?,
+        )?;
+        if head == attempt.expected_target_sha {
+            return Ok(attempt);
+        }
+        let parent = required_utf8_line(
+            self.git
+                .capture(&target, &["rev-parse", "HEAD^"])
+                .map_err(map_git_error)?,
+        )?;
+        if parent != attempt.expected_target_sha {
+            attempt.state = IntegrationState::CleanupRequired;
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"reason\":\"parent_mismatch_reconciled\"}")?;
+            return Ok(attempt);
+        }
+        let expected_patch_digest = attempt
+            .validation_result_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|value| {
+                value
+                    .get(0)
+                    .and_then(|item| item.get("patchDigest"))
+                    .and_then(|digest| digest.as_str().map(str::to_owned))
+            });
+        let committed_patch = self
+            .git
+            .capture(
+                &target,
+                &[
+                    "diff",
+                    "--binary",
+                    "--full-index",
+                    "--no-ext-diff",
+                    attempt.expected_target_sha.as_str(),
+                    head.as_str(),
+                ],
+            )
+            .map_err(map_git_error)?;
+        if expected_patch_digest.as_deref() != Some(sha256_bytes(&committed_patch).as_str()) {
+            attempt.result_commit_sha = Some(head);
+            attempt.state = IntegrationState::ValidationFailed;
+            attempt.validation_result_json =
+                Some("[{\"status\":\"commit_tree_mismatch_reconciled\"}]".into());
+            attempt.updated_at = utc_now();
+            self.save_attempt(&attempt, "{\"reason\":\"commit_tree_mismatch_reconciled\"}")?;
+            return Ok(attempt);
+        }
+        attempt.result_commit_sha = Some(head);
+        attempt.state = IntegrationState::ReadyToPublish;
+        attempt.updated_at = utc_now();
+        self.save_attempt(&attempt, "{\"stage\":\"commit_receipt_reconciled\"}")?;
+        Ok(attempt)
     }
     fn revalidate_frozen_refs(
         &self,
@@ -712,23 +1168,24 @@ impl ManagedWorkspaceService {
                 &["ls-files", "--others", "--exclude-standard", "-z"],
             )
             .map_err(map_git_error)?;
-        let source_branch = attempt
-            .source_ref
-            .strip_prefix("refs/heads/")
-            .ok_or_else(|| {
-                integration_error(
-                    "INTEGRATION_RECOVERY_FAILED",
-                    "Frozen source ref is not a local branch",
-                )
-            })?;
+        let temporary_branch = attempt.temporary_branch.as_deref().ok_or_else(|| {
+            integration_error(
+                "INTEGRATION_RECOVERY_FAILED",
+                "Temporary integration branch is missing",
+            )
+        })?;
         let record = WorktreeRecord {
             id: WorktreeId::new(format!("integration-{}", attempt.id.0)),
             task_id: attempt.task_id.clone(),
             repo_root: attempt.repo_root.clone(),
             path: raw_path.to_owned(),
             display_path: raw_path.to_owned(),
-            branch: source_branch.to_owned(),
-            base_branch: attempt.target_ref.clone(),
+            branch: temporary_branch.to_owned(),
+            base_branch: attempt
+                .target_ref
+                .strip_prefix("refs/heads/")
+                .unwrap_or(attempt.target_ref.as_str())
+                .to_owned(),
             base_commit: attempt.expected_target_sha.clone(),
             ownership: WorktreeOwnership::Managed,
             state: WorktreeState::Quarantined,
@@ -827,7 +1284,10 @@ fn split_nul_owned(bytes: Vec<u8>) -> Result<Vec<String>, WorkspaceError> {
         .collect()
 }
 fn sha256_text(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    sha256_bytes(value.as_bytes())
+}
+fn sha256_bytes(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
 }
 fn ensure_no_in_progress_git_operation(
     git: &GitCli,

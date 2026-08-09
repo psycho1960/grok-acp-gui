@@ -544,6 +544,10 @@ async fn dispatch(
             Some(service) => integration_status(service, &payload.attempt_id),
             None => not_implemented("integration.status"),
         },
+        DesktopCommand::IntegrationActive(payload) => match workspace {
+            Some(service) => integration_active(service, &payload.task_id.0),
+            None => not_implemented("integration.active"),
+        },
         DesktopCommand::IntegrationAbort(payload) => match workspace {
             Some(service) => integration_abort(service, &payload.attempt_id),
             None => not_implemented("integration.abort"),
@@ -555,6 +559,10 @@ async fn dispatch(
         DesktopCommand::IntegrationCleanup(payload) => match workspace {
             Some(service) => integration_cleanup(service, &payload.attempt_id),
             None => not_implemented("integration.cleanup"),
+        },
+        DesktopCommand::IntegrationOpenWorktree(payload) => match workspace {
+            Some(service) => integration_open_worktree(service, &payload.attempt_id),
+            None => not_implemented("integration.openWorktree"),
         },
 
         DesktopCommand::WorktreeCleanup(_) => not_implemented("worktree.cleanup"),
@@ -1339,6 +1347,18 @@ fn integration_publish(
 fn integration_cleanup(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
     match workspace.cleanup_integration(id) {
         Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_active(workspace: &dyn WorkspaceService, task_id: &str) -> DesktopResult {
+    match workspace.get_active_integration(task_id) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_open_worktree(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
+    match workspace.open_integration_worktree(id) {
+        Ok(()) => DesktopResult::ok(serde_json::json!({"opened":true})),
         Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }

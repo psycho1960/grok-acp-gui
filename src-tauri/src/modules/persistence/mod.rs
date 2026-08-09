@@ -158,6 +158,15 @@ pub trait Repository: Send + Sync {
 
     fn create_integration_attempt(&self, attempt: &IntegrationAttempt) -> RepoResult<()>;
     fn get_integration_attempt(&self, id: &str) -> RepoResult<IntegrationAttempt>;
+    fn get_active_integration_by_repo(
+        &self,
+        repo_identity: &str,
+        repo_root: &str,
+    ) -> RepoResult<Option<IntegrationAttempt>>;
+    fn get_active_integration_by_task(
+        &self,
+        task_id: &str,
+    ) -> RepoResult<Option<IntegrationAttempt>>;
     fn update_integration_attempt(
         &self,
         attempt: &IntegrationAttempt,

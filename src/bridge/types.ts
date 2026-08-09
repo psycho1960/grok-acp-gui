@@ -307,9 +307,11 @@ export type DesktopCommand =
   | { type: "integration.preflight"; payload: IntegrationPreflightPayload }
   | { type: "integration.execute"; payload: IntegrationExecutePayload }
   | { type: "integration.status"; payload: IntegrationAttemptPayload }
+  | { type: "integration.active"; payload: WorktreeTaskPayload }
   | { type: "integration.abort"; payload: IntegrationAttemptPayload }
   | { type: "integration.publish"; payload: IntegrationPublishPayload }
   | { type: "integration.cleanup"; payload: IntegrationAttemptPayload }
+  | { type: "integration.openWorktree"; payload: IntegrationAttemptPayload }
   | { type: "worktree.cleanup"; payload: WorktreeCleanupPayload }
   | { type: "recovery.restore"; payload: RecoveryRestorePayload }
   | { type: "recovery.delete"; payload: RecoveryDeletePayload };
@@ -840,18 +842,24 @@ export interface CheckpointRecord {
 export interface IntegrationPlan {
   attemptId: string; taskId: TaskId; sourceRef: string; sourceTipSha: string; sourceRange: string[];
   sourceDirty: boolean; sourceWorktreeDigest: string;
+  expectedFiles: string[];
   targetRef: string; expectedTargetSha: string; commitMessage: string; validationCommands: string[][];
   validationDigest: string; approvalDigest: string;
 }
 
 export interface IntegrationAttempt {
-  id: string; taskId: TaskId; repoRoot: string; sourceRef: string; sourceTipSha: string; sourceRange: string;
+  id: string; taskId: TaskId; repoRoot: string; repoIdentity: string; sourceRef: string; sourceTipSha: string; sourceRange: string;
   sourceDirty: boolean; sourceWorktreeDigest: string;
   targetRef: string; expectedTargetSha: string; commitMessage: string; validationCommandsJson: string;
-  validationDigest: string; approvalDigest: string; state: string; temporaryWorktreeId?: string;
+  validationDigest: string; approvalDigest: string; state: IntegrationState; temporaryWorktreeId?: string;
   temporaryWorktreePath?: string; temporaryBranch?: string; conflictSummaryJson?: string; validationResultJson?: string;
   resultCommitSha?: string; recoveryBundlePath?: string; cleanupStatus: string; createdAt: string; updatedAt: string;
 }
+
+export type IntegrationState =
+  | "draft" | "preflight" | "staging" | "conflicted" | "validating"
+  | "ready_to_publish" | "publishing" | "completed" | "preflight_failed"
+  | "validation_failed" | "publish_rejected" | "cleanup_required" | "aborted";
 
 export interface AcknowledgedResult {
   acknowledged: string;

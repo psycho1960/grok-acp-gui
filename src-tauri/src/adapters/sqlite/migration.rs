@@ -51,6 +51,10 @@ fn embedded_migrations() -> Vec<EmbeddedMigration> {
         env!("CARGO_MANIFEST_DIR"),
         "/migrations/0006_squash_integrations.sql"
     ));
+    let sql_0007 = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/migrations/0007_squash_integration_recovery.sql"
+    ));
     vec![
         EmbeddedMigration {
             version: 1,
@@ -81,6 +85,11 @@ fn embedded_migrations() -> Vec<EmbeddedMigration> {
             version: 6,
             sql: sql_0006,
             checksum: compute_checksum(sql_0006),
+        },
+        EmbeddedMigration {
+            version: 7,
+            sql: sql_0007,
+            checksum: compute_checksum(sql_0007),
         },
     ]
 }
@@ -286,6 +295,61 @@ mod tests {
         let second = run_migrations(&conn).unwrap();
         assert_eq!(second, 0, "repeat run should apply zero migrations");
         assert!(first > 0);
+    }
+
+    #[test]
+    fn version_six_database_upgrades_without_checksum_mismatch() {
+        let conn = in_memory_conn();
+        conn.execute_batch(
+            "CREATE TABLE _schema_version (
+                version INTEGER NOT NULL PRIMARY KEY,
+                applied_at TEXT NOT NULL,
+                checksum TEXT NOT NULL
+            )",
+        )
+        .unwrap();
+        for migration in embedded_migrations().into_iter().take(6) {
+            conn.execute_batch(migration.sql).unwrap();
+            conn.execute(
+                "INSERT INTO _schema_version (version, applied_at, checksum) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    migration.version,
+                    crate::domain::types::utc_now(),
+                    migration.checksum
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO integration_attempts (
+                id, task_id, repo_root, source_ref, source_tip_sha, source_range,
+                source_dirty, source_worktree_digest, target_ref, expected_target_sha,
+                commit_message, validation_commands_json, validation_digest,
+                approval_digest, state, cleanup_status, created_at, updated_at
+             ) VALUES
+                ('legacy-1', 'missing-task', 'C:/repo', 'refs/heads/source', 'source', '[]', 0, 'digest', 'refs/heads/main', 'target', 'message', '[]', 'validation', 'approval-1', 'preflight', 'not_started', 'now-1', 'now-1'),
+                ('legacy-2', 'missing-task', 'C:/repo', 'refs/heads/source', 'source', '[]', 0, 'digest', 'refs/heads/main', 'target', 'message', '[]', 'validation', 'approval-2', 'preflight', 'not_started', 'now-2', 'now-2');",
+        )
+        .unwrap();
+
+        assert_eq!(run_migrations(&conn).unwrap(), 1);
+        let has_identity: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('integration_attempts') WHERE name = 'repo_identity'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_identity, 1);
+        let legacy_active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM integration_attempts WHERE repo_identity = '' AND cleanup_status <> 'completed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_active, 2);
     }
 
     #[test]

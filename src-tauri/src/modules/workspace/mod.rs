@@ -9,7 +9,7 @@ pub use review::{
 };
 
 use crate::adapters::filesystem::{
-    canonicalize_existing_directory, validate_managed_worktree_target,
+    canonicalize_existing_directory, reveal_managed_directory, validate_managed_worktree_target,
 };
 use crate::adapters::git_cli::{GitCli, RepositoryInspection};
 use crate::domain::types::{RecoveryId, RecoveryItem, RecoveryState};
@@ -151,6 +151,10 @@ pub trait WorkspaceService: Send + Sync {
         &self,
         attempt_id: &str,
     ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn get_active_integration(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<crate::domain::types::IntegrationAttempt>, WorkspaceError>;
     fn abort_integration(
         &self,
         attempt_id: &str,
@@ -164,6 +168,7 @@ pub trait WorkspaceService: Send + Sync {
         &self,
         attempt_id: &str,
     ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn open_integration_worktree(&self, attempt_id: &str) -> Result<(), WorkspaceError>;
 }
 
 pub struct ManagedWorkspaceService {
@@ -244,6 +249,12 @@ impl WorkspaceService for ManagedWorkspaceService {
     ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
         self.integration_status(attempt_id)
     }
+    fn get_active_integration(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<crate::domain::types::IntegrationAttempt>, WorkspaceError> {
+        self.active_integration_for_task(task_id)
+    }
     fn abort_integration(
         &self,
         attempt_id: &str,
@@ -262,6 +273,9 @@ impl WorkspaceService for ManagedWorkspaceService {
         attempt_id: &str,
     ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
         self.cleanup_integration_attempt(attempt_id)
+    }
+    fn open_integration_worktree(&self, attempt_id: &str) -> Result<(), WorkspaceError> {
+        self.open_integration_worktree_attempt(attempt_id)
     }
     fn inspect_repository(&self, path: &Path) -> Result<RepositoryInspection, WorkspaceError> {
         self.git.inspect_repository(path).map_err(map_git_error)
