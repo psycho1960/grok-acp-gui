@@ -1304,6 +1304,39 @@ fn session_configure(
         }
     }
 
+    if let Some(raw_strategy) = settings.get("workspaceStrategy") {
+        let strategy = match raw_strategy {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(value)
+                if matches!(value.as_str(), "worktree" | "readonly" | "direct") =>
+            {
+                Some(value.clone())
+            }
+            serde_json::Value::String(_) => {
+                return DesktopResult::err(AppError::new(
+                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                    "工作区策略仅支持 worktree / readonly / direct",
+                ))
+            }
+            _ => {
+                return DesktopResult::err(AppError::new(
+                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
+                    "工作区策略设置必须是字符串",
+                ))
+            }
+        };
+        let kind = match strategy.as_deref() {
+            Some("worktree") => crate::domain::types::WorkspaceKind::Worktree,
+            Some("readonly") => crate::domain::types::WorkspaceKind::Readonly,
+            Some("direct") => crate::domain::types::WorkspaceKind::Direct,
+            _ => task.workspace_kind,
+        };
+        if task.workspace_kind != kind {
+            task.workspace_kind = kind;
+            changed = true;
+        }
+    }
+
     if changed {
         if let Err(error) = repo.update_task(&task) {
             return DesktopResult::err(AppError::new(error.code, error.message));
@@ -1314,7 +1347,19 @@ fn session_configure(
         "mode": task.mode,
         "model": task.model,
         "reasoning": task.reasoning,
+        "workspaceStrategy": workspace_strategy_value(task.workspace_kind),
     }))
+}
+
+/// Bridge-facing workspace strategy strings (lowercase, mirror TS
+/// `workspaceStrategy`). `WorkspaceKind` itself serialises with its variant
+/// names, so the bridge maps explicitly.
+fn workspace_strategy_value(kind: crate::domain::types::WorkspaceKind) -> &'static str {
+    match kind {
+        crate::domain::types::WorkspaceKind::Worktree => "worktree",
+        crate::domain::types::WorkspaceKind::Readonly => "readonly",
+        crate::domain::types::WorkspaceKind::Direct => "direct",
+    }
 }
 
 /// Mode identifiers are opaque capability strings (agent/plan/ask/code/…).
@@ -1380,6 +1425,7 @@ async fn task_open(
             "mode": task.mode,
             "model": task.model,
             "reasoning": task.reasoning,
+            "workspaceStrategy": workspace_strategy_value(task.workspace_kind),
             "cursor": { "lastSeq": 0, "snapshotSeq": 0 },
             "events": [],
             "attempt": task.attempt_count,
@@ -1409,6 +1455,7 @@ async fn task_open(
         "mode": task.mode,
         "model": task.model,
         "reasoning": task.reasoning,
+        "workspaceStrategy": workspace_strategy_value(task.workspace_kind),
         "cursor": {
             "lastSeq": snapshot.last_seq,
             "snapshotSeq": snapshot.last_seq,

@@ -21,6 +21,10 @@ import {
 import { clearDraft, loadDraft, saveDraft } from "./draft";
 import { redactVisibleText } from "./markdown";
 import {
+  isWorkspaceStrategy,
+  type WorkspaceStrategy,
+} from "./mode-workspace";
+import {
   applyEvent,
   applySnapshot,
   appendUserMessage,
@@ -76,6 +80,8 @@ export const useConversationStore = defineStore("conversation", () => {
   const slashCommands = ref<SlashCommandInfo[]>([]);
   /** Per-task session mode selection persisted via session.configure. */
   const selectedMode = ref<string | null>(null);
+  /** Per-task workspace strategy persisted via session.configure. */
+  const workspaceStrategy = ref<WorkspaceStrategy | null>(null);
   /** Per-task model selection persisted via session.configure. */
   const selectedModel = ref<string | null>(null);
   /** Per-task reasoning effort selection persisted via session.configure. */
@@ -280,6 +286,7 @@ export const useConversationStore = defineStore("conversation", () => {
     }
     facade = null;
     selectedMode.value = null;
+    workspaceStrategy.value = null;
     selectedModel.value = null;
     selectedReasoning.value = null;
   }
@@ -294,6 +301,11 @@ export const useConversationStore = defineStore("conversation", () => {
     loadState.value = "ready";
     errorMessage.value = null;
     if (snapshot.mode !== undefined) selectedMode.value = snapshot.mode ?? null;
+    if (snapshot.workspaceStrategy !== undefined) {
+      workspaceStrategy.value = isWorkspaceStrategy(snapshot.workspaceStrategy)
+        ? snapshot.workspaceStrategy
+        : null;
+    }
     if (snapshot.model !== undefined) selectedModel.value = snapshot.model ?? null;
     if (snapshot.reasoning !== undefined) {
       selectedReasoning.value = normalizeReasoning(snapshot.reasoning);
@@ -347,6 +359,11 @@ export const useConversationStore = defineStore("conversation", () => {
                 ? "error"
                 : "idle";
         if (data.mode !== undefined) selectedMode.value = data.mode ?? null;
+        if (data.workspaceStrategy !== undefined) {
+          workspaceStrategy.value = isWorkspaceStrategy(data.workspaceStrategy)
+            ? data.workspaceStrategy
+            : null;
+        }
         if (data.model !== undefined) selectedModel.value = data.model ?? null;
         if (data.reasoning !== undefined) {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
@@ -360,11 +377,17 @@ export const useConversationStore = defineStore("conversation", () => {
           events: data.events,
           attempt: data.attempt,
           mode: data.mode,
+          workspaceStrategy: data.workspaceStrategy,
           model: data.model,
           reasoning: data.reasoning,
         });
       } else if (data?.title) {
         if (data.mode !== undefined) selectedMode.value = data.mode ?? null;
+        if (data.workspaceStrategy !== undefined) {
+          workspaceStrategy.value = isWorkspaceStrategy(data.workspaceStrategy)
+            ? data.workspaceStrategy
+            : null;
+        }
         if (data.model !== undefined) selectedModel.value = data.model ?? null;
         if (data.reasoning !== undefined) {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
@@ -477,6 +500,29 @@ export const useConversationStore = defineStore("conversation", () => {
     } catch (error) {
       selectedMode.value = previous;
       sendError.value = error instanceof Error ? error.message : "模式切换失败";
+      return false;
+    }
+  }
+
+  /**
+   * Persist the workspace strategy for the current task (worktree/readonly/
+   * direct). The next session start resolves its cwd from this value.
+   */
+  async function configureWorkspaceStrategy(
+    strategy: WorkspaceStrategy,
+  ): Promise<boolean> {
+    const previous = workspaceStrategy.value;
+    workspaceStrategy.value = strategy;
+    if (!timeline.value.taskId || !facade) return false;
+    try {
+      const result = await facade.configureSession(timeline.value.taskId, {
+        workspaceStrategy: strategy,
+      });
+      if (result.success === "false") throw new Error(result.error.message);
+      return true;
+    } catch (error) {
+      workspaceStrategy.value = previous;
+      sendError.value = error instanceof Error ? error.message : "工作区策略切换失败";
       return false;
     }
   }
@@ -764,6 +810,7 @@ export const useConversationStore = defineStore("conversation", () => {
     modes,
     slashCommands,
     selectedMode,
+    workspaceStrategy,
     selectedModel,
     selectedReasoning,
     composerCapabilities,
@@ -776,6 +823,7 @@ export const useConversationStore = defineStore("conversation", () => {
     importAttachmentPaths,
     importAttachmentBlobs,
     configureMode,
+    configureWorkspaceStrategy,
     configureModel,
     configureReasoning,
     removeAttachment,

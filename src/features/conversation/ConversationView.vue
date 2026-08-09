@@ -186,6 +186,7 @@ function onOpenArtifact(artifactId: string): void {
       :modes="store.modes"
       :models="store.models"
       :selected-mode="store.selectedMode"
+      :selected-workspace-strategy="store.workspaceStrategy"
       :selected-model="store.selectedModel"
       :selected-reasoning="store.selectedReasoning"
       :settings-disabled="store.sendPending"
@@ -193,6 +194,7 @@ function onOpenArtifact(artifactId: string): void {
       @refresh="props.taskId && store.openTask(props.taskId as TaskId)"
       @resume="onResume"
       @update:mode="(mode: string | null) => void store.configureMode(mode)"
+      @update:workspace-strategy="(strategy) => void store.configureWorkspaceStrategy(strategy)"
       @update:model="(model: string | null) => void store.configureModel(model)"
       @update:reasoning="(reasoning) => void store.configureReasoning(reasoning)"
     />

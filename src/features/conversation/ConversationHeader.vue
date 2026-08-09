@@ -5,6 +5,11 @@ import Button from "../../shared/ui/Button.vue";
 import Select from "../../shared/ui/Select.vue";
 import StatusIcon from "../../shared/ui/StatusIcon.vue";
 import type { ModeInfo, ModelInfo, ReasoningEffort } from "../../bridge/types";
+import {
+  WORKSPACE_STRATEGY_OPTIONS,
+  workspaceStrategyForMode,
+  type WorkspaceStrategy,
+} from "./mode-workspace";
 import type { ConversationRunStatus } from "./types";
 
 const props = defineProps<{
@@ -16,6 +21,7 @@ const props = defineProps<{
   modes?: ModeInfo[];
   models?: ModelInfo[];
   selectedMode?: string | null;
+  selectedWorkspaceStrategy?: WorkspaceStrategy | null;
   selectedModel?: string | null;
   selectedReasoning?: ReasoningEffort | null;
   settingsDisabled?: boolean;
@@ -26,6 +32,7 @@ const emit = defineEmits<{
   refresh: [];
   resume: [];
   "update:mode": [mode: string | null];
+  "update:workspaceStrategy": [strategy: WorkspaceStrategy];
   "update:model": [model: string | null];
   "update:reasoning": [reasoning: ReasoningEffort];
 }>();
@@ -106,7 +113,17 @@ const reasoningOptions = computed(() => [
 ]);
 
 function onModeChange(value: string): void {
-  emit("update:mode", value === "" ? null : value);
+  const mode = value === "" ? null : value;
+  emit("update:mode", mode);
+  // 模式联动工作区策略：ask→direct、agent/plan→worktree。
+  const linked = workspaceStrategyForMode(mode);
+  if (linked) emit("update:workspaceStrategy", linked);
+}
+
+function onWorkspaceStrategyChange(value: string): void {
+  if (value === "worktree" || value === "readonly" || value === "direct") {
+    emit("update:workspaceStrategy", value);
+  }
 }
 
 function onModelChange(value: string): void {
@@ -138,6 +155,15 @@ function onReasoningChange(value: string): void {
           :options="modeOptions"
           :disabled="settingsDisabled"
           @update:model-value="onModeChange"
+        />
+        <Select
+          class="settings-select"
+          data-testid="conversation-workspace-select"
+          label="工作区策略"
+          :model-value="selectedWorkspaceStrategy ?? ''"
+          :options="[{ value: '', label: '使用创建时的策略' }, ...WORKSPACE_STRATEGY_OPTIONS]"
+          :disabled="settingsDisabled"
+          @update:model-value="onWorkspaceStrategyChange"
         />
         <Select
           class="settings-select"

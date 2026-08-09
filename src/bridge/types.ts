@@ -583,6 +583,8 @@ export interface TaskOpenResult {
   status: string;
   /** Persisted session mode selection (restored for the conversation controls). */
   mode?: string | null;
+  /** Persisted workspace strategy (restored for the conversation controls). */
+  workspaceStrategy?: "worktree" | "readonly" | "direct" | string | null;
   /** Persisted model selection (restored for the conversation controls). */
   model?: string | null;
   /** Persisted reasoning effort selection. */

@@ -88,6 +88,7 @@ export function createSeedTimeline(
     cursor: 5,
     attempt: 1,
     mode: "agent",
+    workspaceStrategy: "worktree",
     model: "grok-4.5",
     reasoning: "high",
   });
