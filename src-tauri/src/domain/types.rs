@@ -306,6 +306,23 @@ pub struct WorktreeRecord {
     pub merged: bool,
 }
 
+/// Append-only audit record for a task checkpoint. The commit itself is the
+/// content authority; this row provides task/attempt lookup and manifest proof.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointRecord {
+    pub id: String,
+    pub task_id: TaskId,
+    pub attempt_number: u32,
+    pub commit_sha: String,
+    pub tree_sha: String,
+    pub head_before: String,
+    pub selection_manifest: String,
+    pub selection_hash: String,
+    pub message: String,
+    pub created_at: String,
+}
+
 /// Metadata record for an imported artifact (image, file).
 ///
 /// The actual bytes live on the filesystem in a managed cache directory;

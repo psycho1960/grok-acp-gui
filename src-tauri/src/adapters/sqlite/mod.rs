@@ -13,11 +13,11 @@ pub mod migration;
 
 use crate::domain::error::DomainError;
 use crate::domain::types::{
-    utc_now, AttachmentId, AttachmentRecord, BootstrapSnapshot, ConcurrencyLimits, CorrelationId,
-    Project, ProjectId, RecoveryAction, RecoveryCandidate, RecoveryDecision, RecoveryId,
-    RecoveryItem, RecoveryState, SessionBinding, SessionId, SessionSnapshot, SessionState,
-    Settings, StoredEvent, Task, TaskId, TaskStatus, TaskSummary, TimelineCursor, WorkspaceKind,
-    WorktreeId, WorktreeOwnership, WorktreeRecord, WorktreeState,
+    utc_now, AttachmentId, AttachmentRecord, BootstrapSnapshot, CheckpointRecord,
+    ConcurrencyLimits, CorrelationId, Project, ProjectId, RecoveryAction, RecoveryCandidate,
+    RecoveryDecision, RecoveryId, RecoveryItem, RecoveryState, SessionBinding, SessionId,
+    SessionSnapshot, SessionState, Settings, StoredEvent, Task, TaskId, TaskStatus, TaskSummary,
+    TimelineCursor, WorkspaceKind, WorktreeId, WorktreeOwnership, WorktreeRecord, WorktreeState,
 };
 use crate::modules::persistence::{RepoResult, Repository};
 use crate::modules::task_runtime::permission::{
@@ -1096,6 +1096,55 @@ impl Repository for SqliteRepository {
         tx.commit()
             .map_err(|e| db_error("begin_worktree_removal commit", &e))?;
         Ok(())
+    }
+
+    // ==================================================================
+    // GAG-012 Checkpoints
+    // ==================================================================
+
+    fn create_checkpoint(&self, checkpoint: &CheckpointRecord) -> RepoResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO checkpoints (id, task_id, attempt_number, commit_sha, tree_sha, head_before, selection_manifest, selection_hash, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                checkpoint.id,
+                checkpoint.task_id.0,
+                checkpoint.attempt_number as i64,
+                checkpoint.commit_sha,
+                checkpoint.tree_sha,
+                checkpoint.head_before,
+                checkpoint.selection_manifest,
+                checkpoint.selection_hash,
+                checkpoint.message,
+                checkpoint.created_at,
+            ],
+        )
+        .map_err(|e| db_error("create_checkpoint", &e))?;
+        Ok(())
+    }
+
+    fn list_checkpoints_by_task(&self, task_id: &str) -> RepoResult<Vec<CheckpointRecord>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT id, task_id, attempt_number, commit_sha, tree_sha, head_before, selection_manifest, selection_hash, message, created_at FROM checkpoints WHERE task_id = ?1 ORDER BY created_at DESC, id DESC")
+            .map_err(|e| db_error("list_checkpoints_by_task", &e))?;
+        let rows = stmt
+            .query_map(params![task_id], |row| {
+                Ok(CheckpointRecord {
+                    id: row.get(0)?,
+                    task_id: TaskId::new(row.get::<_, String>(1)?),
+                    attempt_number: row.get::<_, i64>(2)? as u32,
+                    commit_sha: row.get(3)?,
+                    tree_sha: row.get(4)?,
+                    head_before: row.get(5)?,
+                    selection_manifest: row.get(6)?,
+                    selection_hash: row.get(7)?,
+                    message: row.get(8)?,
+                    created_at: row.get(9)?,
+                })
+            })
+            .map_err(|e| db_error("list_checkpoints_by_task", &e))?;
+        collect_rows(rows, "list_checkpoints_by_task row")
     }
 
     // ==================================================================

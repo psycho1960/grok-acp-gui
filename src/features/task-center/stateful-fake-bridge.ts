@@ -247,6 +247,16 @@ export function createStatefulTaskCenterBridge(
       return { success: "true", data: { acknowledged: "turn.cancel" } };
     }
 
+    if (command.type === "review.status") {
+      return {
+        success: "true",
+        data: { snapshot: { head: "0000000000000000000000000000000000000000", version: "empty", files: [] } },
+      };
+    }
+    if (command.type === "review.checkpoints") {
+      return { success: "true", data: { checkpoints: [] } };
+    }
+
     return { success: "true", data: { acknowledged: command.type } };
   }
 
