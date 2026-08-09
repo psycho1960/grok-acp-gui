@@ -43,6 +43,10 @@ fn embedded_migrations() -> Vec<EmbeddedMigration> {
         env!("CARGO_MANIFEST_DIR"),
         "/migrations/0004_worktree_lifecycle.sql"
     ));
+    let sql_0005 = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/migrations/0005_checkpoints.sql"
+    ));
     vec![
         EmbeddedMigration {
             version: 1,
@@ -63,6 +67,11 @@ fn embedded_migrations() -> Vec<EmbeddedMigration> {
             version: 4,
             sql: sql_0004,
             checksum: compute_checksum(sql_0004),
+        },
+        EmbeddedMigration {
+            version: 5,
+            sql: sql_0005,
+            checksum: compute_checksum(sql_0005),
         },
     ]
 }

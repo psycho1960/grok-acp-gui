@@ -511,8 +511,26 @@ async fn dispatch(
             None => not_implemented("worktree.adopt"),
         },
 
-        DesktopCommand::ReviewDiff(_) => not_implemented("review.diff"),
-        DesktopCommand::ReviewCheckpoint(_) => not_implemented("review.checkpoint"),
+        DesktopCommand::ReviewStatus(payload) => match workspace {
+            Some(service) => review_status(service, payload),
+            None => not_implemented("review.status"),
+        },
+        DesktopCommand::ReviewDiff(payload) => match workspace {
+            Some(service) => review_diff(service, payload),
+            None => not_implemented("review.diff"),
+        },
+        DesktopCommand::ReviewValidate(payload) => match workspace {
+            Some(service) => review_validate(service, payload),
+            None => not_implemented("review.validate"),
+        },
+        DesktopCommand::ReviewCheckpoint(payload) => match workspace {
+            Some(service) => review_checkpoint(service, payload),
+            None => not_implemented("review.checkpoint"),
+        },
+        DesktopCommand::ReviewCheckpoints(payload) => match workspace {
+            Some(service) => review_checkpoints(service, payload),
+            None => not_implemented("review.checkpoints"),
+        },
 
         DesktopCommand::IntegrationPreflight(_) => not_implemented("integration.preflight"),
         DesktopCommand::IntegrationExecute(_) => not_implemented("integration.execute"),
@@ -1200,6 +1218,56 @@ fn worktree_remove(
         std::path::Path::new(&payload.confirmed_path),
     ) {
         Ok(record) => DesktopResult::ok(serde_json::json!({ "worktree": record })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_status(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorktreeTaskPayload,
+) -> DesktopResult {
+    match workspace.get_worktree_status(&payload.task_id.0) {
+        Ok(snapshot) => DesktopResult::ok(serde_json::json!({ "snapshot": snapshot })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_diff(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::ReviewDiffPayload,
+) -> DesktopResult {
+    match workspace.get_diff(&payload.task_id.0, &payload.path, &payload.fingerprint) {
+        Ok(document) => DesktopResult::ok(serde_json::json!({ "document": document })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_validate(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::ReviewSelectionPayload,
+) -> DesktopResult {
+    match workspace.validate_selection(&payload.task_id.0, &payload.selection) {
+        Ok(validation) => DesktopResult::ok(serde_json::json!({ "validation": validation })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_checkpoint(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::ReviewCheckpointPayload,
+) -> DesktopResult {
+    match workspace.create_checkpoint(&payload.task_id.0, &payload.message, &payload.selection) {
+        Ok(receipt) => DesktopResult::ok(serde_json::json!({ "receipt": receipt })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_checkpoints(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorktreeTaskPayload,
+) -> DesktopResult {
+    match workspace.list_checkpoints(&payload.task_id.0) {
+        Ok(checkpoints) => DesktopResult::ok(serde_json::json!({ "checkpoints": checkpoints })),
         Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }
