@@ -11,6 +11,62 @@ use std::path::{Path, PathBuf};
 
 const MAX_TEXT_FILE_BYTES: u64 = 1024 * 1024;
 
+/// Prove that a prospective worktree target is a strict descendant of the
+/// configured managed root. Existing ancestors are canonicalized so a
+/// junction/symlink cannot turn a lexical child into an external target.
+pub fn validate_managed_worktree_target(
+    managed_root: &Path,
+    target: &Path,
+) -> Result<PathBuf, FilesystemError> {
+    let managed_root = canonicalize_existing_directory(managed_root)?;
+    if !target.is_absolute() {
+        return Err(FilesystemError::new(
+            "Managed worktree path must be absolute",
+        ));
+    }
+    if target.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    }) {
+        return Err(FilesystemError::new(
+            "Managed worktree path is not normalized",
+        ));
+    }
+
+    let proven_target = if target.exists() {
+        normalize_canonical_path(
+            std::fs::canonicalize(target)
+                .map_err(|_| FilesystemError::new("Managed worktree path is not accessible"))?,
+        )
+    } else {
+        let mut ancestor = target;
+        let mut suffix = Vec::new();
+        while !ancestor.exists() {
+            let name = ancestor
+                .file_name()
+                .ok_or_else(|| FilesystemError::new("Managed worktree path has no safe parent"))?;
+            suffix.push(name.to_os_string());
+            ancestor = ancestor
+                .parent()
+                .ok_or_else(|| FilesystemError::new("Managed worktree path has no safe parent"))?;
+        }
+        let mut resolved = canonicalize_existing_directory(ancestor)?;
+        for component in suffix.iter().rev() {
+            resolved.push(component);
+        }
+        resolved
+    };
+
+    if proven_target == managed_root || !proven_target.starts_with(&managed_root) {
+        return Err(FilesystemError::new(
+            "Managed worktree path is outside the managed root",
+        ));
+    }
+    Ok(proven_target)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemError {
     message: &'static str,
@@ -717,6 +773,17 @@ mod artifact_save_tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_worktree_target_rejects_junction_escape() {
+        let fixture = Fixture::new("worktree-junction");
+        let external = fixture.root.join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let alias = fixture.managed.join("repo-alias");
+        create_junction(&alias, &external);
+        assert!(validate_managed_worktree_target(&fixture.managed, &alias.join("task")).is_err());
     }
 
     #[test]

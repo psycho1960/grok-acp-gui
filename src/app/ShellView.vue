@@ -20,6 +20,7 @@ import {
 } from "../features/conversation/hash-route";
 import { createStatefulTaskCenterBridge } from "../features/task-center/stateful-fake-bridge";
 import { useTaskCenterStore } from "../features/task-center/task-center-store";
+import WorktreePanel from "../features/worktrees/WorktreePanel.vue";
 
 defineProps<{ dataVersion?: string }>();
 
@@ -161,14 +162,20 @@ const main = computed(() => {
   ]);
 });
 
-const inspector = computed(() =>
-  h("section", { class: "inspector-content" }, [
+const inspector = computed(() => {
+  if (taskStore.selectedTaskId) {
+    return h(WorktreePanel, {
+      bridge: bridge.value,
+      taskId: taskStore.selectedTaskId,
+    });
+  }
+  return h("section", { class: "inspector-content" }, [
     h("h2", "检查器"),
     h(StatusIcon, { status: "waiting", label: "等待选择任务" }),
     h("p", "变更、Diff、制品和 Worktree 信息将在选择任务后显示。"),
     h(Badge, { tone: "neutral" }, { default: () => "空状态" }),
-  ]),
-);
+  ]);
+});
 
 const statusBar = computed(() => {
   const p = taskStore.activeProject;

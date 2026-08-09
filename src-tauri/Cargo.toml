@@ -26,6 +26,7 @@ serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
+crc32fast = "1.5"
 base64 = "0.22"
 # GAG-005: async process management for Grok ACP runtime.
 # Tokio is already pulled in transitively by Tauri; we declare it

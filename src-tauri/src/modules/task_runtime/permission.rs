@@ -483,6 +483,62 @@ pub struct ExecutionGuard<S: ApprovalStore> {
     store: S,
 }
 
+impl ApprovalStore for () {
+    fn consume_matching(
+        &self,
+        _context: &ExecutionContext,
+        _operation_digest: &str,
+        _now_epoch_seconds: u64,
+    ) -> Result<Option<ApprovalEvidence>, DomainError> {
+        Ok(None)
+    }
+}
+
+impl ExecutionGuard<()> {
+    /// Authorize a backend-owned managed operation after the caller has
+    /// derived every target from persisted state. Unlike ACP approval, this
+    /// path accepts no Renderer workspace and requires exact cwd/write-target
+    /// equality with the independently proven values supplied by the module.
+    pub fn authorize_managed(
+        operation: &OperationDescriptor,
+        allowed_cwd: &Path,
+        allowed_write_paths: &[&Path],
+    ) -> Result<(), DomainError> {
+        let managed_git = operation.kind == OperationKind::Git
+            && operation.executable.as_deref() == Some("git")
+            && matches!(
+                operation.args.as_slice(),
+                [command, subcommand, ..]
+                    if (command == "worktree" && matches!(subcommand.as_str(), "add" | "remove"))
+                        || (command == "branch" && subcommand == "-D")
+                        || (command == "bundle" && subcommand == "create")
+            );
+        if (!managed_git
+            && matches!(
+                operation.category(),
+                OperationCategory::Unknown | OperationCategory::ReadOnly
+            ))
+            || operation.write_paths.is_empty()
+        {
+            return Err(unknown("managed operation is not an authorized write"));
+        }
+        let cwd = normalize_path(&operation.cwd)?;
+        let allowed_cwd = normalize_path(&allowed_cwd.to_string_lossy())?;
+        if cwd != allowed_cwd {
+            return Err(unknown("managed operation cwd changed"));
+        }
+        if operation.write_paths.len() != allowed_write_paths.len() {
+            return Err(unknown("managed operation target set changed"));
+        }
+        for (actual, allowed) in operation.write_paths.iter().zip(allowed_write_paths) {
+            if normalize_path(actual)? != normalize_path(&allowed.to_string_lossy())? {
+                return Err(unknown("managed operation target changed"));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl<S: ApprovalStore> ExecutionGuard<S> {
     pub fn new(store: S) -> Self {
         Self { store }

@@ -138,6 +138,15 @@ fn row_to_worktree(row: &rusqlite::Row) -> rusqlite::Result<WorktreeRecord> {
         base_commit: row.get(7)?,
         ownership: parse_worktree_ownership(&row.get::<_, String>(8)?),
         state: parse_worktree_state(&row.get::<_, String>(9)?),
+        repo_identity: row.get(10)?,
+        common_git_dir: row.get(11)?,
+        relative_path: row.get(12)?,
+        created_at: row.get(13)?,
+        last_verified_at: row.get(14)?,
+        recovery_bundle_id: row.get(15)?,
+        disk_usage_bytes: row.get::<_, i64>(16)?.max(0) as u64,
+        locked: row.get::<_, i64>(17)? != 0,
+        merged: row.get::<_, i64>(18)? != 0,
     })
 }
 
@@ -424,8 +433,17 @@ fn session_state_to_str(s: SessionState) -> &'static str {
 
 fn parse_worktree_state(s: &str) -> WorktreeState {
     match s {
+        "allocating" => WorktreeState::Allocating,
         "ready" => WorktreeState::Ready,
+        "active" => WorktreeState::Active,
+        "closing" => WorktreeState::Closing,
+        "archived" => WorktreeState::Archived,
+        "removed" => WorktreeState::Removed,
+        "creation_failed" => WorktreeState::CreationFailed,
+        "missing" => WorktreeState::Missing,
         "dirty" => WorktreeState::Dirty,
+        "orphaned" => WorktreeState::Orphaned,
+        "quarantined" => WorktreeState::Quarantined,
         "integrating" => WorktreeState::Integrating,
         "deleted" => WorktreeState::Deleted,
         _ => WorktreeState::Unknown,
@@ -434,8 +452,17 @@ fn parse_worktree_state(s: &str) -> WorktreeState {
 
 fn worktree_state_to_str(s: WorktreeState) -> &'static str {
     match s {
+        WorktreeState::Allocating => "allocating",
         WorktreeState::Ready => "ready",
+        WorktreeState::Active => "active",
+        WorktreeState::Closing => "closing",
+        WorktreeState::Archived => "archived",
+        WorktreeState::Removed => "removed",
+        WorktreeState::CreationFailed => "creation_failed",
+        WorktreeState::Missing => "missing",
         WorktreeState::Dirty => "dirty",
+        WorktreeState::Orphaned => "orphaned",
+        WorktreeState::Quarantined => "quarantined",
         WorktreeState::Integrating => "integrating",
         WorktreeState::Deleted => "deleted",
         WorktreeState::Unknown => "unknown",
@@ -445,6 +472,7 @@ fn worktree_state_to_str(s: WorktreeState) -> &'static str {
 fn parse_worktree_ownership(s: &str) -> WorktreeOwnership {
     match s {
         "external" => WorktreeOwnership::External,
+        "adopted" => WorktreeOwnership::Adopted,
         _ => WorktreeOwnership::Managed,
     }
 }
@@ -453,6 +481,7 @@ fn worktree_ownership_to_str(o: WorktreeOwnership) -> &'static str {
     match o {
         WorktreeOwnership::Managed => "managed",
         WorktreeOwnership::External => "external",
+        WorktreeOwnership::Adopted => "adopted",
     }
 }
 
@@ -563,7 +592,7 @@ impl Repository for SqliteRepository {
         let worktrees = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state FROM worktrees WHERE state != 'deleted'",
+                    "SELECT id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state, repo_identity, common_git_dir, relative_path, created_at, last_verified_at, recovery_bundle_id, disk_usage_bytes, locked, merged FROM worktrees WHERE state NOT IN ('deleted', 'removed')",
                 )
                 .map_err(|e| db_error("bootstrap: worktrees query", &e))?;
             let rows = stmt
@@ -801,6 +830,51 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
+    fn begin_task_execution(&self, id: &str) -> RepoResult<()> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| db_error("begin_task_execution transaction", &e))?;
+        let workspace_kind: String = tx
+            .query_row(
+                "SELECT workspace_kind FROM tasks WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| db_error("begin_task_execution task", &e))?;
+        if workspace_kind == "worktree" {
+            let registered: i64 = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM worktrees WHERE task_id = ?1 AND state NOT IN ('deleted', 'removed'))",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| db_error("begin_task_execution registration", &e))?;
+            let launchable: i64 = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM worktrees WHERE task_id = ?1 AND ownership = 'managed' AND state IN ('ready', 'dirty', 'active'))",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| db_error("begin_task_execution worktree", &e))?;
+            if registered != 0 && launchable == 0 {
+                return Err(DomainError::new(
+                    crate::domain::error::codes::WORKTREE_NOT_READY,
+                    "managed worktree is not launchable",
+                ));
+            }
+        }
+        let now = utc_now();
+        tx.execute(
+            "UPDATE tasks SET status = 'running', interrupt_reason = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )
+        .map_err(|e| db_error("begin_task_execution update", &e))?;
+        tx.commit()
+            .map_err(|e| db_error("begin_task_execution commit", &e))?;
+        Ok(())
+    }
+
     // ==================================================================
     // Session Bindings
     // ==================================================================
@@ -886,7 +960,7 @@ impl Repository for SqliteRepository {
     fn create_worktree(&self, wt: &WorktreeRecord) -> RepoResult<()> {
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO worktrees (id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO worktrees (id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state, repo_identity, common_git_dir, relative_path, created_at, last_verified_at, recovery_bundle_id, disk_usage_bytes, locked, merged) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 wt.id.0,
                 wt.task_id.0,
@@ -898,6 +972,15 @@ impl Repository for SqliteRepository {
                 wt.base_commit,
                 worktree_ownership_to_str(wt.ownership),
                 worktree_state_to_str(wt.state),
+                wt.repo_identity,
+                wt.common_git_dir,
+                wt.relative_path,
+                wt.created_at,
+                wt.last_verified_at,
+                wt.recovery_bundle_id,
+                wt.disk_usage_bytes as i64,
+                wt.locked as i64,
+                wt.merged as i64,
             ],
         )
         .map_err(|e| db_error("create_worktree", &e))?;
@@ -907,7 +990,7 @@ impl Repository for SqliteRepository {
     fn get_worktree(&self, id: &str) -> RepoResult<WorktreeRecord> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state FROM worktrees WHERE id = ?1",
+            "SELECT id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state, repo_identity, common_git_dir, relative_path, created_at, last_verified_at, recovery_bundle_id, disk_usage_bytes, locked, merged FROM worktrees WHERE id = ?1",
             params![id],
             row_to_worktree,
         )
@@ -918,7 +1001,7 @@ impl Repository for SqliteRepository {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state FROM worktrees WHERE task_id = ?1",
+                "SELECT id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state, repo_identity, common_git_dir, relative_path, created_at, last_verified_at, recovery_bundle_id, disk_usage_bytes, locked, merged FROM worktrees WHERE task_id = ?1",
             )
             .map_err(|e| db_error("list_worktrees_by_task", &e))?;
         let rows = stmt
@@ -930,7 +1013,7 @@ impl Repository for SqliteRepository {
     fn update_worktree(&self, wt: &WorktreeRecord) -> RepoResult<()> {
         let conn = self.lock()?;
         conn.execute(
-            "UPDATE worktrees SET task_id = ?1, repo_root = ?2, path = ?3, display_path = ?4, branch = ?5, base_branch = ?6, base_commit = ?7, ownership = ?8, state = ?9 WHERE id = ?10",
+            "UPDATE worktrees SET task_id = ?1, repo_root = ?2, path = ?3, display_path = ?4, branch = ?5, base_branch = ?6, base_commit = ?7, ownership = ?8, state = ?9, repo_identity = ?10, common_git_dir = ?11, relative_path = ?12, created_at = ?13, last_verified_at = ?14, recovery_bundle_id = ?15, disk_usage_bytes = ?16, locked = ?17, merged = ?18 WHERE id = ?19",
             params![
                 wt.task_id.0,
                 wt.repo_root,
@@ -941,6 +1024,15 @@ impl Repository for SqliteRepository {
                 wt.base_commit,
                 worktree_ownership_to_str(wt.ownership),
                 worktree_state_to_str(wt.state),
+                wt.repo_identity,
+                wt.common_git_dir,
+                wt.relative_path,
+                wt.created_at,
+                wt.last_verified_at,
+                wt.recovery_bundle_id,
+                wt.disk_usage_bytes as i64,
+                wt.locked as i64,
+                wt.merged as i64,
                 wt.id.0,
             ],
         )
@@ -959,13 +1051,51 @@ impl Repository for SqliteRepository {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state FROM worktrees WHERE state != 'deleted'",
+                "SELECT id, task_id, repo_root, path, display_path, branch, base_branch, base_commit, ownership, state, repo_identity, common_git_dir, relative_path, created_at, last_verified_at, recovery_bundle_id, disk_usage_bytes, locked, merged FROM worktrees WHERE state NOT IN ('deleted', 'removed')",
             )
             .map_err(|e| db_error("list_active_worktrees", &e))?;
         let rows = stmt
             .query_map([], row_to_worktree)
             .map_err(|e| db_error("list_active_worktrees", &e))?;
         collect_rows(rows, "list_active_worktrees row")
+    }
+
+    fn begin_worktree_removal(&self, task_id: &str, worktree_id: &str) -> RepoResult<()> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| db_error("begin_worktree_removal transaction", &e))?;
+        let status: String = tx
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| db_error("begin_worktree_removal task", &e))?;
+        if matches!(
+            status.as_str(),
+            "running" | "waiting_permission" | "integrating"
+        ) {
+            return Err(DomainError::new(
+                crate::domain::error::codes::WORKTREE_TASK_RUNNING,
+                "running task prevents worktree cleanup",
+            ));
+        }
+        let changed = tx
+            .execute(
+                "UPDATE worktrees SET state = 'closing', last_verified_at = ?1 WHERE id = ?2 AND task_id = ?3 AND ownership = 'managed' AND state IN ('ready', 'dirty', 'active', 'archived')",
+                params![utc_now(), worktree_id, task_id],
+            )
+            .map_err(|e| db_error("begin_worktree_removal update", &e))?;
+        if changed != 1 {
+            return Err(DomainError::new(
+                crate::domain::error::codes::WORKTREE_NOT_READY,
+                "managed worktree cannot enter closing state",
+            ));
+        }
+        tx.commit()
+            .map_err(|e| db_error("begin_worktree_removal commit", &e))?;
+        Ok(())
     }
 
     // ==================================================================
