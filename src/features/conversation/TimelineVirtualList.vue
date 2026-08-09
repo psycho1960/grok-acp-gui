@@ -38,6 +38,7 @@ const viewportHeight = ref(400);
 const anchor = ref<ScrollAnchor>(loadScrollAnchor(props.sessionKey));
 let prevCount = props.items.length;
 let pendingRestoredScrollTop: number | null = null;
+let restoreReleaseFrame: number | null = null;
 const layoutRevision = ref(0);
 const measuredHeights = new Map<string, number>();
 
@@ -106,11 +107,7 @@ function persist(): void {
 function onScroll(): void {
   if (!root.value) return;
   scrollTop.value = root.value.scrollTop;
-  if (pendingRestoredScrollTop != null) {
-    const restoredScrollTop = pendingRestoredScrollTop;
-    pendingRestoredScrollTop = null;
-    if (Math.abs(root.value.scrollTop - restoredScrollTop) < 1) return;
-  }
+  if (pendingRestoredScrollTop != null) return;
   const topIndex = indexAt(root.value.scrollTop);
   const itemTop = layout.value.tops[topIndex] ?? 0;
   const next = onUserScroll(
@@ -140,12 +137,20 @@ function restoreSavedPosition(): void {
         Math.max(0, anchor.value.anchorOffsetPx ?? 0);
     }
   }
+  // Row measurements can queue several scroll events while the virtual layout
+  // settles. Protect the whole batch so none of those programmatic events can
+  // reinterpret the saved reading position as a user scroll at the bottom.
+  pendingRestoredScrollTop = top;
   root.value.scrollTop = top;
   scrollTop.value = root.value.scrollTop;
-  // Assigning scrollTop emits a normal scroll event in Chromium. That event is
-  // programmatic, so it must not reinterpret the persisted reading anchor from
-  // incomplete layout geometry and accidentally switch back to stick-to-bottom.
   pendingRestoredScrollTop = root.value.scrollTop;
+  if (restoreReleaseFrame != null) cancelAnimationFrame(restoreReleaseFrame);
+  restoreReleaseFrame = requestAnimationFrame(() => {
+    restoreReleaseFrame = requestAnimationFrame(() => {
+      pendingRestoredScrollTop = null;
+      restoreReleaseFrame = null;
+    });
+  });
 }
 
 function scrollToBottom(smooth = false): void {
@@ -286,6 +291,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  if (restoreReleaseFrame != null) cancelAnimationFrame(restoreReleaseFrame);
   resizeObserver?.disconnect();
   rowResizeObserver?.disconnect();
   persist();
