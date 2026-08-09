@@ -306,6 +306,10 @@ export type DesktopCommand =
   | { type: "review.checkpoints"; payload: WorktreeTaskPayload }
   | { type: "integration.preflight"; payload: IntegrationPreflightPayload }
   | { type: "integration.execute"; payload: IntegrationExecutePayload }
+  | { type: "integration.status"; payload: IntegrationAttemptPayload }
+  | { type: "integration.abort"; payload: IntegrationAttemptPayload }
+  | { type: "integration.publish"; payload: IntegrationPublishPayload }
+  | { type: "integration.cleanup"; payload: IntegrationAttemptPayload }
   | { type: "worktree.cleanup"; payload: WorktreeCleanupPayload }
   | { type: "recovery.restore"; payload: RecoveryRestorePayload }
   | { type: "recovery.delete"; payload: RecoveryDeletePayload };
@@ -513,11 +517,16 @@ export interface ReviewCheckpointPayload {
 
 export interface IntegrationPreflightPayload {
   taskId: TaskId;
+  commitMessage: string;
 }
 
 export interface IntegrationExecutePayload {
-  taskId: TaskId;
+  attemptId: string;
+  approvalDigest: string;
 }
+
+export interface IntegrationAttemptPayload { attemptId: string; }
+export interface IntegrationPublishPayload { attemptId: string; approvalDigest: string; }
 
 export interface WorktreeCleanupPayload {
   taskId: TaskId;
@@ -826,6 +835,22 @@ export interface CheckpointRecord {
   selectionHash: string;
   message: string;
   createdAt: string;
+}
+
+export interface IntegrationPlan {
+  attemptId: string; taskId: TaskId; sourceRef: string; sourceTipSha: string; sourceRange: string[];
+  sourceDirty: boolean; sourceWorktreeDigest: string;
+  targetRef: string; expectedTargetSha: string; commitMessage: string; validationCommands: string[][];
+  validationDigest: string; approvalDigest: string;
+}
+
+export interface IntegrationAttempt {
+  id: string; taskId: TaskId; repoRoot: string; sourceRef: string; sourceTipSha: string; sourceRange: string;
+  sourceDirty: boolean; sourceWorktreeDigest: string;
+  targetRef: string; expectedTargetSha: string; commitMessage: string; validationCommandsJson: string;
+  validationDigest: string; approvalDigest: string; state: string; temporaryWorktreeId?: string;
+  temporaryWorktreePath?: string; temporaryBranch?: string; conflictSummaryJson?: string; validationResultJson?: string;
+  resultCommitSha?: string; recoveryBundlePath?: string; cleanupStatus: string; createdAt: string; updatedAt: string;
 }
 
 export interface AcknowledgedResult {

@@ -148,7 +148,7 @@ Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该
 - `artifact.import`、`artifact.save`
 - `workspace.inspect`、`worktree.adopt`
 - `review.diff`、`review.checkpoint`
-- `integration.preflight`、`integration.execute`
+- `integration.preflight`、`integration.execute`、`integration.status`、`integration.abort`、`integration.publish`、`integration.cleanup`
 - `worktree.cleanup`、`recovery.restore`、`recovery.delete`
 
 事件联合类型：`runtime.updated`、`task.snapshot`、`task.state`、`message.delta`、`activity.updated`、`permission.requested`、`plan.updated`、`changes.updated`、`artifact.available`、`resource.warning`、`diagnostic.notice`。
@@ -239,6 +239,8 @@ Migration `0003_permissions_and_plans.sql` 只保存 hash、脱敏摘要和决�
 
 Migration `0004_worktree_lifecycle.sql` 只追加 Worktree 生命周期列：repo identity、common git dir、受管相对路径、创建/最近校验时间、恢复包关联、磁盘占用、locked 与 merged。既有 Migration 不修改；旧记录使用安全默认值并在破坏性操作前通过 Git 与文件系统重新对账。
 
+Migration `0006_squash_integrations.sql` 保存冻结的 source/target SHA、Checkpoint range、来源 dirty 标志与结构化 status digest、提交说明、验证命令摘要、审批摘要、临时 Worktree 证明、冲突/验证结果、result commit、恢复包和清理状态；`integration_audit_events` 以 append-only 事件保留每次状态变化。Renderer 只回传本次 preflight 返回的 attempt ID 与 approval digest，后端仍从持久化计划重新派生全部 Git argv。未选择变更允许保留在来源 Worktree，但其 status digest 纳入审批；start/publish 前发生变化即 fail closed。merge/rebase/cherry-pick/revert/bisect 等进行中 Git 操作直接拒绝预检。
+
 ## 10. Worktree 与集成算法
 
 ### 创建
@@ -263,14 +265,16 @@ Checkpoint 在任务 Worktree 锁内重新读取 HEAD/status，拒绝预存 inde
 
 1. 取得仓库级互斥锁。
 2. 验证目标工作区干净、目标分支正确、target HEAD 与记录一致。
-3. 创建临时 detached integration Worktree at target HEAD。
+3. 创建唯一临时 integration Worktree 与应用拥有的临时分支 at target HEAD；目标分支若仍被任一 linked Worktree 检出则 fail closed，防止 CAS 后使用户工作区隐性变脏。
 4. 在临时 Worktree `git merge --squash <taskBranch>`；冲突只发生在临时目录。
 5. 无冲突则创建集成提交，其 parent 为 target HEAD。
 6. 再次验证目标条件与 HEAD。
-7. 在目标工作区 `git merge --ff-only <integrationCommit>`。
+7. 使用 `git update-ref <targetRef> <integrationCommit> <expectedTargetSha>` 原子发布；expected old SHA 不匹配时拒绝。
 8. 清理临时 Worktree，释放锁并返回结构化结果。
 
 任何失败都不使用 `reset --hard` 修补用户工作区。
+
+GAG-013 将 Integration Interface 固定为 `prepare_squash`、`start_squash`、`get_integration_status`、`abort_integration`、`publish_integration`、`cleanup_integration`。preflight 仅接受 task ID 与 Conventional Commit 信息；source ref、target ref、Checkpoint range 和 repo identity 均由持久化 Task/Worktree/Checkpoint 记录与 Git 结构化输出派生。冲突只保留在临时 Worktree；非成功清理前必须生成并验证 source bundle 与 manifest。当前没有项目级验证命令配置时计划明确显示空列表且摘要仍绑定审批，后续新增命令只能通过后端固定配置扩展，不能把 Renderer 变成任意进程接口。
 
 ## 11. Recovery 与清理
 

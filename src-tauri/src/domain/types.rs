@@ -39,6 +39,7 @@ macro_rules! id_newtype {
 id_newtype!(WorktreeId);
 id_newtype!(AttachmentId);
 id_newtype!(RecoveryId);
+id_newtype!(IntegrationId);
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -321,6 +322,37 @@ pub struct CheckpointRecord {
     pub selection_hash: String,
     pub message: String,
     pub created_at: String,
+}
+
+/// Durable state for one isolated squash integration attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationAttempt {
+    pub id: IntegrationId,
+    pub task_id: TaskId,
+    pub repo_root: String,
+    pub source_ref: String,
+    pub source_tip_sha: String,
+    pub source_range: String,
+    pub source_dirty: bool,
+    pub source_worktree_digest: String,
+    pub target_ref: String,
+    pub expected_target_sha: String,
+    pub commit_message: String,
+    pub validation_commands_json: String,
+    pub validation_digest: String,
+    pub approval_digest: String,
+    pub state: String,
+    pub temporary_worktree_id: Option<String>,
+    pub temporary_worktree_path: Option<String>,
+    pub temporary_branch: Option<String>,
+    pub conflict_summary_json: Option<String>,
+    pub validation_result_json: Option<String>,
+    pub result_commit_sha: Option<String>,
+    pub recovery_bundle_path: Option<String>,
+    pub cleanup_status: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Metadata record for an imported artifact (image, file).

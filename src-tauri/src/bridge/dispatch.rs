@@ -21,7 +21,7 @@ use crate::modules::agent_runtime::{
 use crate::modules::artifacts::ArtifactService;
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::TaskRuntime;
-use crate::modules::workspace::{CreateManagedWorktree, WorkspaceService};
+use crate::modules::workspace::{CreateManagedWorktree, PrepareSquash, WorkspaceService};
 
 /// Wrapper that the `execute` Tauri command returns.
 ///
@@ -532,8 +532,30 @@ async fn dispatch(
             None => not_implemented("review.checkpoints"),
         },
 
-        DesktopCommand::IntegrationPreflight(_) => not_implemented("integration.preflight"),
-        DesktopCommand::IntegrationExecute(_) => not_implemented("integration.execute"),
+        DesktopCommand::IntegrationPreflight(payload) => match workspace {
+            Some(service) => integration_prepare(service, payload),
+            None => not_implemented("integration.preflight"),
+        },
+        DesktopCommand::IntegrationExecute(payload) => match workspace {
+            Some(service) => integration_start(service, payload),
+            None => not_implemented("integration.execute"),
+        },
+        DesktopCommand::IntegrationStatus(payload) => match workspace {
+            Some(service) => integration_status(service, &payload.attempt_id),
+            None => not_implemented("integration.status"),
+        },
+        DesktopCommand::IntegrationAbort(payload) => match workspace {
+            Some(service) => integration_abort(service, &payload.attempt_id),
+            None => not_implemented("integration.abort"),
+        },
+        DesktopCommand::IntegrationPublish(payload) => match workspace {
+            Some(service) => integration_publish(service, payload),
+            None => not_implemented("integration.publish"),
+        },
+        DesktopCommand::IntegrationCleanup(payload) => match workspace {
+            Some(service) => integration_cleanup(service, &payload.attempt_id),
+            None => not_implemented("integration.cleanup"),
+        },
 
         DesktopCommand::WorktreeCleanup(_) => not_implemented("worktree.cleanup"),
 
@@ -1268,6 +1290,55 @@ fn review_checkpoints(
 ) -> DesktopResult {
     match workspace.list_checkpoints(&payload.task_id.0) {
         Ok(checkpoints) => DesktopResult::ok(serde_json::json!({ "checkpoints": checkpoints })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn integration_prepare(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::IntegrationPreflightPayload,
+) -> DesktopResult {
+    match workspace.prepare_squash(PrepareSquash {
+        task_id: payload.task_id.clone(),
+        commit_message: payload.commit_message.clone(),
+    }) {
+        Ok(plan) => DesktopResult::ok(serde_json::json!({ "plan": plan })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_start(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::IntegrationExecutePayload,
+) -> DesktopResult {
+    match workspace.start_squash(&payload.attempt_id, &payload.approval_digest) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_status(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
+    match workspace.get_integration_status(id) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_abort(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
+    match workspace.abort_integration(id) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_publish(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::IntegrationPublishPayload,
+) -> DesktopResult {
+    match workspace.publish_integration(&payload.attempt_id, &payload.approval_digest) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_cleanup(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
+    match workspace.cleanup_integration(id) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
         Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }

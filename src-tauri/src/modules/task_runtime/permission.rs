@@ -512,6 +512,7 @@ impl ExecutionGuard<()> {
                     if (command == "worktree" && matches!(subcommand.as_str(), "add" | "remove"))
                         || (command == "branch" && subcommand == "-D")
                         || (command == "bundle" && subcommand == "create")
+                        || (command == "update-ref" && operation.args.len() == 4)
             );
         if (!managed_git
             && matches!(

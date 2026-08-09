@@ -1,6 +1,8 @@
 //! MOD-WORKSPACE public interface for managed Git worktree lifecycle.
 
+mod integration;
 mod review;
+pub use integration::{IntegrationPlan, PrepareSquash};
 pub use review::{
     CheckpointReceipt, CheckpointSelection, DiffDocument, FileChange, ReviewSnapshot,
     SelectionValidation,
@@ -139,6 +141,29 @@ pub trait WorkspaceService: Send + Sync {
         &self,
         task_id: &str,
     ) -> Result<Vec<crate::domain::types::CheckpointRecord>, WorkspaceError>;
+    fn prepare_squash(&self, request: PrepareSquash) -> Result<IntegrationPlan, WorkspaceError>;
+    fn start_squash(
+        &self,
+        attempt_id: &str,
+        approval_digest: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn get_integration_status(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn abort_integration(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn publish_integration(
+        &self,
+        attempt_id: &str,
+        approval_digest: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn cleanup_integration(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
 }
 
 pub struct ManagedWorkspaceService {
@@ -203,6 +228,41 @@ impl ManagedWorkspaceService {
 }
 
 impl WorkspaceService for ManagedWorkspaceService {
+    fn prepare_squash(&self, request: PrepareSquash) -> Result<IntegrationPlan, WorkspaceError> {
+        self.prepare_integration(request)
+    }
+    fn start_squash(
+        &self,
+        attempt_id: &str,
+        approval_digest: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.start_integration(attempt_id, approval_digest)
+    }
+    fn get_integration_status(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.integration_status(attempt_id)
+    }
+    fn abort_integration(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.abort_integration_attempt(attempt_id)
+    }
+    fn publish_integration(
+        &self,
+        attempt_id: &str,
+        approval_digest: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.publish_integration_attempt(attempt_id, approval_digest)
+    }
+    fn cleanup_integration(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.cleanup_integration_attempt(attempt_id)
+    }
     fn inspect_repository(&self, path: &Path) -> Result<RepositoryInspection, WorkspaceError> {
         self.git.inspect_repository(path).map_err(map_git_error)
     }

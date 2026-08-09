@@ -14,10 +14,11 @@ pub mod migration;
 use crate::domain::error::DomainError;
 use crate::domain::types::{
     utc_now, AttachmentId, AttachmentRecord, BootstrapSnapshot, CheckpointRecord,
-    ConcurrencyLimits, CorrelationId, Project, ProjectId, RecoveryAction, RecoveryCandidate,
-    RecoveryDecision, RecoveryId, RecoveryItem, RecoveryState, SessionBinding, SessionId,
-    SessionSnapshot, SessionState, Settings, StoredEvent, Task, TaskId, TaskStatus, TaskSummary,
-    TimelineCursor, WorkspaceKind, WorktreeId, WorktreeOwnership, WorktreeRecord, WorktreeState,
+    ConcurrencyLimits, CorrelationId, IntegrationAttempt, IntegrationId, Project, ProjectId,
+    RecoveryAction, RecoveryCandidate, RecoveryDecision, RecoveryId, RecoveryItem, RecoveryState,
+    SessionBinding, SessionId, SessionSnapshot, SessionState, Settings, StoredEvent, Task, TaskId,
+    TaskStatus, TaskSummary, TimelineCursor, WorkspaceKind, WorktreeId, WorktreeOwnership,
+    WorktreeRecord, WorktreeState,
 };
 use crate::modules::persistence::{RepoResult, Repository};
 use crate::modules::task_runtime::permission::{
@@ -147,6 +148,36 @@ fn row_to_worktree(row: &rusqlite::Row) -> rusqlite::Result<WorktreeRecord> {
         disk_usage_bytes: row.get::<_, i64>(16)?.max(0) as u64,
         locked: row.get::<_, i64>(17)? != 0,
         merged: row.get::<_, i64>(18)? != 0,
+    })
+}
+
+fn row_to_integration(row: &rusqlite::Row) -> rusqlite::Result<IntegrationAttempt> {
+    Ok(IntegrationAttempt {
+        id: IntegrationId::new(row.get::<_, String>(0)?),
+        task_id: TaskId::new(row.get::<_, String>(1)?),
+        repo_root: row.get(2)?,
+        source_ref: row.get(3)?,
+        source_tip_sha: row.get(4)?,
+        source_range: row.get(5)?,
+        source_dirty: row.get::<_, i64>(6)? != 0,
+        source_worktree_digest: row.get(7)?,
+        target_ref: row.get(8)?,
+        expected_target_sha: row.get(9)?,
+        commit_message: row.get(10)?,
+        validation_commands_json: row.get(11)?,
+        validation_digest: row.get(12)?,
+        approval_digest: row.get(13)?,
+        state: row.get(14)?,
+        temporary_worktree_id: row.get(15)?,
+        temporary_worktree_path: row.get(16)?,
+        temporary_branch: row.get(17)?,
+        conflict_summary_json: row.get(18)?,
+        validation_result_json: row.get(19)?,
+        result_commit_sha: row.get(20)?,
+        recovery_bundle_path: row.get(21)?,
+        cleanup_status: row.get(22)?,
+        created_at: row.get(23)?,
+        updated_at: row.get(24)?,
     })
 }
 
@@ -1145,6 +1176,60 @@ impl Repository for SqliteRepository {
             })
             .map_err(|e| db_error("list_checkpoints_by_task", &e))?;
         collect_rows(rows, "list_checkpoints_by_task row")
+    }
+
+    // ==================================================================
+    // GAG-013 Squash integrations
+    // ==================================================================
+
+    fn create_integration_attempt(&self, attempt: &IntegrationAttempt) -> RepoResult<()> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("create_integration_attempt transaction", &e))?;
+        tx.execute(
+            "INSERT INTO integration_attempts (id, task_id, repo_root, source_ref, source_tip_sha, source_range, source_dirty, source_worktree_digest, target_ref, expected_target_sha, commit_message, validation_commands_json, validation_digest, approval_digest, state, temporary_worktree_id, temporary_worktree_path, temporary_branch, conflict_summary_json, validation_result_json, result_commit_sha, recovery_bundle_path, cleanup_status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+            params![attempt.id.0, attempt.task_id.0, attempt.repo_root, attempt.source_ref, attempt.source_tip_sha, attempt.source_range, attempt.source_dirty as i64, attempt.source_worktree_digest, attempt.target_ref, attempt.expected_target_sha, attempt.commit_message, attempt.validation_commands_json, attempt.validation_digest, attempt.approval_digest, attempt.state, attempt.temporary_worktree_id, attempt.temporary_worktree_path, attempt.temporary_branch, attempt.conflict_summary_json, attempt.validation_result_json, attempt.result_commit_sha, attempt.recovery_bundle_path, attempt.cleanup_status, attempt.created_at, attempt.updated_at],
+        ).map_err(|e| db_error("create_integration_attempt", &e))?;
+        tx.execute("INSERT INTO integration_audit_events (attempt_id, state, detail_json, occurred_at) VALUES (?1, ?2, '{}', ?3)", params![attempt.id.0, attempt.state, attempt.updated_at])
+            .map_err(|e| db_error("create_integration_audit", &e))?;
+        tx.commit()
+            .map_err(|e| db_error("create_integration_attempt commit", &e))?;
+        Ok(())
+    }
+
+    fn get_integration_attempt(&self, id: &str) -> RepoResult<IntegrationAttempt> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, task_id, repo_root, source_ref, source_tip_sha, source_range, source_dirty, source_worktree_digest, target_ref, expected_target_sha, commit_message, validation_commands_json, validation_digest, approval_digest, state, temporary_worktree_id, temporary_worktree_path, temporary_branch, conflict_summary_json, validation_result_json, result_commit_sha, recovery_bundle_path, cleanup_status, created_at, updated_at FROM integration_attempts WHERE id = ?1",
+            params![id], row_to_integration,
+        ).map_err(|e| db_error("get_integration_attempt", &e))
+    }
+
+    fn update_integration_attempt(
+        &self,
+        attempt: &IntegrationAttempt,
+        detail_json: &str,
+    ) -> RepoResult<()> {
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| db_error("update_integration_attempt transaction", &e))?;
+        let changed = tx.execute(
+            "UPDATE integration_attempts SET state=?1, temporary_worktree_id=?2, temporary_worktree_path=?3, temporary_branch=?4, conflict_summary_json=?5, validation_result_json=?6, result_commit_sha=?7, recovery_bundle_path=?8, cleanup_status=?9, updated_at=?10 WHERE id=?11",
+            params![attempt.state, attempt.temporary_worktree_id, attempt.temporary_worktree_path, attempt.temporary_branch, attempt.conflict_summary_json, attempt.validation_result_json, attempt.result_commit_sha, attempt.recovery_bundle_path, attempt.cleanup_status, attempt.updated_at, attempt.id.0],
+        ).map_err(|e| db_error("update_integration_attempt", &e))?;
+        if changed != 1 {
+            return Err(DomainError::new(
+                "DB_NOT_FOUND",
+                "integration attempt not found",
+            ));
+        }
+        tx.execute("INSERT INTO integration_audit_events (attempt_id, state, detail_json, occurred_at) VALUES (?1, ?2, ?3, ?4)", params![attempt.id.0, attempt.state, detail_json, attempt.updated_at])
+            .map_err(|e| db_error("update_integration_audit", &e))?;
+        tx.commit()
+            .map_err(|e| db_error("update_integration_attempt commit", &e))?;
+        Ok(())
     }
 
     // ==================================================================

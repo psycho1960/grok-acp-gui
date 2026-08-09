@@ -251,12 +251,27 @@ pub struct ReviewCheckpointPayload {
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationPreflightPayload {
     pub task_id: super::types::TaskId,
+    pub commit_message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationExecutePayload {
-    pub task_id: super::types::TaskId,
+    pub attempt_id: String,
+    pub approval_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationAttemptPayload {
+    pub attempt_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationPublishPayload {
+    pub attempt_id: String,
+    pub approval_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,6 +377,14 @@ pub enum DesktopCommand {
     IntegrationPreflight(IntegrationPreflightPayload),
     #[serde(rename = "integration.execute")]
     IntegrationExecute(IntegrationExecutePayload),
+    #[serde(rename = "integration.status")]
+    IntegrationStatus(IntegrationAttemptPayload),
+    #[serde(rename = "integration.abort")]
+    IntegrationAbort(IntegrationAttemptPayload),
+    #[serde(rename = "integration.publish")]
+    IntegrationPublish(IntegrationPublishPayload),
+    #[serde(rename = "integration.cleanup")]
+    IntegrationCleanup(IntegrationAttemptPayload),
 
     #[serde(rename = "worktree.cleanup")]
     WorktreeCleanup(WorktreeCleanupPayload),
@@ -413,6 +436,10 @@ pub fn is_known_command(cmd_type: &str) -> bool {
             | "review.checkpoints"
             | "integration.preflight"
             | "integration.execute"
+            | "integration.status"
+            | "integration.abort"
+            | "integration.publish"
+            | "integration.cleanup"
             | "worktree.cleanup"
             | "recovery.restore"
             | "recovery.delete"
@@ -667,11 +694,24 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
 
         DesktopCommand::IntegrationPreflight(p) => {
             validate_id_non_empty(&p.task_id.0)?;
+            validate_text_len(&p.commit_message, MAX_MESSAGE_LENGTH, "commitMessage")?;
             Ok(())
         }
 
         DesktopCommand::IntegrationExecute(p) => {
-            validate_id_non_empty(&p.task_id.0)?;
+            validate_id_non_empty(&p.attempt_id)?;
+            validate_id_non_empty(&p.approval_digest)?;
+            Ok(())
+        }
+        DesktopCommand::IntegrationStatus(p)
+        | DesktopCommand::IntegrationAbort(p)
+        | DesktopCommand::IntegrationCleanup(p) => {
+            validate_id_non_empty(&p.attempt_id)?;
+            Ok(())
+        }
+        DesktopCommand::IntegrationPublish(p) => {
+            validate_id_non_empty(&p.attempt_id)?;
+            validate_id_non_empty(&p.approval_digest)?;
             Ok(())
         }
 
