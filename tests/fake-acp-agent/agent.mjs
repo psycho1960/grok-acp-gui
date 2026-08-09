@@ -8,6 +8,7 @@
 //   - "timeout":    accepts initialize but never responds (handshake timeout)
 //   - "crash":      exits immediately with code 1 after receiving initialize
 //   - "crash-after-prompt": exits after accepting the first prompt
+//   - "turn-auth-required": handshake succeeds, first Turn returns a safe 401
 //   - "bad-frame":  writes a non-JSON line to stdout
 //   - "stderr-flood": writes thousands of lines to stderr
 //   - "set-mode-error": rejects every session/set_mode request
@@ -196,6 +197,11 @@ function handlePrompt(id, params) {
     typeof params.prompt[0]?.text !== 'string'
   ) {
     sendError(id, -32602, 'sessionId and text prompt content blocks are required');
+    return;
+  }
+
+  if (SCENARIO === 'turn-auth-required') {
+    sendError(id, -32001, '401 Unauthorized: authentication required');
     return;
   }
 

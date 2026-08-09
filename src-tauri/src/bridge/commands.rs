@@ -12,6 +12,13 @@ pub struct EmptyPayload {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RuntimeRefreshPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeLoginPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
@@ -227,7 +234,7 @@ pub struct RecoveryDeletePayload {
 #[serde(tag = "type", content = "payload")]
 pub enum DesktopCommand {
     #[serde(rename = "runtime.refresh")]
-    RuntimeRefresh(EmptyPayload),
+    RuntimeRefresh(RuntimeRefreshPayload),
     #[serde(rename = "runtime.login")]
     RuntimeLogin(RuntimeLoginPayload),
 
@@ -344,12 +351,24 @@ const MAX_PATH_LENGTH: usize = 4096;
 /// Returns `Ok(())` or an `AppError` with `BRIDGE_VALIDATION_FAILED`.
 pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
     match cmd {
-        DesktopCommand::RuntimeRefresh(_) => Ok(()),
+        DesktopCommand::RuntimeRefresh(payload) => {
+            if let Some(model) = payload.model.as_deref() {
+                crate::modules::agent_runtime::config::validate_model_id(Some(model))
+                    .map_err(validation_err)?;
+            }
+            Ok(())
+        }
 
         DesktopCommand::RuntimeLogin(p) => {
             if let Some(ref method) = p.method {
                 if method.is_empty() {
                     return Err(validation_err("login method must not be empty"));
+                }
+                if !matches!(
+                    method.as_str(),
+                    "oauth" | "device_auth" | "status" | "cancel"
+                ) {
+                    return Err(validation_err("unsupported login method"));
                 }
             }
             Ok(())
@@ -662,7 +681,7 @@ mod tests {
 
     #[test]
     fn round_trip_runtime_refresh() {
-        let cmd = DesktopCommand::RuntimeRefresh(EmptyPayload {});
+        let cmd = DesktopCommand::RuntimeRefresh(RuntimeRefreshPayload { model: None });
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"runtime.refresh\""));
         assert!(json.contains("\"payload\":{}"));
@@ -703,7 +722,7 @@ mod tests {
     fn generate_fixture_json() {
         // Round-trip test that also serves as TS fixture source.
         let cmds: Vec<DesktopCommand> = vec![
-            DesktopCommand::RuntimeRefresh(EmptyPayload {}),
+            DesktopCommand::RuntimeRefresh(RuntimeRefreshPayload { model: None }),
             DesktopCommand::TaskCreate(TaskCreatePayload {
                 project_id: super::super::types::ProjectId::new("p1"),
                 title: "Test".into(),

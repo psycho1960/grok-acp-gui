@@ -9,7 +9,7 @@ use std::time::Duration;
 use grok_acp_gui_lib::adapters::grok_acp::{FakeAcpTransport, FakeScenario};
 use grok_acp_gui_lib::bridge::types::SessionId;
 use grok_acp_gui_lib::modules::agent_runtime::{
-    config::{RuntimeConfig, WorkspaceContext},
+    config::{RuntimeConfig, RuntimeLoginMethod, WorkspaceContext},
     events::AgentEvent,
     requests::ClientRequest,
     AgentRuntime, AgentRuntimeImpl,
@@ -533,4 +533,91 @@ async fn stderr_flood_does_not_crash() {
     );
 
     runtime.shutdown(session_id.clone(), "done").await;
+}
+
+#[tokio::test]
+async fn login_success_is_reported_without_process_output() {
+    let runtime = make_runtime(FakeScenario::Normal);
+    let started = runtime
+        .login(&default_config(), RuntimeLoginMethod::Oauth)
+        .await;
+    assert_eq!(started.status, "running");
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let completed = runtime.login_status().await;
+    assert_eq!(completed.status, "succeeded");
+    assert_eq!(completed.exit_code, Some(0));
+    assert!(!serde_json::to_string(&completed)
+        .unwrap()
+        .to_ascii_lowercase()
+        .contains("token"));
+}
+
+#[tokio::test]
+async fn login_cancel_is_structured_and_idempotent() {
+    let runtime = make_runtime(FakeScenario::Timeout);
+    let mut config = default_config();
+    config.login_timeout_secs = 5;
+    runtime.login(&config, RuntimeLoginMethod::Oauth).await;
+    assert_eq!(runtime.cancel_login().await.status, "running");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(runtime.login_status().await.status, "cancelled");
+    assert_eq!(runtime.cancel_login().await.status, "cancelled");
+}
+
+#[tokio::test]
+async fn login_abnormal_exit_and_timeout_are_distinct() {
+    let failed_runtime = make_runtime(FakeScenario::Crash);
+    failed_runtime
+        .login(&default_config(), RuntimeLoginMethod::DeviceAuth)
+        .await;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let failed = failed_runtime.login_status().await;
+    assert_eq!(failed.status, "failed");
+    assert_eq!(failed.exit_code, Some(7));
+
+    let timed_out_runtime = make_runtime(FakeScenario::Timeout);
+    let mut config = default_config();
+    config.login_timeout_secs = 1;
+    timed_out_runtime
+        .login(&config, RuntimeLoginMethod::Oauth)
+        .await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert_eq!(timed_out_runtime.login_status().await.status, "timed_out");
+}
+
+#[tokio::test]
+async fn shutdown_all_cancels_an_active_login_process() {
+    let runtime = make_runtime(FakeScenario::Timeout);
+    let mut config = default_config();
+    config.login_timeout_secs = 30;
+    runtime.login(&config, RuntimeLoginMethod::Oauth).await;
+
+    runtime.shutdown_all("application exit").await;
+    assert_eq!(runtime.login_status().await.status, "cancelled");
+}
+
+#[tokio::test]
+async fn acp_starts_in_a_unicode_workspace_with_spaces() {
+    let workspace =
+        std::env::temp_dir().join(format!("GAG 005A 中文 workspace {}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).expect("create unicode workspace");
+    let runtime = make_runtime(FakeScenario::Normal);
+    let session_id = SessionId::new("unicode-space-workspace");
+
+    let started = runtime
+        .start(
+            session_id.clone(),
+            WorkspaceContext {
+                cwd: workspace.clone(),
+            },
+            &default_config(),
+        )
+        .await;
+    assert!(
+        started.is_ok(),
+        "unicode/space cwd must be passed as one path: {started:?}"
+    );
+    runtime.shutdown(session_id, "test complete").await;
+    std::fs::remove_dir_all(workspace).expect("remove unicode workspace");
 }

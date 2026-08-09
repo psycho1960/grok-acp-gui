@@ -63,10 +63,8 @@ pub(crate) fn missing_model_env_key(
         None
     } else {
         Some(format!(
-            "Model '{}' requires environment variable '{}', which is not set in \
-             this app's environment. Set it for your user (e.g. via 'setx {} value') \
-             and restart the app from a new terminal.",
-            model, env_key, env_key
+            "模型 '{}' 需要环境变量 '{}'，但当前应用进程未检测到该变量。请设置用户级环境变量，完全退出并重启应用。",
+            model, env_key
         ))
     }
 }
@@ -201,6 +199,9 @@ pub struct RuntimeConfig {
     pub min_version: String,
     /// Handshake timeout in seconds.
     pub handshake_timeout_secs: u64,
+    /// Interactive login timeout in seconds. The official browser/device
+    /// flow allows up to five minutes by default.
+    pub login_timeout_secs: u64,
     /// Idle timeout in seconds (0 = never auto-close).
     pub idle_timeout_secs: u64,
     /// Maximum frame size in bytes for JSON-RPC messages (default 4 MiB).
@@ -218,10 +219,54 @@ impl Default for RuntimeConfig {
             model: None,
             min_version: "0.2.118".into(),
             handshake_timeout_secs: 30,
+            login_timeout_secs: 300,
             idle_timeout_secs: 300, // 5 minutes (per technical design §7.6)
             max_frame_bytes: 4 * 1024 * 1024, // 4 MiB
             max_depth: 64,
             max_stderr_lines: 200,
+        }
+    }
+}
+
+pub(crate) fn selected_model_env_key<'a>(
+    model: Option<&str>,
+    profiles: &'a [ConfiguredModel],
+) -> Option<&'a str> {
+    let model = model?;
+    profiles
+        .iter()
+        .find(|profile| profile.id == model)
+        .and_then(|profile| profile.env_key.as_deref())
+}
+
+/// Renderer-safe state of the separate official Grok login process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeLoginResult {
+    /// idle/running/succeeded/cancelled/timed_out/failed
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Safe, actionable text. Login stdout/stderr never crosses this DTO.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLoginMethod {
+    Oauth,
+    DeviceAuth,
+}
+
+impl RuntimeLoginResult {
+    pub fn idle() -> Self {
+        Self {
+            status: "idle".into(),
+            exit_code: None,
+            message: None,
+            retryable: true,
         }
     }
 }
@@ -246,8 +291,8 @@ pub(crate) fn validate_model_id(model: Option<&str>) -> Result<(), &'static str>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeProbeResult {
-    /// `true` when grok is installed, meets the minimum version, and
-    /// (when checkable) is authenticated.
+    /// `true` when grok is installed and meets the minimum version.
+    /// Authentication is verified separately through ACP.
     pub available: bool,
     /// Absolute path to the discovered executable.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -436,10 +481,10 @@ mod tests {
             [model.opencode]
             model = "opencode-deepseek-v4-flash"
             env_key = "OPENCODE_API_KEY1"
-            api_key = "sk-should-never-be-captured"
+            api_key = "synthetic-secret-never-captured"
             [model.minimax]
             model = "MiniMax-M3"
-            api_key = "sk-inline-only"
+            api_key = "synthetic-inline-secret"
         "#;
 
         let models = parse_configured_models(config);
@@ -479,7 +524,7 @@ mod tests {
             !missing.contains("sk-"),
             "message must not contain any key value"
         );
-        assert!(missing.contains("restart the app"), "{missing}");
+        assert!(missing.contains("重启应用"), "{missing}");
     }
 
     #[test]

@@ -154,3 +154,27 @@ async fn p0_probe_before_start_succeeds() {
 
     runtime.shutdown(session_id, "test done").await;
 }
+
+#[tokio::test]
+async fn probe_distinguishes_missing_and_too_old_grok() {
+    let missing = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::NotFound,
+        fake_agent_path(),
+    ))
+    .probe(&RuntimeConfig::default())
+    .await;
+    assert!(!missing.available);
+    assert_eq!(missing.status, "not_found");
+    assert_eq!(missing.version, None);
+
+    let too_old = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::VersionTooLow,
+        fake_agent_path(),
+    ))
+    .probe(&RuntimeConfig::default())
+    .await;
+    assert!(!too_old.available);
+    assert_eq!(too_old.status, "version_too_low");
+    assert_eq!(too_old.version.as_deref(), Some("0.2.117"));
+    assert_eq!(too_old.version_ok, Some(false));
+}

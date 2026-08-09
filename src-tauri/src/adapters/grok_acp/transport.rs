@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 
 use super::codec::AcpMessage;
 use crate::bridge::types::SessionId;
@@ -39,6 +39,53 @@ pub struct ProcessExit {
     pub reason: String,
 }
 
+/// Supported official Grok login flows. These map to separate argv entries;
+/// callers never supply arbitrary command text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginMethod {
+    Oauth,
+    DeviceAuth,
+}
+
+/// Terminal/non-terminal state reported by the isolated login process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginProcessState {
+    Running,
+    Succeeded,
+    Cancelled,
+    TimedOut,
+    Failed { exit_code: Option<i32> },
+}
+
+/// Adapter-owned login process control. No child handle, stdout, stderr, or
+/// environment value crosses into the Runtime module.
+pub struct LoginHandle {
+    pub state: watch::Receiver<LoginProcessState>,
+    pub cancel: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl LoginHandle {
+    pub fn status(&self) -> LoginProcessState {
+        self.state.borrow().clone()
+    }
+
+    pub fn cancel(&self) {
+        if let Some(sender) = self
+            .cancel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = sender.send(());
+        }
+    }
+
+    pub async fn wait_for_change(&mut self) -> LoginProcessState {
+        let _ = self.state.changed().await;
+        self.status()
+    }
+}
+
 /// The transport seam.  Implementations spawn a child process (or fake)
 /// and provide channels for bidirectional JSON-RPC communication.
 #[async_trait]
@@ -64,6 +111,18 @@ pub trait AcpTransport: Send + Sync {
         workspace: WorkspaceContext,
         config: &RuntimeConfig,
     ) -> Result<TransportHandle, TransportError>;
+
+    /// Start the official `grok login` flow as a process separate from ACP.
+    /// Implementations must return immediately with a cancellable handle.
+    async fn start_login(
+        &self,
+        _method: LoginMethod,
+        _timeout_secs: u64,
+    ) -> Result<LoginHandle, TransportError> {
+        Err(TransportError::ProbeError {
+            message: "login flow is unavailable for this transport".into(),
+        })
+    }
 
     /// Returns the resolved executable path, if `probe()` has been
     /// called successfully.  Returns an owned `PathBuf` because
