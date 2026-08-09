@@ -74,7 +74,7 @@ test("GAG-001 exports only the bootstrap bridge and fails closed", async () => {
   await assert.rejects(bridge.bootstrap(), /Windows Tauri host/);
 });
 
-test("GAG-001 renders the onboarding placeholder without fake checks", async () => {
+test("GAG-005A renders the real ordered onboarding checks", async () => {
   const vite = await createServer({
     appType: "custom",
     logLevel: "silent",
@@ -84,10 +84,23 @@ test("GAG-001 renders the onboarding placeholder without fake checks", async () 
     const { default: OnboardingView } = await vite.ssrLoadModule(
       "/src/features/onboarding/OnboardingView.vue",
     );
-    const html = await renderToString(createSSRApp(OnboardingView));
+    const bridge = {
+      execute: async () => ({
+        installed: false,
+        minVersion: "0.2.118",
+        ready: false,
+        checks: [],
+        login: { status: "idle", retryable: false },
+      }),
+      subscribe: () => () => {},
+    };
+    const html = await renderToString(createSSRApp(OnboardingView, { bridge }));
 
     assert.match(html, /UI-ONBOARD-001/);
-    assert.match(html, /启动检查尚未接入/);
+    assert.match(html, /正在检查 Git/);
+    assert.match(html, /正在验证 Grok 登录状态/);
+    assert.match(html, /正在验证 ACP 通道/);
+    assert.doesNotMatch(html, /启动检查尚未接入/);
     assert.doesNotMatch(html, /选择项目目录|UI-PROJECT-001/);
   } finally {
     await vite.close();

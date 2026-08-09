@@ -16,13 +16,15 @@
 pub mod config;
 pub mod diagnostics;
 pub mod events;
+pub mod readiness;
 pub mod requests;
 pub mod runtime;
 pub mod state;
 
 // Re-export the most commonly used types at the module root.
 pub use config::{
-    configured_models, RuntimeConfig, RuntimeHandle, RuntimeProbeResult, WorkspaceContext,
+    configured_models, RuntimeConfig, RuntimeHandle, RuntimeLoginMethod, RuntimeLoginResult,
+    RuntimeProbeResult, WorkspaceContext,
 };
 pub use events::{AgentEvent, AssistantDeltaPayload, EventMeta, Sequence, TimestampedEvent};
 pub use requests::{ClientRequest, SendAck};
@@ -50,10 +52,35 @@ use tokio::sync::mpsc;
 ///   ALL sessions.  The caller filters by `session_id`.
 #[async_trait]
 pub trait AgentRuntime: Send + Sync {
-    /// Check whether the Grok CLI is installed, meets the minimum version,
-    /// and (when checkable) is authenticated.  Does NOT spawn a long-lived
-    /// process.
+    /// Check whether the Grok CLI is installed and meets the minimum version.
+    /// Authentication is intentionally not inferred from this process-only
+    /// probe. Does NOT spawn a long-lived process.
     async fn probe(&self, config: &RuntimeConfig) -> RuntimeProbeResult;
+
+    /// Start the official Grok login process. This returns immediately; the
+    /// Renderer polls `login_status` and can call `cancel_login`.
+    async fn login(
+        &self,
+        _config: &RuntimeConfig,
+        _method: RuntimeLoginMethod,
+    ) -> RuntimeLoginResult {
+        RuntimeLoginResult {
+            status: "failed".into(),
+            exit_code: None,
+            message: Some("Grok login is unavailable for this runtime.".into()),
+            retryable: false,
+        }
+    }
+
+    /// Return the current isolated login-process state.
+    async fn login_status(&self) -> RuntimeLoginResult {
+        RuntimeLoginResult::idle()
+    }
+
+    /// Cancel an active login process. Idempotent.
+    async fn cancel_login(&self) -> RuntimeLoginResult {
+        RuntimeLoginResult::idle()
+    }
 
     /// Spawn a managed Grok process for the given session and perform
     /// the ACP handshake.  Returns a handle on success.

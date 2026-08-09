@@ -12,10 +12,25 @@ import { defineComponent, h } from "vue";
 import type { BootstrapSnapshot } from "../../src/bridge/types";
 
 // Stub ShellView so we don't pull AppShell/matchMedia into this test.
+// eslint-disable-next-line vue/one-component-per-file
 const ShellViewStub = defineComponent({
   name: "ShellView",
   setup() {
     return () => h("div", { "data-testid": "shell-view-stub" });
+  },
+});
+
+// eslint-disable-next-line vue/one-component-per-file
+const OnboardingViewStub = defineComponent({
+  name: "OnboardingView",
+  emits: ["ready"],
+  setup(_, { emit }) {
+    return () =>
+      h(
+        "button",
+        { "data-testid": "onboarding-view-stub", onClick: () => emit("ready", {}) },
+        "startup checks",
+      );
   },
 });
 
@@ -103,5 +118,24 @@ describe("App startup error gate (UI-ERROR-001)", () => {
 
     expect(wrapper.find('[data-err="UI-ERROR-001"]').exists()).toBe(true);
     expect(wrapper.find('[data-testid="shell-view-stub"]').exists()).toBe(false);
+  });
+
+  it("gates the shell on real runtime readiness and continues after checks pass", async () => {
+    mockBootstrap.mockResolvedValue({
+      ...readySnapshot(),
+      runtime: { status: "probing", version: "1.0.0" },
+    });
+    const wrapper = mount(App, {
+      attachTo: document.body,
+      global: {
+        stubs: { ShellView: ShellViewStub, OnboardingView: OnboardingViewStub },
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="onboarding-view-stub"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="shell-view-stub"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="onboarding-view-stub"]').trigger("click");
+    expect(wrapper.find('[data-testid="shell-view-stub"]').exists()).toBe(true);
   });
 });

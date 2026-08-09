@@ -298,7 +298,7 @@ Migration `0003_permissions_and_plans.sql` 只保存 hash、脱敏摘要和决�
 - 首版 Windows x64，unsigned NSIS/MSI。
 - 构建检查 Rust stable-msvc、MSVC Build Tools、WebView2、Node 和 npm。
 - 不启用自动更新、遥测、Web 或移动端 bundle。
-- 运行时变量只继承，不写入配置：`XAI_API_KEY`；应用设置包括 Grok path、Worktree root、日志级别、字体缩放。
+- 运行时变量只继承、不写入配置，并遵循 ADR-0002 最小 allowlist；API Key 仅按当前模型 profile 的精确 `env_key` 传给 Grok 子进程。应用设置包括 Grok path、Worktree root、日志级别、字体缩放。
 
 ## 16. 已知风险与决策
 

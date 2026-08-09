@@ -4,8 +4,8 @@
 //! # Security invariants
 //! - The command and arguments are passed as a **vector**, never as a
 //!   shell string.  No `sh -c` is used.
-//! - Known-sensitive environment variables are blocked via `ENV_BLOCKLIST`;
-//!   all other parent environment is inherited (blocklist, not allowlist).
+//! - The parent environment is cleared and rebuilt from `BASE_ENV_ALLOWLIST`.
+//!   Only the selected model profile's `env_key` may be added dynamically.
 //! - stderr is read on a separate task and stored in a bounded
 //!   `StderrBuffer`; it never enters the protocol decoder.
 //! - stdout is decoded by `FrameDecoder`; non-JSON content is a
@@ -20,42 +20,68 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::codec::{AcpMessage, FrameDecoder};
-use super::transport::{AcpTransport, ProcessExit, TransportError, TransportHandle};
+use super::transport::{
+    AcpTransport, LoginHandle, LoginMethod, LoginProcessState, ProcessExit, TransportError,
+    TransportHandle,
+};
 use crate::bridge::types::SessionId;
 use crate::modules::agent_runtime::config::{RuntimeConfig, WorkspaceContext};
 use crate::modules::agent_runtime::diagnostics::{DiagLog, StderrBuffer};
 
-/// Environment variables that are explicitly BLOCKED from the child process.
-/// All other parent environment variables are inherited.
-///
-/// Design note: a blocklist (denylist) is safer than an allowlist because
-/// we cannot predict every variable a modern CLI (like Grok) needs for
-/// network, crypto, locale, and platform-specific initialization.
-/// Blocking *known-sensitive* keys strikes the right balance between
-/// security and reliability.
-const ENV_BLOCKLIST: &[&str] = &[
-    // Secrets and credentials
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AZURE_CLIENT_SECRET",
-    "DOCKER_PASSWORD",
-    "GITHUB_TOKEN",
-    "NPM_TOKEN",
-    // XAI_API_KEY is intentionally blocked — the adapter adds it
-    // explicitly only when present in the parent environment.
-    "XAI_API_KEY",
-    // Other sensitive vars
-    "ACTIONS_RUNTIME_TOKEN",
-    "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+/// Minimum environment required for Grok to start on supported desktop
+/// platforms. Values are inherited at runtime but are never logged or sent to
+/// the Renderer. API keys are intentionally absent from this static list.
+const BASE_ENV_ALLOWLIST: &[&str] = &[
+    // Executable lookup and Windows process startup.
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    // User-scoped Grok configuration and credential location.
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "HOME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "GROK_HOME",
+    // Temporary files and locale.
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    // Explicit network and trust-store configuration.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "CURL_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    // Non-secret Grok endpoint / enterprise OIDC configuration.
+    "GROK_CLI_CHAT_PROXY_BASE_URL",
+    "GROK_OIDC_ISSUER",
+    "GROK_OIDC_CLIENT_ID",
 ];
 
 /// The arguments passed to `grok` to start ACP stdio mode.
 const GROK_AGENT_ARGS: &[&str] = &["--no-auto-update", "agent", "stdio"];
+
+fn build_login_args(method: LoginMethod) -> [&'static str; 2] {
+    match method {
+        LoginMethod::Oauth => ["login", "--oauth"],
+        LoginMethod::DeviceAuth => ["login", "--device-auth"],
+    }
+}
 
 fn build_agent_args(model: Option<&str>) -> Result<Vec<&str>, TransportError> {
     let mut args = GROK_AGENT_ARGS[..2].to_vec();
@@ -93,7 +119,8 @@ impl GrokAcpAdapter {
             .arg("--version")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .envs(filter_env())
+            .env_clear()
+            .envs(filter_env(None))
             .output()
             .await
             .map_err(|e| TransportError::ProbeError {
@@ -229,13 +256,17 @@ impl AcpTransport for GrokAcpAdapter {
             .stderr(Stdio::piped());
         cmd.kill_on_drop(true);
 
-        // Apply env blocklist — pass all parent env EXCEPT known-sensitive keys.
-        for (k, v) in filter_env() {
+        // Rebuild a minimal environment after clearing the inherited parent.
+        // A model API key crosses this boundary only when the currently
+        // selected Grok profile explicitly names that exact `env_key`.
+        cmd.env_clear();
+        let configured_models = crate::modules::agent_runtime::configured_models();
+        let selected_env_key = crate::modules::agent_runtime::config::selected_model_env_key(
+            config.model.as_deref(),
+            &configured_models,
+        );
+        for (k, v) in filter_env(selected_env_key) {
             cmd.env(k, v);
-        }
-        // Explicitly pass XAI_API_KEY if the parent has it (runtime-only, never logged).
-        if let Ok(key) = std::env::var("XAI_API_KEY") {
-            cmd.env("XAI_API_KEY", key);
         }
 
         // On Windows, do NOT use a console window for the child.
@@ -296,6 +327,66 @@ impl AcpTransport for GrokAcpAdapter {
             inbound: inbound_rx,
             process,
             stderr: stderr_mutex,
+        })
+    }
+
+    async fn start_login(
+        &self,
+        method: LoginMethod,
+        timeout_secs: u64,
+    ) -> Result<LoginHandle, TransportError> {
+        let exe = self.resolved_path.lock().unwrap().clone().ok_or_else(|| {
+            TransportError::ProbeError {
+                message: "login called before successful executable probe".into(),
+            }
+        })?;
+        let mut command = Command::new(&exe);
+        command.args(build_login_args(method));
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .env_clear()
+            .envs(filter_env(None));
+
+        #[cfg(target_os = "windows")]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = command
+            .spawn()
+            .map_err(|error| TransportError::SpawnFailed {
+                message: format!("failed to start Grok login process: {}", error),
+            })?;
+        let (state_tx, state_rx) = watch::channel(LoginProcessState::Running);
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        tauri::async_runtime::spawn(async move {
+            let terminal = tokio::select! {
+                status = child.wait() => match status {
+                    Ok(status) if status.success() => LoginProcessState::Succeeded,
+                    Ok(status) => LoginProcessState::Failed { exit_code: status.code() },
+                    Err(_) => LoginProcessState::Failed { exit_code: None },
+                },
+                _ = &mut cancel_rx => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    LoginProcessState::Cancelled
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs.max(1))) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    LoginProcessState::TimedOut
+                },
+            };
+            let _ = state_tx.send(terminal);
+        });
+
+        Ok(LoginHandle {
+            state: state_rx,
+            cancel: std::sync::Mutex::new(Some(cancel_tx)),
         })
     }
 
@@ -436,42 +527,43 @@ fn spawn_process_monitor(mut child: Child) -> JoinHandle<ProcessExit> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Filter the parent environment: inherit everything EXCEPT blocklisted variables.
-/// Returns the filtered set of (key, value) pairs safe for the child process.
-fn filter_env() -> Vec<(String, String)> {
-    let mut result = Vec::new();
-    for (key, val) in std::env::vars() {
-        if !ENV_BLOCKLIST.contains(&key.as_str()) {
-            result.push((key, val));
-        }
-    }
-    result
+/// Select child environment variables from a supplied parent snapshot.
+/// Keeping this pure makes the security boundary directly testable without
+/// mutating the test runner's global process environment.
+fn select_child_env_from(
+    parent: impl IntoIterator<Item = (String, String)>,
+    selected_model_env_key: Option<&str>,
+) -> Vec<(String, String)> {
+    let selected_model_env_key = selected_model_env_key.filter(|key| valid_env_key(key));
+    parent
+        .into_iter()
+        .filter(|(key, _)| {
+            BASE_ENV_ALLOWLIST
+                .iter()
+                .any(|allowed| env_key_eq(key, allowed))
+                || selected_model_env_key.is_some_and(|selected| env_key_eq(key, selected))
+        })
+        .collect()
 }
 
-// Keep old function name as alias for backward compat in tests
-#[allow(dead_code)]
-fn filter_env_allowlist() -> Vec<(String, String)> {
-    let allowlist = &[
-        "PATH",
-        "USERPROFILE",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "HOME",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "SYSTEMROOT",
-    ];
-    let mut result = Vec::new();
-    for &key in allowlist {
-        if let Ok(val) = std::env::var(key) {
-            result.push((key.into(), val));
-        }
+fn filter_env(selected_model_env_key: Option<&str>) -> Vec<(String, String)> {
+    select_child_env_from(std::env::vars(), selected_model_env_key)
+}
+
+fn valid_env_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn env_key_eq(left: &str, right: &str) -> bool {
+    if cfg!(target_os = "windows") {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
     }
-    result
 }
 
 /// Parse a version string like "grok 0.2.118" or "0.2.118" into "0.2.118".
@@ -558,42 +650,47 @@ mod tests {
         assert!(!version_gte("0.2", "0.2.118"));
     }
 
-    #[test]
-    fn env_blocklist_includes_secrets() {
-        // Sensitive vars MUST be in the blocklist to prevent leaking.
-        assert!(ENV_BLOCKLIST.contains(&"XAI_API_KEY"));
-        assert!(ENV_BLOCKLIST.contains(&"AWS_SECRET_ACCESS_KEY"));
-        assert!(ENV_BLOCKLIST.contains(&"AWS_ACCESS_KEY_ID"));
-        assert!(ENV_BLOCKLIST.contains(&"GITHUB_TOKEN"));
+    fn parent_env_fixture() -> Vec<(String, String)> {
+        [
+            ("PATH", "C:\\Windows\\System32"),
+            ("SYSTEMROOT", "C:\\Windows"),
+            ("USERPROFILE", "C:\\Users\\测试 User"),
+            ("HTTPS_PROXY", "http://proxy.invalid"),
+            ("SSL_CERT_FILE", "C:\\证书\\root.pem"),
+            ("XAI_API_KEY", "xai-secret"),
+            ("OPENAI_API_KEY", "openai-secret"),
+            ("AWS_SECRET_ACCESS_KEY", "aws-secret"),
+            ("UNRELATED_SETTING", "must-not-cross-boundary"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
     }
 
     #[test]
-    fn env_blocklist_does_not_block_systemroot() {
-        // SYSTEMROOT must NOT be in the blocklist — it's needed on Windows.
-        assert!(!ENV_BLOCKLIST.contains(&"SYSTEMROOT"));
-        assert!(!ENV_BLOCKLIST.contains(&"PATH"));
-        assert!(!ENV_BLOCKLIST.contains(&"USERPROFILE"));
-        assert!(!ENV_BLOCKLIST.contains(&"HOME"));
+    fn child_environment_is_a_minimal_allowlist() {
+        let filtered = select_child_env_from(parent_env_fixture(), None);
+        let keys: Vec<&str> = filtered.iter().map(|(key, _)| key.as_str()).collect();
+
+        assert!(keys.contains(&"PATH"));
+        assert!(keys.contains(&"SYSTEMROOT"));
+        assert!(keys.contains(&"USERPROFILE"));
+        assert!(keys.contains(&"HTTPS_PROXY"));
+        assert!(keys.contains(&"SSL_CERT_FILE"));
+        assert!(!keys.contains(&"XAI_API_KEY"));
+        assert!(!keys.contains(&"OPENAI_API_KEY"));
+        assert!(!keys.contains(&"AWS_SECRET_ACCESS_KEY"));
+        assert!(!keys.contains(&"UNRELATED_SETTING"));
     }
 
     #[test]
-    fn filter_env_never_panics() {
-        // filter_env reads from std::env — just ensure it doesn't panic.
-        let _ = filter_env();
-    }
+    fn only_the_selected_model_env_key_is_added() {
+        let filtered = select_child_env_from(parent_env_fixture(), Some("OPENAI_API_KEY"));
+        let keys: Vec<&str> = filtered.iter().map(|(key, _)| key.as_str()).collect();
 
-    #[test]
-    fn filter_env_excludes_blocklisted() {
-        // Verify that blocklisted vars are excluded from filter_env output.
-        let filtered = filter_env();
-        let keys: Vec<&str> = filtered.iter().map(|(k, _)| k.as_str()).collect();
-        for &blocked in ENV_BLOCKLIST {
-            assert!(
-                !keys.contains(&blocked),
-                "blocklisted var '{}' should NOT appear in filter_env output",
-                blocked
-            );
-        }
+        assert!(keys.contains(&"OPENAI_API_KEY"));
+        assert!(!keys.contains(&"XAI_API_KEY"));
+        assert!(!keys.contains(&"AWS_SECRET_ACCESS_KEY"));
     }
 
     #[test]
@@ -604,6 +701,15 @@ mod tests {
         for arg in GROK_AGENT_ARGS {
             assert!(!arg.contains(['|', ';', '&']));
         }
+    }
+
+    #[test]
+    fn grok_login_args_are_fixed_and_never_use_a_shell_string() {
+        assert_eq!(build_login_args(LoginMethod::Oauth), ["login", "--oauth"]);
+        assert_eq!(
+            build_login_args(LoginMethod::DeviceAuth),
+            ["login", "--device-auth"]
+        );
     }
 
     #[test]

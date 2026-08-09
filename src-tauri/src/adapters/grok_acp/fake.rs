@@ -10,11 +10,14 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::codec::{AcpMessage, FrameDecoder};
-use super::transport::{AcpTransport, ProcessExit, TransportError, TransportHandle};
+use super::transport::{
+    AcpTransport, LoginHandle, LoginMethod, LoginProcessState, ProcessExit, TransportError,
+    TransportHandle,
+};
 use crate::bridge::types::SessionId;
 use crate::modules::agent_runtime::config::{RuntimeConfig, WorkspaceContext};
 use crate::modules::agent_runtime::diagnostics::{DiagLog, StderrBuffer};
@@ -22,6 +25,10 @@ use crate::modules::agent_runtime::diagnostics::{DiagLog, StderrBuffer};
 /// Which test scenario the fake agent should run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FakeScenario {
+    NotFound,
+    VersionTooLow,
+    NotAuthenticated,
+    TurnAuthRequired,
     Normal,
     Slow,
     Timeout,
@@ -46,6 +53,10 @@ pub enum FakeScenario {
 impl FakeScenario {
     fn env_value(&self) -> &'static str {
         match self {
+            FakeScenario::NotFound => "not-found",
+            FakeScenario::VersionTooLow => "version-too-low",
+            FakeScenario::NotAuthenticated => "not-authenticated",
+            FakeScenario::TurnAuthRequired => "turn-auth-required",
             FakeScenario::Normal => "normal",
             FakeScenario::Slow => "slow",
             FakeScenario::Timeout => "timeout",
@@ -91,6 +102,21 @@ impl FakeAcpTransport {
 #[async_trait]
 impl AcpTransport for FakeAcpTransport {
     async fn probe(&self, _config: &RuntimeConfig) -> Result<(PathBuf, String), TransportError> {
+        match self.scenario {
+            FakeScenario::NotFound => {
+                return Err(TransportError::NotFound {
+                    searched: vec![PathBuf::from("C:/Users/Test User/.grok/bin/grok.exe")],
+                })
+            }
+            FakeScenario::VersionTooLow => {
+                return Err(TransportError::VersionTooLow {
+                    found: "0.2.117".into(),
+                    required: "0.2.118".into(),
+                })
+            }
+            FakeScenario::NotAuthenticated => return Err(TransportError::NotAuthenticated),
+            _ => {}
+        }
         // The fake transport doesn't need a real grok binary.
         // Find node and report it as the "executable".
         let node = which_node().await?;
@@ -102,7 +128,7 @@ impl AcpTransport for FakeAcpTransport {
     async fn spawn(
         &self,
         _session_id: SessionId,
-        _workspace: WorkspaceContext,
+        workspace: WorkspaceContext,
         _config: &RuntimeConfig,
     ) -> Result<TransportHandle, TransportError> {
         // Find node executable.
@@ -110,6 +136,7 @@ impl AcpTransport for FakeAcpTransport {
 
         let mut cmd = Command::new(&node);
         cmd.arg(&self.agent_script);
+        cmd.current_dir(&workspace.cwd);
 
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -193,6 +220,41 @@ impl AcpTransport for FakeAcpTransport {
             inbound: inbound_rx,
             process,
             stderr: stderr_arc,
+        })
+    }
+
+    async fn start_login(
+        &self,
+        _method: LoginMethod,
+        timeout_secs: u64,
+    ) -> Result<LoginHandle, TransportError> {
+        let scenario = self.scenario;
+        let (state_tx, state_rx) = watch::channel(LoginProcessState::Running);
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        tauri::async_runtime::spawn(async move {
+            let simulated = async move {
+                match scenario {
+                    FakeScenario::Timeout => std::future::pending().await,
+                    FakeScenario::Crash | FakeScenario::CrashAfterPrompt => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        LoginProcessState::Failed { exit_code: Some(7) }
+                    }
+                    _ => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        LoginProcessState::Succeeded
+                    }
+                }
+            };
+            let terminal = tokio::select! {
+                result = simulated => result,
+                _ = &mut cancel_rx => LoginProcessState::Cancelled,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs.max(1))) => LoginProcessState::TimedOut,
+            };
+            let _ = state_tx.send(terminal);
+        });
+        Ok(LoginHandle {
+            state: state_rx,
+            cancel: std::sync::Mutex::new(Some(cancel_tx)),
         })
     }
 

@@ -15,7 +15,9 @@ use tauri::{AppHandle, Emitter};
 use super::error::AppError;
 use super::events::DesktopEvent;
 use crate::domain;
-use crate::modules::agent_runtime::{AgentEvent, RuntimeConfig, TimestampedEvent};
+use crate::modules::agent_runtime::{
+    AgentEvent, RuntimeConfig, RuntimeLoginMethod, TimestampedEvent,
+};
 use crate::modules::artifacts::ArtifactService;
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::TaskRuntime;
@@ -367,8 +369,8 @@ async fn dispatch(
     cmd: DesktopCommand,
 ) -> DesktopResult {
     match &cmd {
-        DesktopCommand::RuntimeRefresh(_) => runtime_refresh(runtime).await,
-        DesktopCommand::RuntimeLogin(_) => not_implemented("runtime.login"),
+        DesktopCommand::RuntimeRefresh(payload) => runtime_refresh(repo, runtime, payload).await,
+        DesktopCommand::RuntimeLogin(payload) => runtime_login(runtime, payload).await,
 
         DesktopCommand::ProjectOpen(payload) => project_open(repo, payload),
         DesktopCommand::ProjectForget(_) => not_implemented("project.forget"),
@@ -545,13 +547,40 @@ async fn plan_resolve(
     }
 }
 
-/// Wire `runtime.refresh` to the AgentRuntime probe.
 async fn runtime_refresh(
+    repo: &dyn Repository,
     runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    payload: &super::commands::RuntimeRefreshPayload,
 ) -> DesktopResult {
-    let config = RuntimeConfig::default();
-    let result = runtime.probe(&config).await;
-    DesktopResult::ok(serde_json::to_value(&result).unwrap_or(serde_json::Value::Null))
+    let snapshot = crate::modules::agent_runtime::readiness::assess(
+        runtime,
+        RuntimeConfig::default(),
+        payload.model.clone(),
+        repo.bootstrap_snapshot().is_ok(),
+    )
+    .await;
+    DesktopResult::ok(snapshot)
+}
+
+async fn runtime_login(
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    payload: &super::commands::RuntimeLoginPayload,
+) -> DesktopResult {
+    let result = match payload.method.as_deref().unwrap_or("oauth") {
+        "status" => runtime.login_status().await,
+        "cancel" => runtime.cancel_login().await,
+        "device_auth" => {
+            runtime
+                .login(&RuntimeConfig::default(), RuntimeLoginMethod::DeviceAuth)
+                .await
+        }
+        _ => {
+            runtime
+                .login(&RuntimeConfig::default(), RuntimeLoginMethod::Oauth)
+                .await
+        }
+    };
+    DesktopResult::ok(result)
 }
 
 /// Inspect a workspace path: exists as directory, discover git root if any.
@@ -1889,8 +1918,14 @@ mod tests {
         );
         let raw = serde_json::json!({"type": "runtime.refresh", "payload": {}});
 
-        let config = RuntimeConfig::default();
-        let adapter = crate::adapters::grok_acp::GrokAcpAdapter::new(config);
+        let fake_agent = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/fake-acp-agent/agent.mjs");
+        let adapter = crate::adapters::grok_acp::FakeAcpTransport::new(
+            crate::adapters::grok_acp::FakeScenario::Normal,
+            fake_agent,
+        );
         let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
         let task_runtime =
             crate::modules::task_runtime::TaskRuntimeImpl::new(repo.clone(), runtime.clone());
@@ -1898,13 +1933,96 @@ mod tests {
         let result = execute_impl(repo.as_ref(), runtime.as_ref(), &task_runtime, raw).await;
         match result {
             DesktopResult::Ok { data } => {
-                // The probe will fail (no grok installed in test env),
-                // but the result should still be a valid probe result.
-                assert!(data.get("available").is_some() || data.get("status").is_some());
+                assert_eq!(data["installed"], true);
+                assert_eq!(data["authenticated"], true);
+                assert_eq!(data["ready"], true);
+                assert_eq!(data["checks"][1]["id"], "grok");
+                assert_eq!(data["checks"][2]["id"], "version");
+                assert_eq!(data["checks"][3]["id"], "authentication");
+                assert_eq!(data["checks"][4]["id"], "database");
+                assert_eq!(data["checks"][5]["id"], "directory");
+                assert_eq!(data["checks"][6]["id"], "acp");
+                let serialized = serde_json::to_string(&data).unwrap().to_ascii_lowercase();
+                assert!(!serialized.contains("api_key"));
+                assert!(!serialized.contains("access_token"));
             }
             DesktopResult::Err { error } => {
                 panic!("runtime.refresh should not error: {:?}", error);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_login_is_implemented_and_pollable() {
+        let repo = std::sync::Arc::new(
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo"),
+        );
+        let fake_agent = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/fake-acp-agent/agent.mjs");
+        let adapter = crate::adapters::grok_acp::FakeAcpTransport::new(
+            crate::adapters::grok_acp::FakeScenario::Normal,
+            fake_agent,
+        );
+        let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
+        let task_runtime =
+            crate::modules::task_runtime::TaskRuntimeImpl::new(repo.clone(), runtime.clone());
+
+        let started = execute_impl(
+            repo.as_ref(),
+            runtime.as_ref(),
+            &task_runtime,
+            serde_json::json!({"type":"runtime.login","payload":{"method":"oauth"}}),
+        )
+        .await;
+        assert!(matches!(started, DesktopResult::Ok { ref data } if data["status"] == "running"));
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        let polled = execute_impl(
+            repo.as_ref(),
+            runtime.as_ref(),
+            &task_runtime,
+            serde_json::json!({"type":"runtime.login","payload":{"method":"status"}}),
+        )
+        .await;
+        assert!(matches!(polled, DesktopResult::Ok { ref data } if data["status"] == "succeeded"));
+    }
+
+    #[tokio::test]
+    async fn runtime_refresh_does_not_report_ready_when_first_turn_returns_401() {
+        let repo = std::sync::Arc::new(
+            crate::adapters::sqlite::SqliteRepository::open_in_memory().expect("in-memory repo"),
+        );
+        let fake_agent = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/fake-acp-agent/agent.mjs");
+        let adapter = crate::adapters::grok_acp::FakeAcpTransport::new(
+            crate::adapters::grok_acp::FakeScenario::TurnAuthRequired,
+            fake_agent,
+        );
+        let runtime = crate::modules::agent_runtime::AgentRuntimeImpl::new(adapter);
+        let task_runtime =
+            crate::modules::task_runtime::TaskRuntimeImpl::new(repo.clone(), runtime.clone());
+
+        let result = execute_impl(
+            repo.as_ref(),
+            runtime.as_ref(),
+            &task_runtime,
+            serde_json::json!({"type":"runtime.refresh","payload":{}}),
+        )
+        .await;
+        match result {
+            DesktopResult::Ok { data } => {
+                assert_eq!(data["installed"], true);
+                assert_eq!(data["authenticated"], false);
+                assert_eq!(data["ready"], false);
+                assert_eq!(data["checks"][3]["code"], "RUNTIME_LOGIN_FAILED");
+                assert!(!serde_json::to_string(&data)
+                    .unwrap()
+                    .contains("Unauthorized"));
+            }
+            DesktopResult::Err { error } => panic!("unexpected bridge error: {error:?}"),
         }
     }
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { bootstrap, type BootstrapStatus } from "./bridge/desktop-bridge";
+import { createDesktopBridge } from "./bridge/client";
 import ErrorState from "./shared/ui/ErrorState.vue";
 import ShellView from "./app/ShellView.vue";
 import UiKitFixture from "./app/UiKitFixture.vue";
@@ -8,12 +9,15 @@ import TaskCenterFixture from "./features/task-center/TaskCenterFixture.vue";
 import { parseTaskCenterHash } from "./features/task-center/hash-route";
 import ConversationFixture from "./features/conversation/ConversationFixture.vue";
 import { parseConversationHash } from "./features/conversation/hash-route";
+import OnboardingView from "./features/onboarding/OnboardingView.vue";
 
 const isLoading = ref(true);
 const startupError = ref<string | null>(null);
 const bootstrapStatus = ref<BootstrapStatus | null>(null);
 /** True only when bootstrap threw (no Tauri host) — not when DB is unavailable. */
 const bootstrapThrew = ref(false);
+const runtimeReady = ref(false);
+const runtimeBridge = createDesktopBridge();
 const routeHash = ref(typeof window !== "undefined" ? window.location.hash : "");
 
 function syncHash(): void {
@@ -42,6 +46,17 @@ const dbErrorDetail = computed(
     bootstrapStatus.value?.dbError ??
     "Application data is unavailable. Restart the application; if the problem persists, contact support.",
 );
+const needsOnboarding = computed(
+  () =>
+    bootstrapStatus.value?.ready === true &&
+    !runtimeReady.value &&
+    (bootstrapStatus.value.runtime.status !== "ready" ||
+      bootstrapStatus.value.runtime.authenticated === false),
+);
+
+function onRuntimeReady(): void {
+  runtimeReady.value = true;
+}
 
 /**
  * Fixture only when host is missing (bootstrap threw). Never mask UI-ERROR-001
@@ -126,6 +141,9 @@ onUnmounted(() => {
   <main v-else-if="dbUnavailable" class="startup">
     <ErrorState title="数据库不可用" :detail="dbErrorDetail" data-err="UI-ERROR-001" />
   </main>
+  <main v-else-if="needsOnboarding" class="runtime-onboarding">
+    <OnboardingView :bridge="runtimeBridge" @ready="onRuntimeReady" />
+  </main>
   <ConversationFixture v-else-if="showConversationFixture" />
   <TaskCenterFixture v-else-if="showTaskCenterFixture" />
   <ShellView v-else :data-version="bootstrapStatus?.version" />
@@ -141,5 +159,10 @@ onUnmounted(() => {
 }
 .startup > p {
   color: var(--ctp-subtext0);
+}
+.runtime-onboarding {
+  min-height: 100vh;
+  padding: 1px;
+  background: var(--ctp-base);
 }
 </style>

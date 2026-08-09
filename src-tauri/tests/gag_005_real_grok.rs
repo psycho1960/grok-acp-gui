@@ -35,6 +35,7 @@ fn real_config() -> RuntimeConfig {
         model: std::env::var("GROK_REAL_MODEL").ok(),
         min_version: "0.2.118".into(),
         handshake_timeout_secs: 30,
+        login_timeout_secs: 300,
         idle_timeout_secs: 60,
         max_frame_bytes: 4 * 1024 * 1024,
         max_depth: 64,

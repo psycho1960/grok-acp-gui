@@ -25,7 +25,10 @@ use crate::adapters::grok_acp::codec::{
     AcpMessage, AcpRequest,
 };
 use crate::adapters::grok_acp::interpreter::{self, AcpSessionContext, InterpretationResult};
-use crate::adapters::grok_acp::transport::{AcpTransport, ProcessExit, TransportHandle};
+use crate::adapters::grok_acp::transport::{
+    AcpTransport, LoginHandle, LoginMethod, LoginProcessState, ProcessExit, TransportError,
+    TransportHandle,
+};
 use crate::bridge::types::SessionId;
 use crate::domain::error::{codes, DomainError};
 use crate::modules::agent_runtime::diagnostics::DiagLog;
@@ -36,7 +39,10 @@ use crate::modules::agent_runtime::events::{
 use crate::modules::agent_runtime::requests::{ClientRequest, SendAck};
 use crate::modules::agent_runtime::state::{self, RuntimeState, RuntimeTransition};
 use crate::modules::agent_runtime::{
-    config::{RuntimeConfig, RuntimeHandle, RuntimeProbeResult, WorkspaceContext},
+    config::{
+        RuntimeConfig, RuntimeHandle, RuntimeLoginMethod, RuntimeLoginResult, RuntimeProbeResult,
+        WorkspaceContext,
+    },
     AgentRuntime,
 };
 
@@ -123,6 +129,7 @@ impl SessionSlot {
 pub struct AgentRuntimeImpl<T: AcpTransport> {
     transport: Arc<T>,
     sessions: Mutex<HashMap<SessionId, SessionSlot>>,
+    login: Mutex<Option<LoginHandle>>,
     /// Subscribers receive all session events. Each subscriber has its
     /// own bounded channel.
     event_subscribers: StdMutex<Vec<mpsc::Sender<TimestampedEvent>>>,
@@ -141,6 +148,7 @@ impl<T: AcpTransport + 'static> AgentRuntimeImpl<T> {
         let runtime = Arc::new(Self {
             transport,
             sessions: Mutex::new(HashMap::new()),
+            login: Mutex::new(None),
             event_subscribers: StdMutex::new(Vec::new()),
             internal_event_tx,
         });
@@ -278,12 +286,72 @@ impl<T: AcpTransport + 'static> AgentRuntimeImpl<T> {
     }
 }
 
+fn login_result(state: LoginProcessState) -> RuntimeLoginResult {
+    match state {
+        LoginProcessState::Running => RuntimeLoginResult {
+            status: "running".into(),
+            exit_code: None,
+            message: Some("Grok login is in progress in your browser.".into()),
+            retryable: false,
+        },
+        LoginProcessState::Succeeded => RuntimeLoginResult {
+            status: "succeeded".into(),
+            exit_code: Some(0),
+            message: Some("Grok login completed. Authentication will be checked again.".into()),
+            retryable: false,
+        },
+        LoginProcessState::Cancelled => RuntimeLoginResult {
+            status: "cancelled".into(),
+            exit_code: None,
+            message: Some("Grok login was cancelled.".into()),
+            retryable: true,
+        },
+        LoginProcessState::TimedOut => RuntimeLoginResult {
+            status: "timed_out".into(),
+            exit_code: None,
+            message: Some("Grok login timed out. Start the login flow again.".into()),
+            retryable: true,
+        },
+        LoginProcessState::Failed { exit_code } => RuntimeLoginResult {
+            status: "failed".into(),
+            exit_code,
+            message: Some("Grok login exited unexpectedly. Try again.".into()),
+            retryable: true,
+        },
+    }
+}
+
+fn safe_login_error(error: &TransportError) -> String {
+    match error {
+        TransportError::NotFound { .. } => {
+            "Grok CLI was not found. Install Grok Build and try again.".into()
+        }
+        TransportError::VersionTooLow { found, required } => {
+            format!("Grok {found} is below the required version {required}.")
+        }
+        TransportError::NotAuthenticated => {
+            "Grok is not authenticated. Start the official login flow again.".into()
+        }
+        TransportError::SpawnFailed { .. } | TransportError::ProbeError { .. } => {
+            "Unable to start the official Grok login flow. Retry or copy the redacted diagnostic."
+                .into()
+        }
+    }
+}
+
 #[async_trait]
 impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
     async fn probe(&self, config: &RuntimeConfig) -> RuntimeProbeResult {
         // Delegate to the transport's probe method.
         match self.transport.probe(config).await {
-            Ok((path, version)) => RuntimeProbeResult::ready(path, version, true),
+            Ok((path, version)) => {
+                let mut result = RuntimeProbeResult::ready(path, version, true);
+                // Executable/version probing alone cannot prove that a cached
+                // credential is accepted by the service. runtime.refresh uses
+                // a structured minimal ACP Turn for that decision.
+                result.authenticated = None;
+                result
+            }
             Err(super::super::super::adapters::grok_acp::TransportError::NotFound { .. }) => {
                 RuntimeProbeResult::not_found()
             }
@@ -295,6 +363,77 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                 RuntimeProbeResult::not_authenticated()
             }
             Err(e) => RuntimeProbeResult::probe_error(e.to_string()),
+        }
+    }
+
+    async fn login(
+        &self,
+        config: &RuntimeConfig,
+        method: RuntimeLoginMethod,
+    ) -> RuntimeLoginResult {
+        let current = self.login_status().await;
+        if current.status == "running" {
+            return current;
+        }
+
+        if let Err(error) = self.transport.probe(config).await {
+            return RuntimeLoginResult {
+                status: "failed".into(),
+                exit_code: None,
+                message: Some(safe_login_error(&error)),
+                retryable: true,
+            };
+        }
+        let method = match method {
+            RuntimeLoginMethod::Oauth => LoginMethod::Oauth,
+            RuntimeLoginMethod::DeviceAuth => LoginMethod::DeviceAuth,
+        };
+        match self
+            .transport
+            .start_login(method, config.login_timeout_secs)
+            .await
+        {
+            Ok(handle) => {
+                *self.login.lock().await = Some(handle);
+                RuntimeLoginResult {
+                    status: "running".into(),
+                    exit_code: None,
+                    message: Some("Grok login is in progress in your browser.".into()),
+                    retryable: false,
+                }
+            }
+            Err(error) => RuntimeLoginResult {
+                status: "failed".into(),
+                exit_code: None,
+                message: Some(safe_login_error(&error)),
+                retryable: true,
+            },
+        }
+    }
+
+    async fn login_status(&self) -> RuntimeLoginResult {
+        let login = self.login.lock().await;
+        login
+            .as_ref()
+            .map(|handle| login_result(handle.status()))
+            .unwrap_or_else(RuntimeLoginResult::idle)
+    }
+
+    async fn cancel_login(&self) -> RuntimeLoginResult {
+        let login = self.login.lock().await;
+        let Some(handle) = login.as_ref() else {
+            return RuntimeLoginResult::idle();
+        };
+        if handle.status() == LoginProcessState::Running {
+            handle.cancel();
+            RuntimeLoginResult {
+                status: "running".into(),
+                exit_code: None,
+                message: Some("Cancelling Grok login…".into()),
+                retryable: false,
+            }
+        } else {
+            login_result(handle.status())
         }
     }
 
@@ -414,11 +553,15 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
 
         // Perform the handshake BEFORE spawning the reader task.
         // This lets us intercept the `initialize` response directly.
+        let configured_models = super::config::configured_models();
+        let selected_model_env_key =
+            super::config::selected_model_env_key(config.model.as_deref(), &configured_models);
         match perform_handshake(
             &outbound,
             &mut inbound,
             config.handshake_timeout_secs,
             &workspace_cwd,
+            selected_model_env_key,
         )
         .await
         {
@@ -1175,6 +1318,13 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         for session_id in session_ids {
             self.shutdown(session_id, reason).await;
         }
+        let mut login = self.login.lock().await;
+        if let Some(handle) = login.as_mut() {
+            if handle.status() == LoginProcessState::Running {
+                handle.cancel();
+                let _ = timeout(Duration::from_secs(5), handle.wait_for_change()).await;
+            }
+        }
     }
 
     fn subscribe(&self) -> mpsc::Receiver<TimestampedEvent> {
@@ -1278,6 +1428,7 @@ async fn perform_handshake(
     inbound: &mut mpsc::Receiver<AcpMessage>,
     timeout_secs: u64,
     cwd: &std::path::Path,
+    selected_model_env_key: Option<&str>,
 ) -> Result<HandshakeInfo, String> {
     let init_params = serde_json::json!({
         "protocolVersion": 1,
@@ -1340,7 +1491,8 @@ async fn perform_handshake(
                                 method.get("id").and_then(|id| id.as_str()) == Some(wanted)
                             })
                         };
-                        let auth_method = if std::env::var_os("XAI_API_KEY").is_some()
+                        let auth_method = if selected_model_env_key == Some("XAI_API_KEY")
+                            && std::env::var_os("XAI_API_KEY").is_some()
                             && has_method("xai.api_key")
                         {
                             "xai.api_key"
@@ -1464,5 +1616,24 @@ async fn request_response(
             Ok(None) => return Err(format!("process closed stdout while waiting for {method}")),
             Err(_) => return Err(format!("{method} timed out")),
         }
+    }
+}
+
+#[cfg(test)]
+mod login_error_tests {
+    use super::*;
+
+    #[test]
+    fn renderer_login_errors_do_not_echo_paths_or_process_details() {
+        let not_found = safe_login_error(&TransportError::NotFound {
+            searched: vec![std::path::PathBuf::from(r"C:\private\profile\grok.exe")],
+        });
+        let spawn_failed = safe_login_error(&TransportError::SpawnFailed {
+            message: "XAI_API_KEY=synthetic-secret command line details".into(),
+        });
+
+        assert!(!not_found.contains("private"));
+        assert!(!spawn_failed.contains("XAI_API_KEY"));
+        assert!(!spawn_failed.contains("synthetic-secret"));
     }
 }

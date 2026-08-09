@@ -56,6 +56,42 @@ export interface RuntimeBootstrapStatus {
   authenticated?: boolean;
 }
 
+export type StartupCheckStatus = "checking" | "success" | "warning" | "error";
+
+export interface StartupCheck {
+  id: "git" | "grok" | "version" | "authentication" | "database" | "directory" | "acp";
+  label: string;
+  status: StartupCheckStatus;
+  detail: string;
+  code?: string;
+  action?: string;
+}
+
+export interface RuntimeLoginResult {
+  status: "idle" | "running" | "succeeded" | "cancelled" | "timed_out" | "failed";
+  exitCode?: number;
+  message?: string;
+  retryable: boolean;
+}
+
+export interface ActionableRuntimeError {
+  code: string;
+  message: string;
+  action: string;
+  diagnostic: string;
+}
+
+export interface RuntimeReadinessSnapshot {
+  installed: boolean;
+  version?: string;
+  minVersion: string;
+  authenticated?: boolean;
+  ready: boolean;
+  checks: StartupCheck[];
+  login: RuntimeLoginResult;
+  actionableError?: ActionableRuntimeError;
+}
+
 export interface CapabilitySnapshot {
   /** Available models (ACP ModelInfo). */
   models: ModelInfo[];
@@ -218,7 +254,7 @@ export interface Settings {
 // ---------------------------------------------------------------------------
 
 export type DesktopCommand =
-  | { type: "runtime.refresh"; payload: Record<string, never> }
+  | { type: "runtime.refresh"; payload: RuntimeRefreshPayload }
   | { type: "runtime.login"; payload: RuntimeLoginPayload }
   | { type: "project.open"; payload: ProjectOpenPayload }
   | { type: "project.forget"; payload: ProjectForgetPayload }
@@ -248,7 +284,11 @@ export type DesktopCommand =
   | { type: "recovery.delete"; payload: RecoveryDeletePayload };
 
 export interface RuntimeLoginPayload {
-  method?: string;
+  method?: "oauth" | "device_auth" | "status" | "cancel";
+}
+
+export interface RuntimeRefreshPayload {
+  model?: string;
 }
 
 export interface ProjectOpenPayload {

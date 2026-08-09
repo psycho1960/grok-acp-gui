@@ -58,7 +58,10 @@ async fn bootstrap(
         let probe = state.runtime.probe(&RuntimeConfig::default()).await;
         snapshot.runtime = br_dispatch::RuntimeBootstrapStatus {
             status: if probe.available {
-                "ready"
+                // `grok --version` proves installation only. The Renderer
+                // runs runtime.refresh for structured ACP authentication and
+                // handshake checks before declaring the runtime ready.
+                "probing"
             } else {
                 "unavailable"
             }
@@ -69,7 +72,7 @@ async fn bootstrap(
                 probe.message.or(Some(probe.status))
             },
             version: probe.version,
-            authenticated: probe.authenticated,
+            authenticated: None,
         };
     }
     Ok(snapshot)
