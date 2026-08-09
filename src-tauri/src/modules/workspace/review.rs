@@ -364,6 +364,34 @@ impl ManagedWorkspaceService {
     }
 }
 
+/// Return the 0-indexed space-delimited field from `text`, without splitting the last field.
+fn field_at(text: &str, index: usize) -> Option<&str> {
+    let mut start = 0;
+    for _ in 0..index {
+        start = text[start..].find(' ')? + start + 1;
+    }
+    let end = text[start..]
+        .find(' ')
+        .map_or(text.len(), |pos| start + pos);
+    Some(&text[start..end])
+}
+
+/// Return everything after the nth space (1-indexed). Used to extract the path
+/// field which may contain embedded spaces.
+fn rest_after_nth_space(text: &str, n: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    let mut count = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b' ' {
+            count += 1;
+            if count == n {
+                return Some(&text[i + 1..]);
+            }
+        }
+    }
+    None
+}
+
 fn parse_status(root: &Path, raw: &[u8]) -> Result<Vec<FileChange>, WorkspaceError> {
     let fields: Vec<&[u8]> = raw
         .split(|byte| *byte == 0)
@@ -378,21 +406,16 @@ fn parse_status(root: &Path, raw: &[u8]) -> Result<Vec<FileChange>, WorkspaceErr
         let prefix = text.as_bytes()[0];
         let (xy, submodule, path, old_path, kind) = match prefix {
             b'1' => {
-                let parts: Vec<&str> = text.splitn(9, ' ').collect();
-                if parts.len() != 9 {
-                    return Err(invalid_status());
-                }
-                (
-                    parts[1],
-                    parts[2] != "N...",
-                    parts[8].to_owned(),
-                    None,
-                    status_kind(parts[1]),
-                )
+                let xy = field_at(text, 1).ok_or_else(invalid_status)?;
+                let submodule = field_at(text, 2).ok_or_else(invalid_status)? != "N...";
+                let path = rest_after_nth_space(text, 8).ok_or_else(invalid_status)?;
+                (xy, submodule, path.to_owned(), None, status_kind(xy))
             }
             b'2' => {
-                let parts: Vec<&str> = text.splitn(10, ' ').collect();
-                if parts.len() != 10 || index + 1 >= fields.len() {
+                let xy = field_at(text, 1).ok_or_else(invalid_status)?;
+                let submodule = field_at(text, 2).ok_or_else(invalid_status)? != "N...";
+                let path = rest_after_nth_space(text, 9).ok_or_else(invalid_status)?;
+                if index + 1 >= fields.len() {
                     return Err(invalid_status());
                 }
                 index += 1;
@@ -400,22 +423,21 @@ fn parse_status(root: &Path, raw: &[u8]) -> Result<Vec<FileChange>, WorkspaceErr
                     .map_err(|_| invalid_status())?
                     .to_owned();
                 (
-                    parts[1],
-                    parts[2] != "N...",
-                    parts[9].to_owned(),
+                    xy,
+                    submodule,
+                    path.to_owned(),
                     Some(old),
                     "renamed".to_owned(),
                 )
             }
             b'u' => {
-                let parts: Vec<&str> = text.splitn(11, ' ').collect();
-                if parts.len() != 11 {
-                    return Err(invalid_status());
-                }
+                let xy = field_at(text, 1).ok_or_else(invalid_status)?;
+                let submodule = field_at(text, 2).ok_or_else(invalid_status)? != "N...";
+                let path = rest_after_nth_space(text, 10).ok_or_else(invalid_status)?;
                 (
-                    parts[1],
-                    parts[2] != "N...",
-                    parts[10].to_owned(),
+                    xy,
+                    submodule,
+                    path.to_owned(),
                     None,
                     "conflicted".to_owned(),
                 )
