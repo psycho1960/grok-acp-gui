@@ -426,6 +426,198 @@ async fn session_configure_mode_persists_and_next_turn_set_mode_is_observable() 
 }
 
 #[tokio::test]
+async fn session_configure_workspace_strategy_persists_and_drives_next_session_cwd() {
+    use grok_acp_gui_lib::domain::types::WorkspaceKind;
+
+    let repo = make_repo_with_project("project-workspace-linkage").await;
+    let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::Normal,
+        fake_agent_path(),
+    ));
+    let task_runtime = Arc::new(TaskRuntimeImpl::new(repo.clone(), runtime.clone()));
+    task_runtime.spawn_agent_event_forwarder();
+    let events = task_runtime.event_subscriber();
+
+    let task_id = create_task(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        "project-workspace-linkage",
+        "first message",
+        Some("Workspace linkage"),
+    )
+    .await;
+    wait_for_event(events.resubscribe(), |event| {
+        event.event_type == "task.state"
+            && event.payload.get("status").and_then(|v| v.as_str()) == Some("idle")
+    })
+    .await;
+
+    // Switch the task to the worktree strategy.
+    let configured = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "session.configure",
+            "payload": {
+                "taskId": task_id,
+                "settings": { "workspaceStrategy": "worktree" }
+            }
+        }),
+    )
+    .await;
+    match configured {
+        DesktopResult::Ok { data } => {
+            assert_eq!(data["workspaceStrategy"], "worktree");
+        }
+        DesktopResult::Err { error } => panic!("configure failed: {error:?}"),
+    }
+    assert_eq!(
+        repo.get_task(&task_id).expect("task query").workspace_kind,
+        WorkspaceKind::Worktree
+    );
+
+    // task.open surfaces the strategy so a reopened conversation restores it.
+    let reopened = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({ "type": "task.open", "payload": { "taskId": task_id } }),
+    )
+    .await;
+    match reopened {
+        DesktopResult::Ok { data } => {
+            assert_eq!(data["workspaceStrategy"], "worktree");
+        }
+        DesktopResult::Err { error } => panic!("open failed: {error:?}"),
+    }
+
+    // The next session start resolves the cwd by the persisted strategy:
+    // worktree without a managed worktree record fails closed.
+    let resume = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({ "type": "session.resume", "payload": { "taskId": task_id } }),
+    )
+    .await;
+    match resume {
+        DesktopResult::Err { error } => {
+            assert_eq!(
+                error.code, "WORKTREE_NOT_READY",
+                "worktree without a managed record must fail closed: {error:?}"
+            );
+        }
+        DesktopResult::Ok { .. } => panic!("worktree resume must not fall back to the checkout"),
+    }
+    let binding = repo
+        .get_binding_by_task(&task_id)
+        .expect("binding query")
+        .expect("binding");
+    assert_eq!(
+        binding.state,
+        grok_acp_gui_lib::domain::types::SessionState::Disconnected,
+        "the failed session must not stay active"
+    );
+
+    // Switching back to direct makes the next session start succeed and the
+    // binding cwd resolve to the project path.
+    let revert = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "session.configure",
+            "payload": {
+                "taskId": task_id,
+                "settings": { "workspaceStrategy": "direct" }
+            }
+        }),
+    )
+    .await;
+    assert!(matches!(revert, DesktopResult::Ok { .. }), "{revert:?}");
+
+    let resumed = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({ "type": "session.resume", "payload": { "taskId": task_id } }),
+    )
+    .await;
+    assert!(matches!(resumed, DesktopResult::Ok { .. }), "{resumed:?}");
+
+    let cwd = std::env::current_dir().expect("workspace");
+    let binding = repo
+        .get_binding_by_task(&task_id)
+        .expect("binding query")
+        .expect("binding");
+    assert_eq!(
+        binding.cwd.as_deref(),
+        Some(cwd.to_string_lossy().as_ref()),
+        "direct strategy must bind the session to the project path"
+    );
+
+    runtime.shutdown_all("test complete").await;
+}
+
+#[tokio::test]
+async fn session_configure_rejects_invalid_workspace_strategy_values() {
+    let repo = make_repo_with_project("project-strategy-reject").await;
+    let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::Normal,
+        fake_agent_path(),
+    ));
+    let task_runtime = Arc::new(TaskRuntimeImpl::new(repo.clone(), runtime.clone()));
+    task_runtime.spawn_agent_event_forwarder();
+
+    let task_id = create_task(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        "project-strategy-reject",
+        "hello",
+        Some("Strategy reject"),
+    )
+    .await;
+
+    let configure = |settings: serde_json::Value| {
+        execute_impl(
+            repo.as_ref(),
+            runtime.as_ref(),
+            task_runtime.as_ref(),
+            serde_json::json!({
+                "type": "session.configure",
+                "payload": { "taskId": task_id, "settings": settings }
+            }),
+        )
+    };
+
+    // Unknown enum value is rejected.
+    let bad = configure(serde_json::json!({ "workspaceStrategy": "nonsense" })).await;
+    assert!(
+        matches!(bad, DesktopResult::Err { .. }),
+        "unknown strategy accepted"
+    );
+
+    // Non-string value is rejected.
+    let non_string = configure(serde_json::json!({ "workspaceStrategy": 42 })).await;
+    assert!(
+        matches!(non_string, DesktopResult::Err { .. }),
+        "non-string strategy accepted"
+    );
+
+    // Nothing changed the persisted strategy (create_task used direct).
+    let task = repo.get_task(&task_id).expect("task query");
+    assert_eq!(
+        task.workspace_kind,
+        grok_acp_gui_lib::domain::types::WorkspaceKind::Direct
+    );
+
+    runtime.shutdown_all("test complete").await;
+}
+
+#[tokio::test]
 async fn session_configure_rejects_invalid_or_oversized_mode_values() {
     let repo = make_repo_with_project("project-mode-reject").await;
     let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
