@@ -366,10 +366,19 @@ impl MailboxWorker {
                 // applies at I/O time. An operation that fails it (unknown
                 // category, missing cwd, escaped paths, git -C outside the
                 // workspace) is recorded as Unknown and cannot be approved.
-                let category = match descriptor.as_ref() {
+                let mut category = match descriptor.as_ref() {
                     Some(value) if value.validate_within(&workspace).is_ok() => value.category(),
                     _ => crate::modules::task_runtime::permission::OperationCategory::Unknown,
                 };
+                // A readonly task never inherits direct-write semantics merely
+                // because both policies resolve to the project directory.
+                if self.repo.get_task(&self.task_id.0)?.workspace_kind
+                    == crate::domain::types::WorkspaceKind::Readonly
+                    && category
+                        != crate::modules::task_runtime::permission::OperationCategory::ReadOnly
+                {
+                    category = crate::modules::task_runtime::permission::OperationCategory::Unknown;
+                }
                 let digest = descriptor
                     .as_ref()
                     .and_then(|value| value.digest().ok())
@@ -383,6 +392,21 @@ impl MailboxWorker {
                 // stripped so no option can authorize them. Rejecting remains
                 // available because denial is always safe.
                 let options = restrict_options_for_category(&payload.options, category);
+                let visible_options: Vec<_> = if category
+                    == crate::modules::task_runtime::permission::OperationCategory::Unknown
+                {
+                    payload
+                        .options
+                        .iter()
+                        .filter(|option| {
+                            permission_action(option.kind.as_deref())
+                                == crate::modules::task_runtime::permission::PermissionOptionAction::Deny
+                        })
+                        .cloned()
+                        .collect()
+                } else {
+                    payload.options.clone()
+                };
                 let expires_at_epoch_seconds = epoch_seconds().saturating_add(300);
                 self.repo.create_permission(&PermissionRecord {
                     request_id: payload.request_id.clone(),
@@ -407,7 +431,7 @@ impl MailboxWorker {
                     "correlationId": correlation_id,
                     "expectedVersion": plan_version,
                     "expiresAtEpochSeconds": expires_at_epoch_seconds,
-                    "options": payload.options,
+                    "options": visible_options,
                     "toolCall": {
                         "toolCallId": payload.tool_call.tool_call_id,
                         "title": payload.tool_call.title,

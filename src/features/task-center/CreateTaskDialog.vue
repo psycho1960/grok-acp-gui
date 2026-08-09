@@ -6,6 +6,12 @@ import Input from "../../shared/ui/Input.vue";
 import Select from "../../shared/ui/Select.vue";
 import Textarea from "../../shared/ui/Textarea.vue";
 import type { ReasoningEffort } from "../../bridge/types";
+import {
+  WORKSPACE_STRATEGY_OPTIONS,
+  WORKTREE_NOT_READY_MESSAGE,
+  workspaceStrategyForMode,
+  type WorkspaceStrategy,
+} from "../conversation/mode-workspace";
 import { deriveTaskTitle } from "./title";
 
 type ModelOption = {
@@ -33,7 +39,7 @@ const emit = defineEmits<{
       mode: string;
       model?: string;
       reasoning: ReasoningEffort;
-      workspaceStrategy: "worktree" | "readonly" | "direct";
+      workspaceStrategy: WorkspaceStrategy;
     },
   ];
   cancel: [];
@@ -44,7 +50,7 @@ const title = ref("");
 const mode = ref("ask");
 const model = ref("");
 const reasoning = ref<ReasoningEffort>("medium");
-const workspaceStrategy = ref<"worktree" | "readonly" | "direct">("direct");
+const workspaceStrategy = ref<WorkspaceStrategy>("direct");
 const localError = ref<string | null>(null);
 
 const modeOptions = [
@@ -60,11 +66,12 @@ const reasoningOptions = [
   { value: "max", label: "最高" },
 ];
 
-const workspaceOptions = computed(() => [
-  { value: "worktree", label: "隔离 Worktree（推荐）" },
-  { value: "readonly", label: "只读当前目录" },
-  { value: "direct", label: "当前目录（可写）" },
-]);
+const workspaceOptions = computed(() =>
+  WORKSPACE_STRATEGY_OPTIONS.map((option) => ({
+    ...option,
+    label: option.value === "worktree" ? `${option.label}（推荐）` : option.label,
+  })),
+);
 
 watch(
   () => props.open,
@@ -82,9 +89,8 @@ watch(
 );
 
 watch(mode, (m) => {
-  // Ask defaults to current dir; Agent/Plan to worktree
-  if (m === "ask") workspaceStrategy.value = "direct";
-  else if (workspaceStrategy.value === "direct") workspaceStrategy.value = "worktree";
+  const linked = workspaceStrategyForMode(m);
+  if (linked) workspaceStrategy.value = linked;
 });
 
 watch(model, (selectedModel) => {
@@ -180,7 +186,7 @@ function onSubmit(): void {
           :options="workspaceOptions"
           data-testid="create-task-workspace"
           @update:model-value="
-            workspaceStrategy = $event as 'worktree' | 'readonly' | 'direct'
+            workspaceStrategy = $event as WorkspaceStrategy
           "
         />
         <p
@@ -194,7 +200,10 @@ function onSubmit(): void {
           。
         </p>
         <p v-else-if="workspaceStrategy === 'worktree'" class="hint">
-          受管 Worktree 将由 GAG-011 启用；当前版本不会回落到原工作区执行。
+          {{ WORKTREE_NOT_READY_MESSAGE }}
+        </p>
+        <p v-else-if="workspaceStrategy === 'readonly'" class="hint">
+          只读策略使用项目目录，但后端会拒绝写入与非只读操作。
         </p>
       </section>
 

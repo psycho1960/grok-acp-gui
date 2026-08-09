@@ -18,18 +18,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
+use crate::adapters::filesystem::{
+    canonicalize_existing_directory, validate_linked_worktree_metadata,
+};
 use crate::bridge::types::{SessionId, TaskId};
 use crate::domain::error::DomainError;
 use crate::domain::types::{
-    ConcurrencyLimits, RecoveryCandidate, RecoveryDecision, SessionSnapshot, SessionState,
-    TaskSummary, TimelineCursor, WorkspaceKind, WorktreeOwnership, WorktreeState,
+    ConcurrencyLimits, RecoveryCandidate, RecoveryDecision, SessionSnapshot, SessionState, Task,
+    TaskStatus, TaskSummary, TimelineCursor, WorkspaceKind, WorktreeOwnership, WorktreeState,
 };
 use crate::modules::agent_runtime::{
     AgentRuntime, RuntimeConfig, RuntimeState, TimestampedEvent, WorkspaceContext,
 };
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::mailbox::{SessionCommand, SessionMailbox};
-use crate::modules::task_runtime::TaskRuntime;
+use crate::modules::task_runtime::{SessionConfiguration, SessionConfigurationResult, TaskRuntime};
 
 /// Default maximum concurrent tasks (configurable via settings).
 const DEFAULT_MAX_CONCURRENT: u32 = 4;
@@ -79,6 +82,8 @@ pub struct TaskRuntimeImpl<A: AgentRuntime> {
     /// corresponding database transition. Sessions stay isolated while a
     /// double-click within one session still cannot send an option twice.
     approval_resolutions: Mutex<HashMap<SessionId, Arc<Mutex<()>>>>,
+    /// Serializes workspace configuration and session start per task.
+    task_operations: Mutex<HashMap<TaskId, Arc<Mutex<()>>>>,
     /// Bridge event broadcaster (Renderer subscribes to this).
     event_broadcaster: tokio::sync::broadcast::Sender<crate::bridge::events::DesktopEvent>,
 }
@@ -124,6 +129,7 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
             sequence_offsets: Mutex::new(HashMap::new()),
             permits: Mutex::new(HashMap::new()),
             approval_resolutions: Mutex::new(HashMap::new()),
+            task_operations: Mutex::new(HashMap::new()),
             event_broadcaster: event_tx,
         }
     }
@@ -154,6 +160,15 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
 
     async fn approval_resolution_for(&self, session_id: &SessionId) -> Arc<Mutex<()>> {
         approval_resolution_for_session(&self.approval_resolutions, session_id).await
+    }
+
+    async fn task_operation_lock(&self, task_id: &TaskId) -> Arc<Mutex<()>> {
+        self.task_operations
+            .lock()
+            .await
+            .entry(task_id.clone())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Get the event broadcaster for subscribers.
@@ -189,6 +204,77 @@ impl<A: AgentRuntime + 'static> TaskRuntimeImpl<A> {
             }
         });
     }
+}
+
+fn worktree_not_ready(message: &'static str) -> DomainError {
+    DomainError::new(crate::domain::error::codes::WORKTREE_NOT_READY, message)
+}
+
+/// Resolve the persisted policy to one canonical directory. Managed-root
+/// configuration is owned by GAG-011; until then, the registry relationship,
+/// repository identity and a strict non-project path are the available trust
+/// boundary. This deliberately rejects nested/project-equivalent paths.
+fn resolve_task_workspace(repo: &dyn Repository, task: &Task) -> Result<PathBuf, DomainError> {
+    let project = repo.get_project(&task.project_id.0)?;
+    let project_path = canonicalize_existing_directory(std::path::Path::new(&project.path))
+        .map_err(|_| {
+            DomainError::new(
+                "TASK_RUNTIME_INVALID_CWD",
+                "project workspace is not an existing absolute directory",
+            )
+        })?;
+
+    if task.workspace_kind != WorkspaceKind::Worktree {
+        return Ok(project_path);
+    }
+
+    let candidates: Vec<_> = repo
+        .list_worktrees_by_task(&task.id.0)?
+        .into_iter()
+        .filter(|worktree| {
+            worktree.ownership == WorktreeOwnership::Managed
+                && matches!(worktree.state, WorktreeState::Ready | WorktreeState::Dirty)
+        })
+        .collect();
+    if candidates.len() != 1 {
+        return Err(worktree_not_ready(
+            "isolated workspace has not been created and verified",
+        ));
+    }
+
+    let worktree = &candidates[0];
+    let trusted_repo_root = project.repo_root.as_deref().unwrap_or(&project.path);
+    let project_repo_root =
+        canonicalize_existing_directory(std::path::Path::new(trusted_repo_root))
+            .map_err(|_| worktree_not_ready("project repository identity is not verifiable"))?;
+    let recorded_repo_root =
+        canonicalize_existing_directory(std::path::Path::new(&worktree.repo_root))
+            .map_err(|_| worktree_not_ready("worktree repository identity is not verifiable"))?;
+    let worktree_path = canonicalize_existing_directory(std::path::Path::new(&worktree.path))
+        .map_err(|_| {
+            worktree_not_ready("isolated workspace path does not exist or is not ready")
+        })?;
+
+    if recorded_repo_root != project_repo_root
+        || worktree_path == project_path
+        || worktree_path.starts_with(&project_path)
+        || project_path.starts_with(&worktree_path)
+        || worktree_path.starts_with(&project_repo_root)
+        || project_repo_root.starts_with(&worktree_path)
+    {
+        return Err(worktree_not_ready(
+            "isolated workspace path is not safely separated from the project checkout",
+        ));
+    }
+
+    validate_linked_worktree_metadata(&project_repo_root, &worktree_path)
+        .map_err(|_| worktree_not_ready("isolated workspace Git registration is not verifiable"))?;
+
+    Ok(worktree_path)
+}
+
+fn workspace_available(repo: &dyn Repository, task: &Task) -> bool {
+    resolve_task_workspace(repo, task).is_ok()
 }
 
 #[async_trait]
@@ -260,6 +346,9 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         task_id: TaskId,
         session_id: SessionId,
     ) -> Result<(), DomainError> {
+        let task_lock = self.task_operation_lock(&task_id).await;
+        let _task_guard = task_lock.lock().await;
+
         // Ensure binding exists and belongs to the requested session.
         let Some(mut binding) = self.repo.get_binding_by_task(&task_id.0)? else {
             return Err(DomainError::new(
@@ -296,55 +385,54 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         // Create/ensure mailbox exists.
         self.get_or_create_mailbox(&task_id, &session_id).await;
 
-        // Derive the process cwd from the persisted workspace strategy.
-        // GAG-011 owns Worktree creation. Until it has persisted a managed
-        // Worktree record, fail closed instead of silently running an isolated
-        // task in the user's original checkout.
+        // Derive one canonical process cwd from the persisted policy.
         let task = self.repo.get_task(&task_id.0)?;
-        let project = self.repo.get_project(&task.project_id.0)?;
-        let cwd_result = match task.workspace_kind {
-            WorkspaceKind::Worktree => {
-                let candidates: Vec<_> = self
-                    .repo
-                    .list_worktrees_by_task(&task_id.0)?
-                    .into_iter()
-                    .filter(|worktree| {
-                        worktree.ownership == WorktreeOwnership::Managed
-                            && !matches!(
-                                worktree.state,
-                                WorktreeState::Deleted
-                                    | WorktreeState::Unknown
-                                    | WorktreeState::Integrating
-                            )
-                    })
-                    .collect();
-                if candidates.len() != 1 {
-                    Err(DomainError::new(
-                        "WORKTREE_NOT_READY",
-                        "isolated workspace has not been created and verified",
-                    ))
-                } else {
-                    Ok(PathBuf::from(&candidates[0].path))
-                }
-            }
-            WorkspaceKind::Readonly | WorkspaceKind::Direct => Ok(PathBuf::from(&project.path)),
-        };
-        let cwd = match cwd_result {
+        let cwd = match resolve_task_workspace(self.repo.as_ref(), &task) {
             Ok(cwd) => cwd,
             Err(error) => {
                 binding.state = SessionState::Disconnected;
                 self.repo.update_binding(&binding)?;
                 self.permits.lock().await.remove(&session_id);
+                if matches!(task.status, TaskStatus::Preparing | TaskStatus::Running) {
+                    let _ = self.repo.update_task_status(
+                        &task_id.0,
+                        "idle",
+                        Some("workspace is not ready"),
+                    );
+                }
                 return Err(error);
             }
         };
-        if !cwd.is_absolute() || !cwd.is_dir() {
+
+        let runtime_state = self.agent_runtime.session_state(&session_id);
+        let previous_cwd = binding
+            .cwd
+            .as_deref()
+            .and_then(|path| canonicalize_existing_directory(std::path::Path::new(path)).ok());
+        if matches!(
+            runtime_state,
+            Some(RuntimeState::Ready | RuntimeState::Busy)
+        ) && previous_cwd.as_ref() != Some(&cwd)
+        {
+            self.agent_runtime
+                .shutdown(
+                    session_id.clone(),
+                    "persisted workspace no longer matches runtime",
+                )
+                .await;
+            binding.cwd = None;
             binding.state = SessionState::Disconnected;
             self.repo.update_binding(&binding)?;
             self.permits.lock().await.remove(&session_id);
-            return Err(DomainError::new(
-                "TASK_RUNTIME_INVALID_CWD",
-                "task workspace is not an existing absolute directory",
+            if matches!(task.status, TaskStatus::Preparing | TaskStatus::Running) {
+                let _ = self.repo.update_task_status(
+                    &task_id.0,
+                    "idle",
+                    Some("workspace identity changed"),
+                );
+            }
+            return Err(worktree_not_ready(
+                "persisted workspace no longer matches the retained session",
             ));
         }
 
@@ -352,7 +440,7 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         binding.state = SessionState::Active;
         self.repo.update_binding(&binding)?;
 
-        let start_result = match self.agent_runtime.session_state(&session_id) {
+        let start_result = match runtime_state {
             Some(RuntimeState::Ready | RuntimeState::Busy) => Ok(()),
             Some(state) if state.is_live() => Err(DomainError::new(
                 crate::domain::error::codes::DOMAIN_ILLEGAL_TRANSITION,
@@ -373,10 +461,113 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             binding.state = SessionState::Disconnected;
             self.repo.update_binding(&binding)?;
             self.permits.lock().await.remove(&binding.session_id);
+            if matches!(task.status, TaskStatus::Preparing | TaskStatus::Running) {
+                let _ =
+                    self.repo
+                        .update_task_status(&task_id.0, "idle", Some("session start failed"));
+            }
             return Err(error);
         }
 
         Ok(())
+    }
+
+    async fn configure_session(
+        &self,
+        task_id: TaskId,
+        configuration: SessionConfiguration,
+    ) -> Result<SessionConfigurationResult, DomainError> {
+        let task_lock = self.task_operation_lock(&task_id).await;
+        let _task_guard = task_lock.lock().await;
+
+        let mut task = self.repo.get_task(&task_id.0)?;
+        let original_workspace_kind = task.workspace_kind;
+        let mode_was_supplied = configuration.mode.is_some();
+
+        if let Some(mode) = configuration.mode {
+            task.mode = mode;
+        }
+        if let Some(model) = configuration.model {
+            task.model = model;
+        }
+        if let Some(reasoning) = configuration.reasoning {
+            task.reasoning = reasoning;
+        }
+        match configuration.workspace_strategy {
+            Some(kind) => task.workspace_kind = kind,
+            None if mode_was_supplied => {
+                if let Some(kind) = WorkspaceKind::default_for_known_mode(task.mode.as_deref()) {
+                    task.workspace_kind = kind;
+                }
+            }
+            None => {}
+        }
+
+        let workspace_changed = task.workspace_kind != original_workspace_kind;
+        let binding = self.repo.get_binding_by_task(&task_id.0)?;
+        if workspace_changed
+            && (binding
+                .as_ref()
+                .is_some_and(|value| value.state == SessionState::Active)
+                || matches!(
+                    task.status,
+                    TaskStatus::Preparing
+                        | TaskStatus::Running
+                        | TaskStatus::WaitingPermission
+                        | TaskStatus::Integrating
+                ))
+        {
+            return Err(DomainError::new(
+                crate::domain::error::codes::DOMAIN_ILLEGAL_TRANSITION,
+                "当前 Turn 仍在运行，不能切换工作区策略；请先停止并确认后重试",
+            ));
+        }
+
+        // Disconnect the old runtime under the same task lock used by
+        // start_session. Persisting this before the task row means a failure
+        // cannot expose a new policy while a stale cwd remains reusable.
+        if workspace_changed {
+            if let Some(mut binding) = binding {
+                self.agent_runtime
+                    .shutdown(binding.session_id.clone(), "workspace policy changed")
+                    .await;
+                binding.cwd = None;
+                binding.state = SessionState::Disconnected;
+                self.repo.update_binding(&binding)?;
+            }
+        }
+
+        task.updated_at = crate::domain::types::utc_now();
+        self.repo.update_task_configuration(
+            &task.id.0,
+            task.workspace_kind,
+            task.mode.as_deref(),
+            task.model.as_deref(),
+            task.reasoning.as_deref(),
+            &task.updated_at,
+        )?;
+        // Reload the row so a concurrent status/recovery update remains the
+        // authoritative value returned to the bridge.
+        let task = self.repo.get_task(&task.id.0)?;
+        let available = workspace_available(self.repo.as_ref(), &task);
+        Ok(SessionConfigurationResult {
+            task,
+            workspace_available: available,
+        })
+    }
+
+    async fn workspace_snapshot(
+        &self,
+        task_id: TaskId,
+    ) -> Result<SessionConfigurationResult, DomainError> {
+        let task_lock = self.task_operation_lock(&task_id).await;
+        let _task_guard = task_lock.lock().await;
+        let task = self.repo.get_task(&task_id.0)?;
+        let available = workspace_available(self.repo.as_ref(), &task);
+        Ok(SessionConfigurationResult {
+            task,
+            workspace_available: available,
+        })
     }
 
     async fn accept_agent_event(&self, mut event: TimestampedEvent) -> Result<(), DomainError> {

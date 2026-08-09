@@ -7,7 +7,7 @@ use crate::domain::error::DomainError;
 use crate::domain::types::{
     AttachmentRecord, BootstrapSnapshot, ConcurrencyLimits, Project, RecoveryCandidate,
     RecoveryDecision, RecoveryItem, SessionBinding, SessionSnapshot, Settings, StoredEvent, Task,
-    TaskSummary, WorktreeRecord,
+    TaskSummary, WorkspaceKind, WorktreeRecord,
 };
 use crate::modules::task_runtime::permission::{
     ApprovalEvidence, ExecutionContext, PermissionDecision, PermissionRecord,
@@ -49,6 +49,18 @@ pub trait Repository: Send + Sync {
     fn list_tasks_by_project(&self, project_id: &str) -> RepoResult<Vec<Task>>;
     fn list_active_tasks(&self) -> RepoResult<Vec<Task>>;
     fn update_task(&self, task: &Task) -> RepoResult<()>;
+    /// Atomically update only user-configurable task fields. Status and
+    /// recovery fields are intentionally excluded to avoid lost updates from
+    /// concurrent runtime events.
+    fn update_task_configuration(
+        &self,
+        id: &str,
+        workspace_kind: WorkspaceKind,
+        mode: Option<&str>,
+        model: Option<&str>,
+        reasoning: Option<&str>,
+        updated_at: &str,
+    ) -> RepoResult<()>;
     /// Transactionally update task status (used by startup recovery).
     fn update_task_status(&self, id: &str, status: &str, reason: Option<&str>) -> RepoResult<()>;
     /// GAG-006: List tasks in states implying a live process.

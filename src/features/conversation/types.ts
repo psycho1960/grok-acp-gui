@@ -257,7 +257,9 @@ export interface SessionTimelineSnapshot {
   /** Persisted session mode selection (restores the conversation controls). */
   mode?: string | null;
   /** Persisted workspace strategy (restores the conversation controls). */
-  workspaceStrategy?: import("./mode-workspace").WorkspaceStrategy | string | null;
+  workspaceStrategy?: import("../../bridge/types").WorkspaceStrategy | string | null;
+  /** Backend-verified availability for the persisted workspace policy. */
+  workspaceAvailable?: boolean;
   /** Persisted model selection (restores the conversation controls). */
   model?: string | null;
   /** Persisted reasoning effort selection. */

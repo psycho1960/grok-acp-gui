@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-// GAG-010A / goal: mode ↔ workspace strategy linkage driven through the real
+// GAG-010B / goal: mode ↔ workspace strategy linkage driven through the real
 // fixture route (#conversation).
 
 /** Stop the autoplay fixture turn so the composer becomes usable. */
@@ -35,6 +35,10 @@ test("mode switch links the workspace strategy, echoes it, and survives reopen",
   });
 
   await openConversationFixture(page);
+
+  await expect(page.getByTestId("conversation-workspace-notice")).toHaveText(
+    "隔离 Worktree 尚未创建，本任务不会回落到原工作区。",
+  );
 
   // 1) The workspace strategy selector lists the three Chinese labels.
   const workspaceSelect = page

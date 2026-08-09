@@ -23,6 +23,7 @@
 | GAG-009 | D5 | GPT-5.6 Sol | DeepSeek V4 Pro | 权限、Plan gate |
 | GAG-010 | D4 | Grok 4.5 | GPT-5.6 Terra | 图片、Artifact |
 | GAG-010A | D3 | GPT-5.6 Terra | GPT-5.6 Luna（机械同步） | 对话配置、Slash Command、剪贴板与中文化归档 |
+| GAG-010B | D4/D5 | GPT-5.6 Sol | DeepSeek V4 Pro | 模式与工作区策略联动、持久化及 Fail-Closed 约束 |
 | GAG-011 | D5 | GPT-5.6 Sol | DeepSeek V4 Pro | Worktree 生命周期 |
 | GAG-012 | D4 | DeepSeek V4 Pro | GPT-5.6 Sol | Diff、检查点 |
 | GAG-013 | D5 | GPT-5.6 Sol | DeepSeek V4 Pro | Squash 集成 |
@@ -56,6 +57,9 @@ flowchart TD
     T8 --> T10A["GAG-010A Conversation Controls"]
     T9 --> T10A
     T10 --> T10A
+    T10A --> T10B["GAG-010B Mode / Workspace Policy"]
+    T9 --> T10B
+    T10B --> T11
     T4 --> T11["GAG-011 Worktree"]
     T5 --> T11
     T6 --> T11
@@ -92,6 +96,7 @@ flowchart TD
 - GAG-006、GAG-008、GAG-009 完成并发、对话、权限和 Plan。
 - GAG-010 可在 GAG-008 稳定后与 GAG-011 并行。
 - GAG-010A 归档既有的对话配置、Slash Command、剪贴板与中文化成果；它依赖 GAG-008～010 的已存在契约，不实现或阻塞 GAG-011 Worktree 生命周期。
+- GAG-010B 固化模式与工作区策略映射、持久化和缺失 Worktree 的 fail-closed 行为；不创建、接管、删除 Worktree，也不执行 Git 生命周期命令。
 - Gate C：三会话事件不串线；Plan 写入负面测试通过；图片缓存可恢复。
 
 ### Phase D：Git 闭环

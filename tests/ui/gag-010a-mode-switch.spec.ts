@@ -61,12 +61,15 @@ describe("conversation mode switching", () => {
     expect(store.selectedMode).toBe("agent");
 
     await store.configureMode("plan");
-    expect(configurePayloads).toEqual([{ mode: "plan" }]);
+    expect(configurePayloads).toEqual([{ mode: "plan", workspaceStrategy: "worktree" }]);
     expect(store.selectedMode).toBe("plan");
 
     // Clearing back to the session default sends null.
     await store.configureMode(null);
-    expect(configurePayloads).toEqual([{ mode: "plan" }, { mode: null }]);
+    expect(configurePayloads).toEqual([
+      { mode: "plan", workspaceStrategy: "worktree" },
+      { mode: null },
+    ]);
     expect(store.selectedMode).toBeNull();
   });
 

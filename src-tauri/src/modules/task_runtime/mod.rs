@@ -21,12 +21,29 @@ pub mod runtime;
 use crate::bridge::types::{SessionId, TaskId};
 use crate::domain::error::DomainError;
 use crate::domain::types::{
-    ConcurrencyLimits, RecoveryCandidate, RecoveryDecision, SessionSnapshot, TaskSummary,
+    ConcurrencyLimits, RecoveryCandidate, RecoveryDecision, SessionSnapshot, Task, TaskSummary,
+    WorkspaceKind,
 };
 use async_trait::async_trait;
 
 // Re-export the concrete runtime.
 pub use runtime::TaskRuntimeImpl;
+
+/// Validated settings patch passed from DesktopBridge into TaskRuntime.
+/// Nested options on nullable text fields distinguish omission from clearing.
+#[derive(Debug, Clone, Default)]
+pub struct SessionConfiguration {
+    pub mode: Option<Option<String>>,
+    pub model: Option<Option<String>>,
+    pub reasoning: Option<Option<String>>,
+    pub workspace_strategy: Option<WorkspaceKind>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionConfigurationResult {
+    pub task: Task,
+    pub workspace_available: bool,
+}
 
 /// The public Interface of the Task Runtime module.
 ///
@@ -56,6 +73,21 @@ pub trait TaskRuntime: Send + Sync {
         task_id: TaskId,
         session_id: SessionId,
     ) -> Result<(), DomainError>;
+
+    /// Persist one validated settings patch as a single task-row update.
+    /// Workspace changes are serialized with session start for the same task.
+    async fn configure_session(
+        &self,
+        task_id: TaskId,
+        configuration: SessionConfiguration,
+    ) -> Result<SessionConfigurationResult, DomainError>;
+
+    /// Return task settings and verified availability from one serialized
+    /// policy snapshot.
+    async fn workspace_snapshot(
+        &self,
+        task_id: TaskId,
+    ) -> Result<SessionConfigurationResult, DomainError>;
 
     /// Accept a processed agent event. Validates sequence, deduplicates,
     /// persists in a transaction, updates task/binding state, then publishes.

@@ -22,6 +22,8 @@ import { clearDraft, loadDraft, saveDraft } from "./draft";
 import { redactVisibleText } from "./markdown";
 import {
   isWorkspaceStrategy,
+  WORKTREE_NOT_READY_MESSAGE,
+  workspaceStrategyForMode,
   type WorkspaceStrategy,
 } from "./mode-workspace";
 import {
@@ -57,6 +59,12 @@ function normalizeReasoning(value: unknown): ReasoningEffort | null {
     : null;
 }
 
+function desktopErrorMessage(error: { code: string; message: string }): string {
+  return error.code === "WORKTREE_NOT_READY"
+    ? WORKTREE_NOT_READY_MESSAGE
+    : error.message;
+}
+
 export const useConversationStore = defineStore("conversation", () => {
   const loadState = ref<ConversationLoadState>("idle");
   const errorMessage = ref<string | null>(null);
@@ -82,10 +90,14 @@ export const useConversationStore = defineStore("conversation", () => {
   const selectedMode = ref<string | null>(null);
   /** Per-task workspace strategy persisted via session.configure. */
   const workspaceStrategy = ref<WorkspaceStrategy | null>(null);
+  /** Backend-verified availability; null means the snapshot did not say. */
+  const workspaceAvailable = ref<boolean | null>(null);
   /** Per-task model selection persisted via session.configure. */
   const selectedModel = ref<string | null>(null);
   /** Per-task reasoning effort selection persisted via session.configure. */
   const selectedReasoning = ref<ReasoningEffort | null>(null);
+  /** Prevent overlapping settings writes and expose a truthful pending state. */
+  const settingsPending = ref(false);
 
   let facade: ConversationFacade | null = null;
   let unsubscribe: (() => void) | null = null;
@@ -94,6 +106,7 @@ export const useConversationStore = defineStore("conversation", () => {
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingUserId: string | null = null;
   let openVersion = 0;
+  let settingsVersion = 0;
 
   const items = computed<TimelineItem[]>(() => {
     const raw = timeline.value.items;
@@ -116,6 +129,16 @@ export const useConversationStore = defineStore("conversation", () => {
       timeline.value.status === "waiting_plan",
   );
 
+  const workspaceNotice = computed(() => {
+    if (workspaceStrategy.value === "worktree" && workspaceAvailable.value === false) {
+      return WORKTREE_NOT_READY_MESSAGE;
+    }
+    if (workspaceStrategy.value === "readonly") {
+      return "只读策略已启用：使用项目目录，但写入与非只读操作会被后端拒绝。";
+    }
+    return null;
+  });
+
   const composerCapabilities = computed<ComposerCapabilities>(() => {
     if (!bridgeOnline.value) {
       return {
@@ -123,6 +146,14 @@ export const useConversationStore = defineStore("conversation", () => {
         canCancel: false,
         disabledReason: "Bridge 离线，草稿已保留",
         bridgeOnline: false,
+      };
+    }
+    if (settingsPending.value) {
+      return {
+        canSend: false,
+        canCancel: false,
+        disabledReason: "正在保存会话设置…",
+        bridgeOnline: true,
       };
     }
     if (sendPending.value) {
@@ -287,8 +318,10 @@ export const useConversationStore = defineStore("conversation", () => {
     facade = null;
     selectedMode.value = null;
     workspaceStrategy.value = null;
+    workspaceAvailable.value = null;
     selectedModel.value = null;
     selectedReasoning.value = null;
+    settingsPending.value = false;
   }
 
   function commitSnapshot(snapshot: SessionTimelineSnapshot): void {
@@ -306,6 +339,9 @@ export const useConversationStore = defineStore("conversation", () => {
         ? snapshot.workspaceStrategy
         : null;
     }
+    if (snapshot.workspaceAvailable !== undefined) {
+      workspaceAvailable.value = snapshot.workspaceAvailable === true;
+    }
     if (snapshot.model !== undefined) selectedModel.value = snapshot.model ?? null;
     if (snapshot.reasoning !== undefined) {
       selectedReasoning.value = normalizeReasoning(snapshot.reasoning);
@@ -314,11 +350,15 @@ export const useConversationStore = defineStore("conversation", () => {
 
   function openFromSnapshot(snapshot: SessionTimelineSnapshot): void {
     openVersion += 1;
+    settingsVersion += 1;
+    settingsPending.value = false;
     commitSnapshot(snapshot);
   }
 
   async function openTask(taskId: TaskId, title = "任务会话"): Promise<void> {
     const version = ++openVersion;
+    settingsVersion += 1;
+    settingsPending.value = false;
     loadState.value = "loading";
     errorMessage.value = null;
     commit({
@@ -328,6 +368,11 @@ export const useConversationStore = defineStore("conversation", () => {
     });
     draft.value = loadDraft(taskId);
     attachments.value = [];
+    selectedMode.value = null;
+    workspaceStrategy.value = null;
+    workspaceAvailable.value = null;
+    selectedModel.value = null;
+    selectedReasoning.value = null;
 
     if (!facade) {
       loadState.value = "ready";
@@ -378,6 +423,7 @@ export const useConversationStore = defineStore("conversation", () => {
           attempt: data.attempt,
           mode: data.mode,
           workspaceStrategy: data.workspaceStrategy,
+          workspaceAvailable: data.workspaceAvailable,
           model: data.model,
           reasoning: data.reasoning,
         });
@@ -387,6 +433,9 @@ export const useConversationStore = defineStore("conversation", () => {
           workspaceStrategy.value = isWorkspaceStrategy(data.workspaceStrategy)
             ? data.workspaceStrategy
             : null;
+        }
+        if (data.workspaceAvailable !== undefined) {
+          workspaceAvailable.value = data.workspaceAvailable === true;
         }
         if (data.model !== undefined) selectedModel.value = data.model ?? null;
         if (data.reasoning !== undefined) {
@@ -483,87 +532,110 @@ export const useConversationStore = defineStore("conversation", () => {
     }
   }
 
-  /**
-   * Persist the session mode for the current task (agent/plan/ask). Every
-   * following turn then sends session/set_mode with the new modeId.
-   */
-  async function configureMode(mode: string | null): Promise<boolean> {
-    const previous = selectedMode.value;
-    selectedMode.value = mode;
-    if (!timeline.value.taskId || !facade) return false;
+  type StableSettings = {
+    mode?: string | null;
+    workspaceStrategy?: WorkspaceStrategy;
+    model?: string | null;
+    reasoning?: ReasoningEffort;
+  };
+
+  function applyStableSettings(source: Record<string, unknown>, fallback: StableSettings = {}): void {
+    const mode = source.mode !== undefined ? source.mode : fallback.mode;
+    if (mode !== undefined) selectedMode.value = typeof mode === "string" ? mode : null;
+
+    const strategy = source.workspaceStrategy ?? fallback.workspaceStrategy;
+    if (strategy !== undefined && isWorkspaceStrategy(strategy)) {
+      workspaceStrategy.value = strategy;
+    }
+    if (source.workspaceAvailable !== undefined) {
+      workspaceAvailable.value = source.workspaceAvailable === true;
+    } else if (fallback.workspaceStrategy === "worktree") {
+      // Never invent a ready state when the backend omitted availability.
+      workspaceAvailable.value = false;
+    } else if (fallback.workspaceStrategy) {
+      workspaceAvailable.value = true;
+    }
+
+    const model = source.model !== undefined ? source.model : fallback.model;
+    if (model !== undefined) selectedModel.value = typeof model === "string" ? model : null;
+
+    const reasoning = source.reasoning ?? fallback.reasoning;
+    if (reasoning !== undefined) selectedReasoning.value = normalizeReasoning(reasoning);
+  }
+
+  async function reloadStableSettings(taskId: TaskId): Promise<void> {
+    if (!facade) return;
     try {
-      const result = await facade.configureSession(timeline.value.taskId, {
-        mode,
-      });
-      if (result.success === "false") throw new Error(result.error.message);
-      return true;
-    } catch (error) {
-      selectedMode.value = previous;
-      sendError.value = error instanceof Error ? error.message : "模式切换失败";
-      return false;
+      const result = await facade.openTask(taskId);
+      if (
+        result.success === "true" &&
+        timeline.value.taskId === taskId &&
+        result.data &&
+        typeof result.data === "object"
+      ) {
+        applyStableSettings(result.data as Record<string, unknown>);
+      }
+    } catch {
+      // Keep the last backend-confirmed UI state when reloading also fails.
     }
   }
 
-  /**
-   * Persist the workspace strategy for the current task (worktree/readonly/
-   * direct). The next session start resolves its cwd from this value.
-   */
-  async function configureWorkspaceStrategy(
-    strategy: WorkspaceStrategy,
+  async function configureStableSettings(
+    settings: StableSettings,
+    fallbackError: string,
   ): Promise<boolean> {
-    const previous = workspaceStrategy.value;
-    workspaceStrategy.value = strategy;
-    if (!timeline.value.taskId || !facade) return false;
+    const taskId = timeline.value.taskId;
+    const activeFacade = facade;
+    if (!taskId || !activeFacade || settingsPending.value) return false;
+    const version = ++settingsVersion;
+    settingsPending.value = true;
+    sendError.value = null;
     try {
-      const result = await facade.configureSession(timeline.value.taskId, {
-        workspaceStrategy: strategy,
-      });
-      if (result.success === "false") throw new Error(result.error.message);
+      const result = await activeFacade.configureSession(taskId, settings);
+      if (timeline.value.taskId !== taskId || version !== settingsVersion) return false;
+      if (result.success === "false") {
+        sendError.value = desktopErrorMessage(result.error);
+        await reloadStableSettings(taskId);
+        return false;
+      }
+      const data = result.data && typeof result.data === "object"
+        ? result.data as Record<string, unknown>
+        : {};
+      applyStableSettings(data, settings);
       return true;
     } catch (error) {
-      workspaceStrategy.value = previous;
-      sendError.value = error instanceof Error ? error.message : "工作区策略切换失败";
+      if (timeline.value.taskId === taskId && version === settingsVersion) {
+        sendError.value = error instanceof Error ? error.message : fallbackError;
+        await reloadStableSettings(taskId);
+      }
       return false;
+    } finally {
+      if (version === settingsVersion) settingsPending.value = false;
     }
   }
 
-  /**
-   * Persist the model selection for the current task. Every following turn
-   * then carries the new model in its ACP prompt request.
-   */
+  /** Persist mode and its default workspace policy in one backend transaction. */
+  async function configureMode(
+    mode: string | null,
+    linkedStrategy: WorkspaceStrategy | null = workspaceStrategyForMode(mode),
+  ): Promise<boolean> {
+    return configureStableSettings(
+      linkedStrategy ? { mode, workspaceStrategy: linkedStrategy } : { mode },
+      "模式切换失败",
+    );
+  }
+
+  /** Persist an explicit user workspace-policy override. */
+  async function configureWorkspaceStrategy(strategy: WorkspaceStrategy): Promise<boolean> {
+    return configureStableSettings({ workspaceStrategy: strategy }, "工作区策略切换失败");
+  }
+
   async function configureModel(model: string | null): Promise<boolean> {
-    const previous = selectedModel.value;
-    selectedModel.value = model;
-    if (!timeline.value.taskId || !facade) return false;
-    try {
-      const result = await facade.configureSession(timeline.value.taskId, {
-        model,
-      });
-      if (result.success === "false") throw new Error(result.error.message);
-      return true;
-    } catch (error) {
-      selectedModel.value = previous;
-      sendError.value = error instanceof Error ? error.message : "模型切换失败";
-      return false;
-    }
+    return configureStableSettings({ model }, "模型切换失败");
   }
 
-  /** Persist the reasoning effort selection for the current task. */
   async function configureReasoning(reasoning: ReasoningEffort): Promise<boolean> {
-    const previous = selectedReasoning.value;
-    selectedReasoning.value = reasoning;
-    if (!timeline.value.taskId || !facade) return false;
-    try {
-      const result = await facade.configureSession(timeline.value.taskId, {
-        reasoning,
-      });
-      if (result.success === "false") throw new Error(result.error.message);
-      return true;
-    } catch (error) {
-      selectedReasoning.value = previous;
-      sendError.value = error instanceof Error ? error.message : "推理强度切换失败";
-      return false;
-    }
+    return configureStableSettings({ reasoning }, "推理强度切换失败");
   }
 
   async function sendMessage(): Promise<boolean> {
@@ -606,10 +678,10 @@ export const useConversationStore = defineStore("conversation", () => {
           markUserMessageFailed(
             timeline.value,
             localId,
-            result.error.message,
+            desktopErrorMessage(result.error),
           ),
         );
-        sendError.value = result.error.message;
+        sendError.value = desktopErrorMessage(result.error);
         commit(setRunStatus(timeline.value, "error"));
         if (!draft.value) {
           draft.value = text;
@@ -647,7 +719,7 @@ export const useConversationStore = defineStore("conversation", () => {
     try {
       const result = await facade.cancelTurn(timeline.value.taskId);
       if (result.success === "false") {
-        sendError.value = result.error.message;
+        sendError.value = desktopErrorMessage(result.error);
         commit(setRunStatus(timeline.value, "running"));
         return false;
       }
@@ -753,7 +825,7 @@ export const useConversationStore = defineStore("conversation", () => {
     try {
       const result = await facade.resumeSession(timeline.value.taskId);
       if (result.success === "false") {
-        sendError.value = result.error.message;
+        sendError.value = desktopErrorMessage(result.error);
         return false;
       }
       await openTask(timeline.value.taskId);
@@ -811,8 +883,11 @@ export const useConversationStore = defineStore("conversation", () => {
     slashCommands,
     selectedMode,
     workspaceStrategy,
+    workspaceAvailable,
+    workspaceNotice,
     selectedModel,
     selectedReasoning,
+    settingsPending,
     composerCapabilities,
     isRunning,
     attach,

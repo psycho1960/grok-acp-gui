@@ -401,7 +401,7 @@ async fn dispatch(
         DesktopCommand::TurnCancel(payload) => {
             turn_cancel(repo, runtime, task_runtime, payload).await
         }
-        DesktopCommand::SessionConfigure(payload) => session_configure(repo, payload),
+        DesktopCommand::SessionConfigure(payload) => session_configure(task_runtime, payload).await,
         DesktopCommand::SessionResume(payload) => session_resume(repo, task_runtime, payload).await,
 
         DesktopCommand::PermissionResolve(payload) => {
@@ -816,7 +816,7 @@ async fn task_create(
     artifacts: Option<&dyn ArtifactService>,
     payload: &super::commands::TaskCreatePayload,
 ) -> DesktopResult {
-    use crate::domain::types::{utc_now, Task, TaskId, TaskStatus, WorkspaceKind};
+    use crate::domain::types::{utc_now, Task, TaskId, TaskStatus};
     use uuid::Uuid;
 
     if payload.prompt.trim().is_empty() {
@@ -846,9 +846,11 @@ async fn task_create(
     }
 
     let workspace_kind = match payload.workspace_strategy.as_deref() {
-        Some("direct") => WorkspaceKind::Direct,
-        Some("readonly") => WorkspaceKind::Readonly,
-        _ => WorkspaceKind::Worktree,
+        Some(value) => match parse_workspace_strategy(value) {
+            Ok(kind) => kind,
+            Err(error) => return DesktopResult::err(error),
+        },
+        None => default_workspace_kind_for_mode(payload.mode.as_deref()),
     };
 
     let now = utc_now();
@@ -1204,17 +1206,17 @@ async fn turn_cancel(
 /// following turn carries them. `turn.send` already builds its ACP prompt
 /// request from the persisted task fields, so persisting here is enough to
 /// make the next prompt observable with the new values.
-fn session_configure(
-    repo: &dyn Repository,
+async fn session_configure(
+    task_runtime: &dyn TaskRuntime,
     payload: &super::commands::SessionConfigurePayload,
 ) -> DesktopResult {
-    let mut task = match repo.get_task(&payload.task_id.0) {
-        Ok(task) => task,
-        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    let Some(settings) = payload.settings.as_object().cloned() else {
+        return DesktopResult::err(AppError::new(
+            domain::error::codes::BRIDGE_VALIDATION_FAILED,
+            "会话设置必须是对象",
+        ));
     };
-
-    let settings = payload.settings.as_object().cloned().unwrap_or_default();
-    let mut changed = false;
+    let mut configuration = crate::modules::task_runtime::SessionConfiguration::default();
 
     if let Some(raw_model) = settings.get("model") {
         let model = match raw_model {
@@ -1242,10 +1244,7 @@ fn session_configure(
                 ))
             }
         };
-        if task.model != model {
-            task.model = model;
-            changed = true;
-        }
+        configuration.model = Some(model);
     }
 
     if let Some(raw_reasoning) = settings.get("reasoning") {
@@ -1269,10 +1268,7 @@ fn session_configure(
                 ))
             }
         };
-        if task.reasoning != reasoning {
-            task.reasoning = reasoning;
-            changed = true;
-        }
+        configuration.reasoning = Some(reasoning);
     }
 
     if let Some(raw_mode) = settings.get("mode") {
@@ -1298,26 +1294,15 @@ fn session_configure(
                 ))
             }
         };
-        if task.mode != mode {
-            task.mode = mode;
-            changed = true;
-        }
+        configuration.mode = Some(mode);
     }
 
     if let Some(raw_strategy) = settings.get("workspaceStrategy") {
-        let strategy = match raw_strategy {
-            serde_json::Value::Null => None,
-            serde_json::Value::String(value)
-                if matches!(value.as_str(), "worktree" | "readonly" | "direct") =>
-            {
-                Some(value.clone())
-            }
-            serde_json::Value::String(_) => {
-                return DesktopResult::err(AppError::new(
-                    domain::error::codes::BRIDGE_VALIDATION_FAILED,
-                    "工作区策略仅支持 worktree / readonly / direct",
-                ))
-            }
+        let kind = match raw_strategy {
+            serde_json::Value::String(value) => match parse_workspace_strategy(value) {
+                Ok(kind) => kind,
+                Err(error) => return DesktopResult::err(error),
+            },
             _ => {
                 return DesktopResult::err(AppError::new(
                     domain::error::codes::BRIDGE_VALIDATION_FAILED,
@@ -1325,41 +1310,48 @@ fn session_configure(
                 ))
             }
         };
-        let kind = match strategy.as_deref() {
-            Some("worktree") => crate::domain::types::WorkspaceKind::Worktree,
-            Some("readonly") => crate::domain::types::WorkspaceKind::Readonly,
-            Some("direct") => crate::domain::types::WorkspaceKind::Direct,
-            _ => task.workspace_kind,
-        };
-        if task.workspace_kind != kind {
-            task.workspace_kind = kind;
-            changed = true;
-        }
+        configuration.workspace_strategy = Some(kind);
     }
 
-    if changed {
-        if let Err(error) = repo.update_task(&task) {
-            return DesktopResult::err(AppError::new(error.code, error.message));
-        }
-    }
+    let configured = match task_runtime
+        .configure_session(payload.task_id.clone(), configuration)
+        .await
+    {
+        Ok(configured) => configured,
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
+    let task = configured.task;
     DesktopResult::ok(serde_json::json!({
         "taskId": payload.task_id,
         "mode": task.mode,
         "model": task.model,
         "reasoning": task.reasoning,
         "workspaceStrategy": workspace_strategy_value(task.workspace_kind),
+        "workspaceAvailable": configured.workspace_available,
     }))
+}
+
+fn parse_workspace_strategy(value: &str) -> Result<crate::domain::types::WorkspaceKind, AppError> {
+    match value {
+        "worktree" => Ok(crate::domain::types::WorkspaceKind::Worktree),
+        "readonly" => Ok(crate::domain::types::WorkspaceKind::Readonly),
+        "direct" => Ok(crate::domain::types::WorkspaceKind::Direct),
+        _ => Err(AppError::new(
+            domain::error::codes::BRIDGE_VALIDATION_FAILED,
+            "工作区策略仅支持 worktree / readonly / direct",
+        )),
+    }
+}
+
+fn default_workspace_kind_for_mode(mode: Option<&str>) -> crate::domain::types::WorkspaceKind {
+    crate::domain::types::WorkspaceKind::default_for_mode(mode)
 }
 
 /// Bridge-facing workspace strategy strings (lowercase, mirror TS
 /// `workspaceStrategy`). `WorkspaceKind` itself serialises with its variant
 /// names, so the bridge maps explicitly.
 fn workspace_strategy_value(kind: crate::domain::types::WorkspaceKind) -> &'static str {
-    match kind {
-        crate::domain::types::WorkspaceKind::Worktree => "worktree",
-        crate::domain::types::WorkspaceKind::Readonly => "readonly",
-        crate::domain::types::WorkspaceKind::Direct => "direct",
-    }
+    kind.as_bridge_str()
 }
 
 /// Mode identifiers are opaque capability strings (agent/plan/ask/code/…).
@@ -1406,14 +1398,19 @@ async fn task_open(
 ) -> DesktopResult {
     use crate::modules::task_runtime::mailbox::map_stored_events_to_bridge_snapshot;
 
-    let task = match repo.get_task(&payload.task_id.0) {
-        Ok(task) => task,
+    let workspace_snapshot = match task_runtime
+        .workspace_snapshot(payload.task_id.clone())
+        .await
+    {
+        Ok(snapshot) => snapshot,
         Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
     };
+    let task = workspace_snapshot.task;
     let status = serde_json::to_value(task.status)
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_else(|| "interrupted".into());
+    let workspace_available = workspace_snapshot.workspace_available;
     let Some(binding) = (match repo.get_binding_by_task(&payload.task_id.0) {
         Ok(binding) => binding,
         Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
@@ -1426,6 +1423,7 @@ async fn task_open(
             "model": task.model,
             "reasoning": task.reasoning,
             "workspaceStrategy": workspace_strategy_value(task.workspace_kind),
+            "workspaceAvailable": workspace_available,
             "cursor": { "lastSeq": 0, "snapshotSeq": 0 },
             "events": [],
             "attempt": task.attempt_count,
@@ -1456,6 +1454,7 @@ async fn task_open(
         "model": task.model,
         "reasoning": task.reasoning,
         "workspaceStrategy": workspace_strategy_value(task.workspace_kind),
+        "workspaceAvailable": workspace_available,
         "cursor": {
             "lastSeq": snapshot.last_seq,
             "snapshotSeq": snapshot.last_seq,

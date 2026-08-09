@@ -130,6 +130,8 @@ export type TaskStatus =
   | "interrupted";
 
 export type WorkspaceKind = "worktree" | "readonly" | "direct";
+/** Persisted task policy used to resolve the backend-owned execution cwd. */
+export type WorkspaceStrategy = WorkspaceKind;
 
 export type WorktreeOwnership = "managed" | "external";
 
@@ -272,7 +274,7 @@ export interface TaskCreatePayload {
   /** Reasoning effort from the selected Grok config model profile. */
   reasoning?: ReasoningEffort;
   /** Workspace strategy: "worktree" | "readonly" | "direct". */
-  workspaceStrategy?: "worktree" | "readonly" | "direct";
+  workspaceStrategy?: WorkspaceStrategy;
 }
 
 export interface TaskOpenPayload {
@@ -584,7 +586,9 @@ export interface TaskOpenResult {
   /** Persisted session mode selection (restored for the conversation controls). */
   mode?: string | null;
   /** Persisted workspace strategy (restored for the conversation controls). */
-  workspaceStrategy?: "worktree" | "readonly" | "direct" | string | null;
+  workspaceStrategy?: WorkspaceStrategy | string | null;
+  /** Backend-verified availability. False never permits a checkout fallback. */
+  workspaceAvailable?: boolean;
   /** Persisted model selection (restored for the conversation controls). */
   model?: string | null;
   /** Persisted reasoning effort selection. */

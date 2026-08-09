@@ -1,15 +1,16 @@
-// GAG-010A / goal: mode ↔ workspace strategy linkage in the conversation.
+// GAG-010B / goal: mode ↔ workspace strategy linkage in the conversation.
 // Drives the real shipped pure mapping, store, header control, and view.
 
 import { createPinia, setActivePinia } from "pinia";
 import { mount, flushPromises } from "@vue/test-utils";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
-import type { ModeInfo } from "../../src/bridge/types";
+import type { ModeInfo, TaskId } from "../../src/bridge/types";
 import ConversationHeader from "../../src/features/conversation/ConversationHeader.vue";
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
 import { useConversationStore } from "../../src/features/conversation/conversation-store";
 import { fixtureSessionSnapshot, FIX_TASK } from "../../src/features/conversation/fixtures";
+import CreateTaskDialog from "../../src/features/task-center/CreateTaskDialog.vue";
 import {
   isWorkspaceStrategy,
   workspaceStrategyForMode,
@@ -69,6 +70,25 @@ describe("conversation workspace strategy linkage", () => {
     wrapper.unmount();
   });
 
+  it("Create Task shares the mapping and permits an explicit override", async () => {
+    const wrapper = mount(CreateTaskDialog, { props: { open: true } });
+    const mode = wrapper.get('[data-testid="create-task-mode"] select');
+    const workspace = wrapper.get('[data-testid="create-task-workspace"] select');
+    expect((workspace.element as HTMLSelectElement).value).toBe("direct");
+    await mode.setValue("agent");
+    expect((workspace.element as HTMLSelectElement).value).toBe("worktree");
+    expect(wrapper.text()).toContain(
+      "隔离 Worktree 尚未创建，本任务不会回落到原工作区。",
+    );
+    await workspace.setValue("readonly");
+    expect((workspace.element as HTMLSelectElement).value).toBe("readonly");
+    await mode.setValue("plan");
+    expect((workspace.element as HTMLSelectElement).value).toBe("worktree");
+    await mode.setValue("ask");
+    expect((workspace.element as HTMLSelectElement).value).toBe("direct");
+    wrapper.unmount();
+  });
+
   it("switching the mode emits the linked strategy and both persist", async () => {
     const configurePayloads: Array<Record<string, string>> = [];
     const bridge = createFakeDesktopBridge({
@@ -89,8 +109,9 @@ describe("conversation workspace strategy linkage", () => {
 
     // ask → direct linkage.
     await store.configureMode("ask");
-    expect(configurePayloads).toEqual([{ mode: "ask" }]);
-    // The store itself does not link (the header emits both); the header does.
+    expect(configurePayloads).toEqual([{ mode: "ask", workspaceStrategy: "direct" }]);
+    expect(store.workspaceStrategy).toBe("direct");
+    // The header emits one atomic mode + strategy intent.
     const header = mount(ConversationHeader, {
       props: {
         title: "t",
@@ -102,8 +123,8 @@ describe("conversation workspace strategy linkage", () => {
     });
     await header.get('[data-testid="conversation-mode-select"] select').setValue("plan");
     const emitted = header.emitted();
-    expect(emitted["update:mode"]?.at(-1)).toEqual(["plan"]);
-    expect(emitted["update:workspaceStrategy"]?.at(-1)).toEqual(["worktree"]);
+    expect(emitted["update:mode"]?.at(-1)).toEqual(["plan", "worktree"]);
+    expect(emitted["update:workspaceStrategy"]).toBeUndefined();
     header.unmount();
   });
 
@@ -148,6 +169,83 @@ describe("conversation workspace strategy linkage", () => {
     expect(bad).toBe(false);
     expect(store.workspaceStrategy).toBe("direct");
     expect(store.sendError).toBe("保存失败");
+  });
+
+  it("does not expose a new stable strategy before backend success", async () => {
+    let finish: (() => void) | undefined;
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type === "session.configure") {
+          return new Promise((resolve) => {
+            finish = () => resolve({
+              success: "true",
+              data: { workspaceStrategy: "readonly", workspaceAvailable: true },
+            });
+          });
+        }
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+    store.openFromSnapshot(
+      fixtureSessionSnapshot({ status: "idle", workspaceStrategy: "direct" }),
+    );
+    const pending = store.configureWorkspaceStrategy("readonly");
+    expect(store.workspaceStrategy).toBe("direct");
+    expect(store.settingsPending).toBe(true);
+    expect(store.composerCapabilities.canSend).toBe(false);
+    expect(store.composerCapabilities.disabledReason).toBe("正在保存会话设置…");
+    finish?.();
+    expect(await pending).toBe(true);
+    expect(store.workspaceStrategy).toBe("readonly");
+    expect(store.settingsPending).toBe(false);
+  });
+
+  it("invalidates a pending settings request when another task opens", async () => {
+    let finish: (() => void) | undefined;
+    const otherTask = "task-other" as TaskId;
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type === "session.configure") {
+          return new Promise((resolve) => {
+            finish = () => resolve({
+              success: "true",
+              data: { workspaceStrategy: "readonly", workspaceAvailable: true },
+            });
+          });
+        }
+        if (command.type === "task.open") {
+          return {
+            success: "true",
+            data: {
+              taskId: otherTask,
+              title: "Other task",
+              status: "idle",
+              workspaceStrategy: "direct",
+              workspaceAvailable: true,
+            },
+          };
+        }
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+    store.openFromSnapshot(
+      fixtureSessionSnapshot({ status: "idle", workspaceStrategy: "direct" }),
+    );
+    const pending = store.configureWorkspaceStrategy("readonly");
+    expect(store.settingsPending).toBe(true);
+
+    await store.openTask(otherTask);
+    expect(store.settingsPending).toBe(false);
+    expect(store.workspaceStrategy).toBe("direct");
+    expect(store.composerCapabilities.canSend).toBe(true);
+
+    finish?.();
+    expect(await pending).toBe(false);
+    expect(store.workspaceStrategy).toBe("direct");
   });
 
   it("restores the persisted strategy when reopening the task", async () => {
@@ -216,20 +314,85 @@ describe("conversation workspace strategy linkage", () => {
       "当前目录可写",
     ]);
 
-    // Switch mode ask → the header links workspaceStrategy to direct.
+    // Switch mode ask → one atomic configure persists mode + direct strategy.
     const modeSelect = wrapper.get('[data-testid="conversation-mode-select"] select');
     await modeSelect.setValue("ask");
     await flushPromises();
-    expect(configureSettings).toEqual([{ mode: "ask" }, { workspaceStrategy: "direct" }]);
+    expect(configureSettings).toEqual([{ mode: "ask", workspaceStrategy: "direct" }]);
 
     // Manual strategy change persists independently.
     await workspaceSelect.setValue("readonly");
     await flushPromises();
     expect(configureSettings).toEqual([
-      { mode: "ask" },
-      { workspaceStrategy: "direct" },
+      { mode: "ask", workspaceStrategy: "direct" },
       { workspaceStrategy: "readonly" },
     ]);
+    expect(wrapper.get('[data-testid="conversation-workspace-notice"]').text()).toContain(
+      "只读策略已启用",
+    );
     wrapper.unmount();
+  });
+
+  it("shows the fail-closed message when the backend reports a missing worktree", async () => {
+    const bridge = createFakeDesktopBridge();
+    const wrapper = mount(ConversationView, {
+      props: {
+        bridge,
+        taskId: FIX_TASK,
+        snapshot: fixtureSessionSnapshot({
+          status: "idle",
+          cursor: 0,
+          events: [],
+          mode: "agent",
+          workspaceStrategy: "worktree",
+          workspaceAvailable: false,
+        }),
+      },
+    });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="conversation-workspace-notice"]').text()).toBe(
+      "隔离 Worktree 尚未创建，本任务不会回落到原工作区。",
+    );
+    wrapper.unmount();
+  });
+
+  it("leaves loading and restores the draft when send is rejected for a missing worktree", async () => {
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type === "turn.send") {
+          return {
+            success: "false",
+            error: {
+              code: "WORKTREE_NOT_READY",
+              message: "managed worktree is unavailable",
+              retryable: true,
+              detailsRedacted: true,
+              correlationId: "gag-010b-worktree-not-ready" as never,
+            },
+          };
+        }
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+    store.openFromSnapshot(
+      fixtureSessionSnapshot({
+        status: "idle",
+        cursor: 0,
+        events: [],
+        mode: "agent",
+        workspaceStrategy: "worktree",
+        workspaceAvailable: false,
+      }),
+    );
+    store.setDraft("不要丢失这段草稿");
+
+    expect(await store.sendMessage()).toBe(false);
+    expect(store.sendPending).toBe(false);
+    expect(store.draft).toBe("不要丢失这段草稿");
+    expect(store.sendError).toBe(
+      "隔离 Worktree 尚未创建，本任务不会回落到原工作区。",
+    );
   });
 });

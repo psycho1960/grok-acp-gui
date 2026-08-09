@@ -31,7 +31,7 @@ const emit = defineEmits<{
   cancel: [];
   refresh: [];
   resume: [];
-  "update:mode": [mode: string | null];
+  "update:mode": [mode: string | null, strategy: WorkspaceStrategy | null];
   "update:workspaceStrategy": [strategy: WorkspaceStrategy];
   "update:model": [model: string | null];
   "update:reasoning": [reasoning: ReasoningEffort];
@@ -114,10 +114,8 @@ const reasoningOptions = computed(() => [
 
 function onModeChange(value: string): void {
   const mode = value === "" ? null : value;
-  emit("update:mode", mode);
-  // 模式联动工作区策略：ask→direct、agent/plan→worktree。
-  const linked = workspaceStrategyForMode(mode);
-  if (linked) emit("update:workspaceStrategy", linked);
+  // One event becomes one atomic session.configure call in the store.
+  emit("update:mode", mode, workspaceStrategyForMode(mode));
 }
 
 function onWorkspaceStrategyChange(value: string): void {

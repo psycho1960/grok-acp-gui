@@ -36,6 +36,7 @@ Luna/Flash 仅可补充固定 Git fixture、文案和纯显示层测试。Worktr
 
 ## 5. 开始条件
 
+- GAG-010B 已完成模式与持久化工作区策略联动及缺失 Worktree 的 fail-closed 前置约束。
 - Project/Task/Worktree schema 和 Bridge DTO 已稳定。
 - `ExecutionGuard` 可对 Git/FS 操作授权。
 - 测试仓库 fixtures 包含普通、dirty、detached、路径含空格/中文、嵌套 Git 和重解析点情形。

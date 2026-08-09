@@ -27,7 +27,10 @@ fn fake_agent_path() -> PathBuf {
 
 async fn make_repo_with_project(project_id: &str) -> Arc<SqliteRepository> {
     let repo = Arc::new(SqliteRepository::open_in_memory().expect("in-memory repository"));
-    let cwd = std::env::current_dir().expect("workspace");
+    let cwd = grok_acp_gui_lib::adapters::filesystem::canonicalize_existing_directory(
+        &std::env::current_dir().expect("workspace"),
+    )
+    .expect("canonical workspace");
     repo.create_project(&Project {
         id: ProjectId::new(project_id),
         path: cwd.to_string_lossy().into_owned(),
@@ -349,7 +352,8 @@ async fn session_configure_mode_persists_and_next_turn_set_mode_is_observable() 
     })
     .await;
 
-    // Switch the task to Plan mode.
+    // This GAG-010A test isolates ACP mode propagation. GAG-010B separately
+    // verifies Plan's default worktree mapping, so explicitly retain direct.
     let configured = execute_impl(
         repo.as_ref(),
         runtime.as_ref(),
@@ -358,7 +362,7 @@ async fn session_configure_mode_persists_and_next_turn_set_mode_is_observable() 
             "type": "session.configure",
             "payload": {
                 "taskId": task_id,
-                "settings": { "mode": "plan" }
+                "settings": { "mode": "plan", "workspaceStrategy": "direct" }
             }
         }),
     )
@@ -606,6 +610,13 @@ async fn session_configure_rejects_invalid_workspace_strategy_values() {
         matches!(non_string, DesktopResult::Err { .. }),
         "non-string strategy accepted"
     );
+
+    // Explicit null is also outside the closed three-value enum.
+    let null_strategy = configure(serde_json::json!({ "workspaceStrategy": null })).await;
+    match null_strategy {
+        DesktopResult::Err { error } => assert_eq!(error.code, "BRIDGE_VALIDATION_FAILED"),
+        DesktopResult::Ok { .. } => panic!("null strategy accepted"),
+    }
 
     // Nothing changed the persisted strategy (create_task used direct).
     let task = repo.get_task(&task_id).expect("task query");
