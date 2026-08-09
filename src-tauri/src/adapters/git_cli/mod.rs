@@ -48,6 +48,12 @@ pub struct GitWorktree {
     pub prunable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCommandOutput {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GitCli {
     executable: PathBuf,
@@ -119,6 +125,22 @@ impl GitCli {
 
     pub fn capture(&self, cwd: &Path, args: &[&str]) -> Result<Vec<u8>, GitError> {
         self.run(cwd, args).map(|output| output.stdout)
+    }
+
+    /// Run an argv-only Git command while explicitly allowing non-zero statuses.
+    /// Used for operations such as squash merges where status 1 means a
+    /// structured conflict that the caller must isolate and report.
+    pub fn capture_allow_status(
+        &self,
+        cwd: &Path,
+        args: &[&str],
+        allowed: &[i32],
+    ) -> Result<GitCommandOutput, GitError> {
+        self.run_allow_status(cwd, args, allowed)
+            .map(|output| GitCommandOutput {
+                status: output.status,
+                stdout: output.stdout,
+            })
     }
 
     pub fn is_ancestor(

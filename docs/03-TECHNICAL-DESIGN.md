@@ -148,7 +148,7 @@ Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该
 - `artifact.import`、`artifact.save`
 - `workspace.inspect`、`worktree.adopt`
 - `review.diff`、`review.checkpoint`
-- `integration.preflight`、`integration.execute`
+- `integration.preflight`、`integration.execute`、`integration.status`、`integration.abort`、`integration.publish`、`integration.cleanup`
 - `worktree.cleanup`、`recovery.restore`、`recovery.delete`
 
 事件联合类型：`runtime.updated`、`task.snapshot`、`task.state`、`message.delta`、`activity.updated`、`permission.requested`、`plan.updated`、`changes.updated`、`artifact.available`、`resource.warning`、`diagnostic.notice`。
@@ -239,6 +239,8 @@ Migration `0003_permissions_and_plans.sql` 只保存 hash、脱敏摘要和决�
 
 Migration `0004_worktree_lifecycle.sql` 只追加 Worktree 生命周期列：repo identity、common git dir、受管相对路径、创建/最近校验时间、恢复包关联、磁盘占用、locked 与 merged。既有 Migration 不修改；旧记录使用安全默认值并在破坏性操作前通过 Git 与文件系统重新对账。
 
+Migration `0006_squash_integrations.sql` 保存冻结的 source/target SHA、Checkpoint range、来源 dirty 标志与结构化 status digest、提交说明、验证命令摘要、审批摘要、临时 Worktree 证明、冲突/验证结果、result commit、恢复包和清理状态；`integration_audit_events` 以 append-only 事件保留每次状态变化。`0007_squash_integration_recovery.sql` 在不改写既有 Migration 的前提下追加稳定 repo identity：新 attempt 通过 SQLite partial unique index 持有以 common git dir 派生的 repo 级 lease；v6 遗留 active attempt 不进入索引，以允许含重复记录的数据库升级，但在全部遗留 attempt 清理完成前 fail-closed 阻止任何新集成，避免不同 Worktree 路径绕过身份锁。Renderer 只回传本次 preflight 返回的 attempt ID 与 approval digest，后端仍从持久化计划重新派生全部 Git argv。预检返回由冻结 target/source SHA 派生的预计文件清单，该清单序列化后也纳入 approval digest。未选择变更允许保留在来源 Worktree，但其 status digest 纳入审批；start/publish 前发生变化即 fail closed。merge/rebase/cherry-pick/revert/bisect 等进行中 Git 操作直接拒绝预检。
+
 ## 10. Worktree 与集成算法
 
 ### 创建
@@ -255,18 +257,24 @@ GAG-011 的生产 Git Adapter 固定使用 `git` 可执行文件加 argv 数组�
 
 在受管 Worktree 中仅 `git add -- <selected paths>`，确认 staged set 与选择一致，再提交。未选变化保留。Git identity 缺失时不改全局配置，只返回指引。
 
+GAG-012 将 Review Interface 固定为 `get_worktree_status`、`get_diff`、`validate_selection`、`create_checkpoint` 与 `list_checkpoints`。Renderer 通过 `review.status`、`review.diff`、`review.validate`、`review.checkpoint`、`review.checkpoints` 使用 `FileChange`、`DiffDocument`、`CheckpointSelection`、`CheckpointReceipt` DTO；不得接触 Git argv 或绝对 Worktree 路径。选择项绑定相对路径和内容/模式 fingerprint，暂存状态本身不改变 fingerprint。
+
+Checkpoint 在任务 Worktree 锁内重新读取 HEAD/status，拒绝预存 index，验证 fingerprint 后使用 `git add -- <exact paths>`，再以 `git diff --cached --name-only -z` 校验 index 与选择 manifest 完全一致。commit 前再次校验 HEAD 与文件版本；失败不执行 reset/clean，若 index 已产生则以结构化错误明确报告保留状态。成功后将 commit/tree/head-before、attempt、selection manifest/hash 追加到 `0005_checkpoints.sql`，Git commit 仍是内容事实来源。
+
 ### Squash 集成
 
 1. 取得仓库级互斥锁。
 2. 验证目标工作区干净、目标分支正确、target HEAD 与记录一致。
-3. 创建临时 detached integration Worktree at target HEAD。
+3. 创建唯一临时 integration Worktree 与应用拥有的临时分支 at target HEAD；目标分支若仍被任一 linked Worktree 检出则 fail closed，防止 CAS 后使用户工作区隐性变脏。
 4. 在临时 Worktree `git merge --squash <taskBranch>`；冲突只发生在临时目录。
 5. 无冲突则创建集成提交，其 parent 为 target HEAD。
 6. 再次验证目标条件与 HEAD。
-7. 在目标工作区 `git merge --ff-only <integrationCommit>`。
+7. 使用 `git update-ref <targetRef> <integrationCommit> <expectedTargetSha>` 原子发布；expected old SHA 不匹配时拒绝。
 8. 清理临时 Worktree，释放锁并返回结构化结果。
 
 任何失败都不使用 `reset --hard` 修补用户工作区。
+
+GAG-013 将 Integration Interface 固定为 `prepare_squash`、`start_squash`、`get_integration_status`、`get_active_integration`、`abort_integration`、`publish_integration`、`cleanup_integration`，并提供只对已验证临时 Worktree 生效的 `open_integration_worktree` 辅助操作。preflight 仅接受 task ID 与 Conventional Commit 信息；source ref、target ref、Checkpoint range 和 repo identity 均由持久化 Task/Worktree/Checkpoint 记录与 Git 结构化输出派生。页面重启后按 task ID 发现未清理 attempt 并恢复操作入口。临时路径和分支必须先持久化再执行 `worktree add`；停在 `validating` 时通过受管临时 Worktree 的 HEAD/parent 恢复 commit receipt，停在 `publishing` 时以 target ref 是否等于 result SHA 恢复 publish receipt；清理按 recovery verified → Worktree removed → branch CAS-deleted → completed 分步持久化并可幂等重试。冲突只保留在临时 Worktree；非成功清理前必须生成并验证临时 integration branch bundle 与 manifest。当前没有项目级验证命令配置时计划明确显示空列表且摘要仍绑定审批，后续新增命令只能通过后端固定配置扩展，不能把 Renderer 变成任意进程接口。
 
 ## 11. Recovery 与清理
 

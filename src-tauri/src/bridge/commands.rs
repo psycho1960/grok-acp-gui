@@ -228,8 +228,15 @@ pub struct WorktreePrepareAdoptionPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewDiffPayload {
     pub task_id: super::types::TaskId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub paths: Option<Vec<String>>,
+    pub path: String,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSelectionPayload {
+    pub task_id: super::types::TaskId,
+    pub selection: Vec<crate::modules::workspace::CheckpointSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,19 +244,34 @@ pub struct ReviewDiffPayload {
 pub struct ReviewCheckpointPayload {
     pub task_id: super::types::TaskId,
     pub message: String,
-    pub paths: Vec<String>,
+    pub selection: Vec<crate::modules::workspace::CheckpointSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationPreflightPayload {
     pub task_id: super::types::TaskId,
+    pub commit_message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationExecutePayload {
-    pub task_id: super::types::TaskId,
+    pub attempt_id: String,
+    pub approval_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationAttemptPayload {
+    pub attempt_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationPublishPayload {
+    pub attempt_id: String,
+    pub approval_digest: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,13 +364,31 @@ pub enum DesktopCommand {
 
     #[serde(rename = "review.diff")]
     ReviewDiff(ReviewDiffPayload),
+    #[serde(rename = "review.status")]
+    ReviewStatus(WorktreeTaskPayload),
+    #[serde(rename = "review.validate")]
+    ReviewValidate(ReviewSelectionPayload),
     #[serde(rename = "review.checkpoint")]
     ReviewCheckpoint(ReviewCheckpointPayload),
+    #[serde(rename = "review.checkpoints")]
+    ReviewCheckpoints(WorktreeTaskPayload),
 
     #[serde(rename = "integration.preflight")]
     IntegrationPreflight(IntegrationPreflightPayload),
     #[serde(rename = "integration.execute")]
     IntegrationExecute(IntegrationExecutePayload),
+    #[serde(rename = "integration.status")]
+    IntegrationStatus(IntegrationAttemptPayload),
+    #[serde(rename = "integration.active")]
+    IntegrationActive(WorktreeTaskPayload),
+    #[serde(rename = "integration.abort")]
+    IntegrationAbort(IntegrationAttemptPayload),
+    #[serde(rename = "integration.publish")]
+    IntegrationPublish(IntegrationPublishPayload),
+    #[serde(rename = "integration.cleanup")]
+    IntegrationCleanup(IntegrationAttemptPayload),
+    #[serde(rename = "integration.openWorktree")]
+    IntegrationOpenWorktree(IntegrationAttemptPayload),
 
     #[serde(rename = "worktree.cleanup")]
     WorktreeCleanup(WorktreeCleanupPayload),
@@ -393,10 +433,19 @@ pub fn is_known_command(cmd_type: &str) -> bool {
             | "worktree.prepareRemoval"
             | "worktree.remove"
             | "worktree.adopt"
+            | "review.status"
             | "review.diff"
+            | "review.validate"
             | "review.checkpoint"
+            | "review.checkpoints"
             | "integration.preflight"
             | "integration.execute"
+            | "integration.status"
+            | "integration.active"
+            | "integration.abort"
+            | "integration.publish"
+            | "integration.cleanup"
+            | "integration.openWorktree"
             | "worktree.cleanup"
             | "recovery.restore"
             | "recovery.delete"
@@ -628,27 +677,50 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
 
         DesktopCommand::ReviewDiff(p) => {
             validate_id_non_empty(&p.task_id.0)?;
+            validate_non_empty_path(&p.path)?;
+            validate_id_non_empty(&p.fingerprint)?;
             Ok(())
+        }
+
+        DesktopCommand::ReviewStatus(p)
+        | DesktopCommand::ReviewCheckpoints(p)
+        | DesktopCommand::IntegrationActive(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::ReviewValidate(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_review_selection(&p.selection)
         }
 
         DesktopCommand::ReviewCheckpoint(p) => {
             validate_id_non_empty(&p.task_id.0)?;
             validate_text_len(&p.message, MAX_MESSAGE_LENGTH, "message")?;
-            if p.paths.is_empty() {
-                return Err(validation_err(
-                    "review.checkpoint requires at least one path",
-                ));
-            }
-            Ok(())
+            validate_review_selection(&p.selection)
         }
 
         DesktopCommand::IntegrationPreflight(p) => {
             validate_id_non_empty(&p.task_id.0)?;
+            validate_text_len(&p.commit_message, MAX_MESSAGE_LENGTH, "commitMessage")?;
             Ok(())
         }
 
         DesktopCommand::IntegrationExecute(p) => {
-            validate_id_non_empty(&p.task_id.0)?;
+            validate_id_non_empty(&p.attempt_id)?;
+            validate_id_non_empty(&p.approval_digest)?;
+            Ok(())
+        }
+        DesktopCommand::IntegrationStatus(p)
+        | DesktopCommand::IntegrationAbort(p)
+        | DesktopCommand::IntegrationCleanup(p)
+        | DesktopCommand::IntegrationOpenWorktree(p) => {
+            validate_id_non_empty(&p.attempt_id)?;
+            Ok(())
+        }
+        DesktopCommand::IntegrationPublish(p) => {
+            validate_id_non_empty(&p.attempt_id)?;
+            validate_id_non_empty(&p.approval_digest)?;
             Ok(())
         }
 
@@ -667,6 +739,21 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             Ok(())
         }
     }
+}
+
+fn validate_review_selection(
+    selection: &[crate::modules::workspace::CheckpointSelection],
+) -> Result<(), AppError> {
+    if selection.is_empty() || selection.len() > 10_000 {
+        return Err(validation_err(
+            "review selection must contain 1 to 10000 files",
+        ));
+    }
+    for item in selection {
+        validate_non_empty_path(&item.path)?;
+        validate_id_non_empty(&item.fingerprint)?;
+    }
+    Ok(())
 }
 
 fn validation_err(msg: &str) -> AppError {

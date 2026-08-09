@@ -39,6 +39,7 @@ macro_rules! id_newtype {
 id_newtype!(WorktreeId);
 id_newtype!(AttachmentId);
 id_newtype!(RecoveryId);
+id_newtype!(IntegrationId);
 
 // ---------------------------------------------------------------------------
 // Enums
@@ -304,6 +305,122 @@ pub struct WorktreeRecord {
     pub locked: bool,
     #[serde(default)]
     pub merged: bool,
+}
+
+/// Append-only audit record for a task checkpoint. The commit itself is the
+/// content authority; this row provides task/attempt lookup and manifest proof.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointRecord {
+    pub id: String,
+    pub task_id: TaskId,
+    pub attempt_number: u32,
+    pub commit_sha: String,
+    pub tree_sha: String,
+    pub head_before: String,
+    pub selection_manifest: String,
+    pub selection_hash: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+/// Durable state for one isolated squash integration attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationState {
+    Draft,
+    Preflight,
+    Staging,
+    Conflicted,
+    Validating,
+    ReadyToPublish,
+    Publishing,
+    Completed,
+    PreflightFailed,
+    ValidationFailed,
+    PublishRejected,
+    CleanupRequired,
+    Aborted,
+}
+
+impl IntegrationState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Preflight => "preflight",
+            Self::Staging => "staging",
+            Self::Conflicted => "conflicted",
+            Self::Validating => "validating",
+            Self::ReadyToPublish => "ready_to_publish",
+            Self::Publishing => "publishing",
+            Self::Completed => "completed",
+            Self::PreflightFailed => "preflight_failed",
+            Self::ValidationFailed => "validation_failed",
+            Self::PublishRejected => "publish_rejected",
+            Self::CleanupRequired => "cleanup_required",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
+impl std::str::FromStr for IntegrationState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(match value {
+            "draft" => Self::Draft,
+            "preflight" => Self::Preflight,
+            "staging" => Self::Staging,
+            "conflicted" => Self::Conflicted,
+            "validating" => Self::Validating,
+            "ready_to_publish" => Self::ReadyToPublish,
+            "publishing" => Self::Publishing,
+            "completed" => Self::Completed,
+            "preflight_failed" => Self::PreflightFailed,
+            "validation_failed" => Self::ValidationFailed,
+            "publish_rejected" => Self::PublishRejected,
+            "cleanup_required" => Self::CleanupRequired,
+            "aborted" => Self::Aborted,
+            other => return Err(format!("unknown integration state: {other}")),
+        })
+    }
+}
+
+impl PartialEq<&str> for IntegrationState {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntegrationAttempt {
+    pub id: IntegrationId,
+    pub task_id: TaskId,
+    pub repo_root: String,
+    pub repo_identity: String,
+    pub source_ref: String,
+    pub source_tip_sha: String,
+    pub source_range: String,
+    pub source_dirty: bool,
+    pub source_worktree_digest: String,
+    pub target_ref: String,
+    pub expected_target_sha: String,
+    pub commit_message: String,
+    pub validation_commands_json: String,
+    pub validation_digest: String,
+    pub approval_digest: String,
+    pub state: IntegrationState,
+    pub temporary_worktree_id: Option<String>,
+    pub temporary_worktree_path: Option<String>,
+    pub temporary_branch: Option<String>,
+    pub conflict_summary_json: Option<String>,
+    pub validation_result_json: Option<String>,
+    pub result_commit_sha: Option<String>,
+    pub recovery_bundle_path: Option<String>,
+    pub cleanup_status: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Metadata record for an imported artifact (image, file).

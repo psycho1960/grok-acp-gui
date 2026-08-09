@@ -444,6 +444,23 @@ pub fn reveal_saved_artifact(
     Ok(())
 }
 
+/// Opens a verified managed directory in Explorer without invoking a shell.
+pub fn reveal_managed_directory(path: &Path, managed_root: &Path) -> Result<(), &'static str> {
+    let root = managed_root
+        .canonicalize()
+        .map_err(|_| "受管 Worktree 根目录不可用")?;
+    let target = path.canonicalize().map_err(|_| "临时 Worktree 已不可用")?;
+    let metadata = std::fs::symlink_metadata(&target).map_err(|_| "临时 Worktree 已不可用")?;
+    if !metadata.is_dir() || is_link_or_reparse(&metadata) || !target.starts_with(&root) {
+        return Err("临时 Worktree 未通过受管目录验证");
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(&target)
+        .spawn()
+        .map_err(|_| "无法在资源管理器中打开临时 Worktree")?;
+    Ok(())
+}
+
 fn validate_managed_source(
     source_path: &Path,
     managed_root: &Path,

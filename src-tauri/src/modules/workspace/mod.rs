@@ -1,7 +1,15 @@
 //! MOD-WORKSPACE public interface for managed Git worktree lifecycle.
 
+mod integration;
+mod review;
+pub use integration::{IntegrationPlan, PrepareSquash};
+pub use review::{
+    CheckpointReceipt, CheckpointSelection, DiffDocument, FileChange, ReviewSnapshot,
+    SelectionValidation,
+};
+
 use crate::adapters::filesystem::{
-    canonicalize_existing_directory, validate_managed_worktree_target,
+    canonicalize_existing_directory, reveal_managed_directory, validate_managed_worktree_target,
 };
 use crate::adapters::git_cli::{GitCli, RepositoryInspection};
 use crate::domain::types::{RecoveryId, RecoveryItem, RecoveryState};
@@ -111,6 +119,56 @@ pub trait WorkspaceService: Send + Sync {
     ) -> Result<WorktreeRecord, WorkspaceError>;
     fn inspect_worktree(&self, task_id: &str) -> Result<WorktreeRecord, WorkspaceError>;
     fn reconcile_registry(&self) -> Result<Vec<WorktreeRecord>, WorkspaceError>;
+    fn get_worktree_status(&self, task_id: &str) -> Result<ReviewSnapshot, WorkspaceError>;
+    fn get_diff(
+        &self,
+        task_id: &str,
+        path: &str,
+        fingerprint: &str,
+    ) -> Result<DiffDocument, WorkspaceError>;
+    fn validate_selection(
+        &self,
+        task_id: &str,
+        selection: &[CheckpointSelection],
+    ) -> Result<SelectionValidation, WorkspaceError>;
+    fn create_checkpoint(
+        &self,
+        task_id: &str,
+        message: &str,
+        selection: &[CheckpointSelection],
+    ) -> Result<CheckpointReceipt, WorkspaceError>;
+    fn list_checkpoints(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<crate::domain::types::CheckpointRecord>, WorkspaceError>;
+    fn prepare_squash(&self, request: PrepareSquash) -> Result<IntegrationPlan, WorkspaceError>;
+    fn start_squash(
+        &self,
+        attempt_id: &str,
+        approval_digest: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn get_integration_status(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn get_active_integration(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<crate::domain::types::IntegrationAttempt>, WorkspaceError>;
+    fn abort_integration(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn publish_integration(
+        &self,
+        attempt_id: &str,
+        approval_digest: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn cleanup_integration(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
+    fn open_integration_worktree(&self, attempt_id: &str) -> Result<(), WorkspaceError>;
 }
 
 pub struct ManagedWorkspaceService {
@@ -175,8 +233,85 @@ impl ManagedWorkspaceService {
 }
 
 impl WorkspaceService for ManagedWorkspaceService {
+    fn prepare_squash(&self, request: PrepareSquash) -> Result<IntegrationPlan, WorkspaceError> {
+        self.prepare_integration(request)
+    }
+    fn start_squash(
+        &self,
+        attempt_id: &str,
+        approval_digest: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.start_integration(attempt_id, approval_digest)
+    }
+    fn get_integration_status(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.integration_status(attempt_id)
+    }
+    fn get_active_integration(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<crate::domain::types::IntegrationAttempt>, WorkspaceError> {
+        self.active_integration_for_task(task_id)
+    }
+    fn abort_integration(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.abort_integration_attempt(attempt_id)
+    }
+    fn publish_integration(
+        &self,
+        attempt_id: &str,
+        approval_digest: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.publish_integration_attempt(attempt_id, approval_digest)
+    }
+    fn cleanup_integration(
+        &self,
+        attempt_id: &str,
+    ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError> {
+        self.cleanup_integration_attempt(attempt_id)
+    }
+    fn open_integration_worktree(&self, attempt_id: &str) -> Result<(), WorkspaceError> {
+        self.open_integration_worktree_attempt(attempt_id)
+    }
     fn inspect_repository(&self, path: &Path) -> Result<RepositoryInspection, WorkspaceError> {
         self.git.inspect_repository(path).map_err(map_git_error)
+    }
+
+    fn get_worktree_status(&self, task_id: &str) -> Result<ReviewSnapshot, WorkspaceError> {
+        self.review_status(task_id)
+    }
+    fn get_diff(
+        &self,
+        task_id: &str,
+        path: &str,
+        fingerprint: &str,
+    ) -> Result<DiffDocument, WorkspaceError> {
+        self.review_diff(task_id, path, fingerprint)
+    }
+    fn validate_selection(
+        &self,
+        task_id: &str,
+        selection: &[CheckpointSelection],
+    ) -> Result<SelectionValidation, WorkspaceError> {
+        self.validate_review_selection(task_id, selection)
+    }
+    fn create_checkpoint(
+        &self,
+        task_id: &str,
+        message: &str,
+        selection: &[CheckpointSelection],
+    ) -> Result<CheckpointReceipt, WorkspaceError> {
+        self.create_review_checkpoint(task_id, message, selection)
+    }
+    fn list_checkpoints(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<crate::domain::types::CheckpointRecord>, WorkspaceError> {
+        self.review_checkpoints(task_id)
     }
 
     fn create_managed_worktree(

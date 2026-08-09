@@ -21,6 +21,7 @@ import {
 import { createStatefulTaskCenterBridge } from "../features/task-center/stateful-fake-bridge";
 import { useTaskCenterStore } from "../features/task-center/task-center-store";
 import WorktreePanel from "../features/worktrees/WorktreePanel.vue";
+import ReviewView from "../features/review/ReviewView.vue";
 
 defineProps<{ dataVersion?: string }>();
 
@@ -28,8 +29,14 @@ const inspectorOpen = ref(true);
 const routeHash = ref(typeof window !== "undefined" ? window.location.hash : "");
 const conversationRoute = computed(() => parseConversationHash(routeHash.value));
 const showConversation = computed(() => conversationRoute.value.active);
+const reviewTaskId = computed(() => {
+  const match = routeHash.value.match(/^#review\/([^/?#]+)$/);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]); } catch { return undefined; }
+});
+const showReview = computed(() => Boolean(reviewTaskId.value));
 const showTaskCenter = computed(() => {
-  if (showConversation.value) return false;
+  if (showConversation.value || showReview.value) return false;
   const route = parseTaskCenterHash(routeHash.value);
   // Default shell main area shows Task Center when hash is task-center or empty after bootstrap.
   return (
@@ -81,6 +88,11 @@ function goConversation(taskId?: string): void {
   if (target) applyConversationHash(target);
 }
 
+function goReview(taskId?: string): void {
+  const target = taskId ?? taskStore.selectedTaskId;
+  if (target) window.location.hash = `#review/${encodeURIComponent(target)}`;
+}
+
 const left = computed(() =>
   h(
     "nav",
@@ -118,11 +130,25 @@ const left = computed(() =>
         },
         "对话时间线",
       ),
+      h(
+        "button",
+        {
+          class: "nav-item",
+          type: "button",
+          disabled: !taskStore.selectedTaskId,
+          "data-testid": "nav-review",
+          onClick: () => goReview(),
+        },
+        "变更审查",
+      ),
     ],
   ),
 );
 
 const main = computed(() => {
+  if (showReview.value && reviewTaskId.value) {
+    return h(ReviewView, { bridge: bridge.value, taskId: reviewTaskId.value as TaskId });
+  }
   if (showConversation.value) {
     const routeTaskId = conversationRoute.value.taskId;
     if (routeTaskId) {
@@ -163,10 +189,11 @@ const main = computed(() => {
 });
 
 const inspector = computed(() => {
-  if (taskStore.selectedTaskId) {
+  const taskId = reviewTaskId.value ?? taskStore.selectedTaskId;
+  if (taskId) {
     return h(WorktreePanel, {
       bridge: bridge.value,
-      taskId: taskStore.selectedTaskId,
+      taskId: taskId as TaskId,
     });
   }
   return h("section", { class: "inspector-content" }, [

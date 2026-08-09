@@ -5,9 +5,9 @@
 
 use crate::domain::error::DomainError;
 use crate::domain::types::{
-    AttachmentRecord, BootstrapSnapshot, ConcurrencyLimits, Project, RecoveryCandidate,
-    RecoveryDecision, RecoveryItem, SessionBinding, SessionSnapshot, Settings, StoredEvent, Task,
-    TaskSummary, WorkspaceKind, WorktreeRecord,
+    AttachmentRecord, BootstrapSnapshot, CheckpointRecord, ConcurrencyLimits, IntegrationAttempt,
+    Project, RecoveryCandidate, RecoveryDecision, RecoveryItem, SessionBinding, SessionSnapshot,
+    Settings, StoredEvent, Task, TaskSummary, WorkspaceKind, WorktreeRecord,
 };
 use crate::modules::task_runtime::permission::{
     ApprovalEvidence, ExecutionContext, PermissionDecision, PermissionRecord,
@@ -144,6 +144,34 @@ pub trait Repository: Send + Sync {
     /// Atomically moves one managed worktree to closing only when its task is
     /// not in a state that implies a live process.
     fn begin_worktree_removal(&self, task_id: &str, worktree_id: &str) -> RepoResult<()>;
+
+    // ------------------------------------------------------------------
+    // GAG-012 Checkpoints (append-only audit index)
+    // ------------------------------------------------------------------
+
+    fn create_checkpoint(&self, checkpoint: &CheckpointRecord) -> RepoResult<()>;
+    fn list_checkpoints_by_task(&self, task_id: &str) -> RepoResult<Vec<CheckpointRecord>>;
+
+    // ------------------------------------------------------------------
+    // GAG-013 Squash integration attempts
+    // ------------------------------------------------------------------
+
+    fn create_integration_attempt(&self, attempt: &IntegrationAttempt) -> RepoResult<()>;
+    fn get_integration_attempt(&self, id: &str) -> RepoResult<IntegrationAttempt>;
+    fn get_active_integration_by_repo(
+        &self,
+        repo_identity: &str,
+        repo_root: &str,
+    ) -> RepoResult<Option<IntegrationAttempt>>;
+    fn get_active_integration_by_task(
+        &self,
+        task_id: &str,
+    ) -> RepoResult<Option<IntegrationAttempt>>;
+    fn update_integration_attempt(
+        &self,
+        attempt: &IntegrationAttempt,
+        detail_json: &str,
+    ) -> RepoResult<()>;
 
     // ------------------------------------------------------------------
     // Attachments

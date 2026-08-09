@@ -299,10 +299,19 @@ export type DesktopCommand =
   | { type: "worktree.prepareAdoption"; payload: WorktreePrepareAdoptionPayload }
   | { type: "worktree.remove"; payload: WorktreeRemovePayload }
   | { type: "worktree.adopt"; payload: WorktreeAdoptPayload }
+  | { type: "review.status"; payload: WorktreeTaskPayload }
   | { type: "review.diff"; payload: ReviewDiffPayload }
+  | { type: "review.validate"; payload: ReviewSelectionPayload }
   | { type: "review.checkpoint"; payload: ReviewCheckpointPayload }
+  | { type: "review.checkpoints"; payload: WorktreeTaskPayload }
   | { type: "integration.preflight"; payload: IntegrationPreflightPayload }
   | { type: "integration.execute"; payload: IntegrationExecutePayload }
+  | { type: "integration.status"; payload: IntegrationAttemptPayload }
+  | { type: "integration.active"; payload: WorktreeTaskPayload }
+  | { type: "integration.abort"; payload: IntegrationAttemptPayload }
+  | { type: "integration.publish"; payload: IntegrationPublishPayload }
+  | { type: "integration.cleanup"; payload: IntegrationAttemptPayload }
+  | { type: "integration.openWorktree"; payload: IntegrationAttemptPayload }
   | { type: "worktree.cleanup"; payload: WorktreeCleanupPayload }
   | { type: "recovery.restore"; payload: RecoveryRestorePayload }
   | { type: "recovery.delete"; payload: RecoveryDeletePayload };
@@ -488,22 +497,38 @@ export interface AdoptionPreparation {
 
 export interface ReviewDiffPayload {
   taskId: TaskId;
-  paths?: string[];
+  path: string;
+  fingerprint: string;
+}
+
+export interface CheckpointSelection {
+  path: string;
+  fingerprint: string;
+}
+
+export interface ReviewSelectionPayload {
+  taskId: TaskId;
+  selection: CheckpointSelection[];
 }
 
 export interface ReviewCheckpointPayload {
   taskId: TaskId;
   message: string;
-  paths: string[];
+  selection: CheckpointSelection[];
 }
 
 export interface IntegrationPreflightPayload {
   taskId: TaskId;
+  commitMessage: string;
 }
 
 export interface IntegrationExecutePayload {
-  taskId: TaskId;
+  attemptId: string;
+  approvalDigest: string;
 }
+
+export interface IntegrationAttemptPayload { attemptId: string; }
+export interface IntegrationPublishPayload { attemptId: string; approvalDigest: string; }
 
 export interface WorktreeCleanupPayload {
   taskId: TaskId;
@@ -752,14 +777,89 @@ export interface WorkspaceInspectResult {
   dirty: boolean;
 }
 
-export interface ReviewDiffResult {
-  files: FileDiffSummary[];
+export interface FileChange {
+  path: string;
+  oldPath?: string;
+  kind: "added" | "modified" | "deleted" | "renamed" | "mode_changed" | "untracked" | "conflicted";
+  binary: boolean;
+  size: number;
+  mode: "file" | "symlink" | "submodule" | "deleted" | string;
+  fingerprint: string;
+  staged: boolean;
+  conflicted: boolean;
+  submodule: boolean;
 }
 
-export interface FileDiffSummary {
-  path: string;
-  status: "added" | "modified" | "deleted" | "renamed";
+export interface ReviewSnapshot {
+  head: string;
+  version: string;
+  files: FileChange[];
 }
+
+export interface DiffDocument {
+  path: string;
+  oldPath?: string;
+  binary: boolean;
+  oversized: boolean;
+  truncated: boolean;
+  text?: string;
+  bytes: number;
+}
+
+export interface SelectionValidation {
+  valid: boolean;
+  stalePaths: string[];
+  missingPaths: string[];
+}
+
+export interface CheckpointReceipt {
+  id: string;
+  taskId: TaskId;
+  attemptNumber: number;
+  commitSha: string;
+  treeSha: string;
+  headBefore: string;
+  selectionManifest: CheckpointSelection[];
+  selectionHash: string;
+  message: string;
+  createdAt: string;
+  remainingFiles: FileChange[];
+}
+
+export interface CheckpointRecord {
+  id: string;
+  taskId: TaskId;
+  attemptNumber: number;
+  commitSha: string;
+  treeSha: string;
+  headBefore: string;
+  selectionManifest: string;
+  selectionHash: string;
+  message: string;
+  createdAt: string;
+}
+
+export interface IntegrationPlan {
+  attemptId: string; taskId: TaskId; sourceRef: string; sourceTipSha: string; sourceRange: string[];
+  sourceDirty: boolean; sourceWorktreeDigest: string;
+  expectedFiles: string[];
+  targetRef: string; expectedTargetSha: string; commitMessage: string; validationCommands: string[][];
+  validationDigest: string; approvalDigest: string;
+}
+
+export interface IntegrationAttempt {
+  id: string; taskId: TaskId; repoRoot: string; repoIdentity: string; sourceRef: string; sourceTipSha: string; sourceRange: string;
+  sourceDirty: boolean; sourceWorktreeDigest: string;
+  targetRef: string; expectedTargetSha: string; commitMessage: string; validationCommandsJson: string;
+  validationDigest: string; approvalDigest: string; state: IntegrationState; temporaryWorktreeId?: string;
+  temporaryWorktreePath?: string; temporaryBranch?: string; conflictSummaryJson?: string; validationResultJson?: string;
+  resultCommitSha?: string; recoveryBundlePath?: string; cleanupStatus: string; createdAt: string; updatedAt: string;
+}
+
+export type IntegrationState =
+  | "draft" | "preflight" | "staging" | "conflicted" | "validating"
+  | "ready_to_publish" | "publishing" | "completed" | "preflight_failed"
+  | "validation_failed" | "publish_rejected" | "cleanup_required" | "aborted";
 
 export interface AcknowledgedResult {
   acknowledged: string;

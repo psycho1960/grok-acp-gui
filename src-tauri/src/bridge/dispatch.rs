@@ -21,7 +21,7 @@ use crate::modules::agent_runtime::{
 use crate::modules::artifacts::ArtifactService;
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::TaskRuntime;
-use crate::modules::workspace::{CreateManagedWorktree, WorkspaceService};
+use crate::modules::workspace::{CreateManagedWorktree, PrepareSquash, WorkspaceService};
 
 /// Wrapper that the `execute` Tauri command returns.
 ///
@@ -511,11 +511,59 @@ async fn dispatch(
             None => not_implemented("worktree.adopt"),
         },
 
-        DesktopCommand::ReviewDiff(_) => not_implemented("review.diff"),
-        DesktopCommand::ReviewCheckpoint(_) => not_implemented("review.checkpoint"),
+        DesktopCommand::ReviewStatus(payload) => match workspace {
+            Some(service) => review_status(service, payload),
+            None => not_implemented("review.status"),
+        },
+        DesktopCommand::ReviewDiff(payload) => match workspace {
+            Some(service) => review_diff(service, payload),
+            None => not_implemented("review.diff"),
+        },
+        DesktopCommand::ReviewValidate(payload) => match workspace {
+            Some(service) => review_validate(service, payload),
+            None => not_implemented("review.validate"),
+        },
+        DesktopCommand::ReviewCheckpoint(payload) => match workspace {
+            Some(service) => review_checkpoint(service, payload),
+            None => not_implemented("review.checkpoint"),
+        },
+        DesktopCommand::ReviewCheckpoints(payload) => match workspace {
+            Some(service) => review_checkpoints(service, payload),
+            None => not_implemented("review.checkpoints"),
+        },
 
-        DesktopCommand::IntegrationPreflight(_) => not_implemented("integration.preflight"),
-        DesktopCommand::IntegrationExecute(_) => not_implemented("integration.execute"),
+        DesktopCommand::IntegrationPreflight(payload) => match workspace {
+            Some(service) => integration_prepare(service, payload),
+            None => not_implemented("integration.preflight"),
+        },
+        DesktopCommand::IntegrationExecute(payload) => match workspace {
+            Some(service) => integration_start(service, payload),
+            None => not_implemented("integration.execute"),
+        },
+        DesktopCommand::IntegrationStatus(payload) => match workspace {
+            Some(service) => integration_status(service, &payload.attempt_id),
+            None => not_implemented("integration.status"),
+        },
+        DesktopCommand::IntegrationActive(payload) => match workspace {
+            Some(service) => integration_active(service, &payload.task_id.0),
+            None => not_implemented("integration.active"),
+        },
+        DesktopCommand::IntegrationAbort(payload) => match workspace {
+            Some(service) => integration_abort(service, &payload.attempt_id),
+            None => not_implemented("integration.abort"),
+        },
+        DesktopCommand::IntegrationPublish(payload) => match workspace {
+            Some(service) => integration_publish(service, payload),
+            None => not_implemented("integration.publish"),
+        },
+        DesktopCommand::IntegrationCleanup(payload) => match workspace {
+            Some(service) => integration_cleanup(service, &payload.attempt_id),
+            None => not_implemented("integration.cleanup"),
+        },
+        DesktopCommand::IntegrationOpenWorktree(payload) => match workspace {
+            Some(service) => integration_open_worktree(service, &payload.attempt_id),
+            None => not_implemented("integration.openWorktree"),
+        },
 
         DesktopCommand::WorktreeCleanup(_) => not_implemented("worktree.cleanup"),
 
@@ -1200,6 +1248,117 @@ fn worktree_remove(
         std::path::Path::new(&payload.confirmed_path),
     ) {
         Ok(record) => DesktopResult::ok(serde_json::json!({ "worktree": record })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_status(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorktreeTaskPayload,
+) -> DesktopResult {
+    match workspace.get_worktree_status(&payload.task_id.0) {
+        Ok(snapshot) => DesktopResult::ok(serde_json::json!({ "snapshot": snapshot })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_diff(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::ReviewDiffPayload,
+) -> DesktopResult {
+    match workspace.get_diff(&payload.task_id.0, &payload.path, &payload.fingerprint) {
+        Ok(document) => DesktopResult::ok(serde_json::json!({ "document": document })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_validate(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::ReviewSelectionPayload,
+) -> DesktopResult {
+    match workspace.validate_selection(&payload.task_id.0, &payload.selection) {
+        Ok(validation) => DesktopResult::ok(serde_json::json!({ "validation": validation })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_checkpoint(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::ReviewCheckpointPayload,
+) -> DesktopResult {
+    match workspace.create_checkpoint(&payload.task_id.0, &payload.message, &payload.selection) {
+        Ok(receipt) => DesktopResult::ok(serde_json::json!({ "receipt": receipt })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn review_checkpoints(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorktreeTaskPayload,
+) -> DesktopResult {
+    match workspace.list_checkpoints(&payload.task_id.0) {
+        Ok(checkpoints) => DesktopResult::ok(serde_json::json!({ "checkpoints": checkpoints })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn integration_prepare(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::IntegrationPreflightPayload,
+) -> DesktopResult {
+    match workspace.prepare_squash(PrepareSquash {
+        task_id: payload.task_id.clone(),
+        commit_message: payload.commit_message.clone(),
+    }) {
+        Ok(plan) => DesktopResult::ok(serde_json::json!({ "plan": plan })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_start(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::IntegrationExecutePayload,
+) -> DesktopResult {
+    match workspace.start_squash(&payload.attempt_id, &payload.approval_digest) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_status(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
+    match workspace.get_integration_status(id) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_abort(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
+    match workspace.abort_integration(id) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_publish(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::IntegrationPublishPayload,
+) -> DesktopResult {
+    match workspace.publish_integration(&payload.attempt_id, &payload.approval_digest) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_cleanup(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
+    match workspace.cleanup_integration(id) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_active(workspace: &dyn WorkspaceService, task_id: &str) -> DesktopResult {
+    match workspace.get_active_integration(task_id) {
+        Ok(attempt) => DesktopResult::ok(serde_json::json!({"attempt":attempt})),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+fn integration_open_worktree(workspace: &dyn WorkspaceService, id: &str) -> DesktopResult {
+    match workspace.open_integration_worktree(id) {
+        Ok(()) => DesktopResult::ok(serde_json::json!({"opened":true})),
         Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }
