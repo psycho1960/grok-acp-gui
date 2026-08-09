@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-// GAG-010 / goal: mode ↔ workspace strategy linkage driven through the real
+// GAG-010A / goal: mode ↔ workspace strategy linkage driven through the real
 // fixture route (#conversation).
 
 /** Stop the autoplay fixture turn so the composer becomes usable. */

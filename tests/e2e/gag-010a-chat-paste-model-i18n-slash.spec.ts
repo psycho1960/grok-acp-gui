@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-// GAG-010 / goal: clipboard screenshot paste, in-conversation model &
+// GAG-010A / goal: clipboard screenshot paste, in-conversation model &
 // reasoning switching, and the "/" quick-command menu — driven through the
 // real fixture route (#conversation) with the stateful fake bridge.
 

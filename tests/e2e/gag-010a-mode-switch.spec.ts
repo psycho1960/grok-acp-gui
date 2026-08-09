@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-// GAG-011 / goal: in-conversation mode switching (智能体/计划/问答) driven
+// GAG-010A / goal: in-conversation mode switching (智能体/计划/问答) driven
 // through the real fixture route (#conversation).
 
 /** Stop the autoplay fixture turn so the composer becomes usable. */
