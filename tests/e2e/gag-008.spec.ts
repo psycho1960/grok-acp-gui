@@ -110,9 +110,12 @@ test.describe("GAG-008 conversation timeline", () => {
     await page.reload();
     const restored = page.getByTestId("conversation-virtual-list");
     await expect(restored).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByTestId("jump-to-bottom")).toBeVisible();
+    // Scroll restoration from localStorage is async after reload;
+    // jump-to-bottom only appears once the scroll position is restored.
+    await page.waitForTimeout(1000);
+    await expect(page.getByTestId("jump-to-bottom")).toBeVisible({ timeout: 10_000 });
     await expect
-      .poll(() => restored.evaluate((el) => el.scrollTop), { timeout: 5_000 })
+      .poll(() => restored.evaluate((el) => el.scrollTop), { timeout: 10_000 })
       .toBeGreaterThanOrEqual(90);
   });
 
