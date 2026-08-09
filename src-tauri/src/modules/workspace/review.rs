@@ -250,21 +250,7 @@ impl ManagedWorkspaceService {
                 "Checkpoint refused because the index already contains changes",
             ));
         }
-        let by_path: BTreeMap<&str, &FileChange> = snapshot
-            .files
-            .iter()
-            .map(|file| (file.path.as_str(), file))
-            .collect();
-        let mut path_args = Vec::<String>::new();
-        for selected in selection {
-            let file = by_path[selected.path.as_str()];
-            if let Some(old_path) = &file.old_path {
-                path_args.push(old_path.clone());
-            }
-            path_args.push(file.path.clone());
-        }
-        path_args.sort();
-        path_args.dedup();
+        let path_args = checkpoint_path_args(&snapshot.files, selection)?;
         let mut args = vec!["add", "--"];
         args.extend(path_args.iter().map(String::as_str));
         authorize_managed_git(&worktree, &args, &[&before.common_git_dir])?;
@@ -565,6 +551,35 @@ fn render_untracked(path: &str, bytes: &[u8]) -> Vec<u8> {
     rendered
 }
 
+fn checkpoint_path_args(
+    files: &[FileChange],
+    selection: &[CheckpointSelection],
+) -> Result<Vec<String>, WorkspaceError> {
+    let by_path: BTreeMap<&str, &FileChange> = files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    let mut path_args = Vec::new();
+    for selected in selection {
+        let file = by_path
+            .get(selected.path.as_str())
+            .copied()
+            .ok_or_else(|| {
+                workspace_error(
+                    "GIT_SELECTION_STALE",
+                    "Selected path vanished during checkpoint validation",
+                )
+            })?;
+        if let Some(old_path) = &file.old_path {
+            path_args.push(old_path.clone());
+        }
+        path_args.push(file.path.clone());
+    }
+    path_args.sort();
+    path_args.dedup();
+    Ok(path_args)
+}
+
 fn status_kind(xy: &str) -> String {
     let value = xy.chars().find(|value| *value != '.').unwrap_or('M');
     match value {
@@ -646,5 +661,26 @@ mod tests {
     fn message_requires_conventional_gag_reference() {
         assert!(validate_checkpoint_message("chore(GAG-012): save review [GAG-012]").is_ok());
         assert!(validate_checkpoint_message("save stuff").is_err());
+    }
+
+    #[test]
+    fn porcelain_parser_preserves_spaces_in_paths() {
+        let root = std::env::temp_dir().join(format!("gag-012-space-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("my file.txt"), "changed\n").unwrap();
+        let raw = b"1 .M N... 100644 100644 100644 abc123 def456 my file.txt\0";
+        let files = parse_status(&root, raw).unwrap();
+        assert_eq!(files[0].path, "my file.txt");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vanished_selection_returns_stale_instead_of_panicking() {
+        let selection = [CheckpointSelection {
+            path: "vanished.txt".into(),
+            fingerprint: "fingerprint".into(),
+        }];
+        let error = checkpoint_path_args(&[], &selection).unwrap_err();
+        assert_eq!(error.code, "GIT_SELECTION_STALE");
     }
 }
