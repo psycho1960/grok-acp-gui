@@ -161,6 +161,8 @@ GAG-009 将 `permission.resolve` 固定为 `{ taskId, sessionId, requestId, corr
 
 `permission.requested` 仅发送脱敏后的结构化操作视图：类别、可执行文件、脱敏参数、cwd、读写路径、风险、过期时间以及 ACP 原始 option ID/显式 kind。缺失或未知 kind 可以显示但不可授权，禁止从 label 猜测语义。`plan.updated` 的 proposed 载荷包含 request/correlation/version、摘要、步骤和原始选项；新版本把旧卡标记为 superseded。
 
+GAG-010C 将 `artifact.save` 固定为单文件契约 `{ taskId, artifactId, targetPath, overwrite }`。`targetPath` 只能来自 Renderer 通过系统保存对话框取得的用户选择；`overwrite` 首次必须为 `false`，后端返回 `conflict` 后由用户明确确认才可重试为 `true`。返回 `ArtifactSaveResult.status` 为 `saved|cancelled|conflict|rejected|failed`，不返回受管源路径或文件正文。`artifact.reveal` 可选携带同一已选择目标路径；后端验证该目标仍与受管 Artifact 的大小及 SHA-256 一致后，仅在资源管理器中定位，不执行文件。批量保存和目录替换不在该契约内。
+
 GAG-008 的规范化会话载荷如下：用户与 Assistant 文本使用 `message.delta` 的 `{ role, text }`；工具生命周期同样使用 `message.delta`，载荷为 `{ toolCall }`，其中只允许显示 `toolCallId`、标题、种类、状态、位置、脱敏后的输入/结果摘要、起止时间和耗时，不得包含 ACP `rawInput`/`rawOutput`。Turn 正常完成发布 `task.state(status="idle", detail.completed=true)`；用户停止发布 `task.state(status="idle", detail.reason="cancelled")`；请求失败发布 `activity.updated({ kind: "error", code, detail, retryable })` 并把 Renderer 会话终止为可恢复的 `error`；进程异常退出发布并持久化 `task.state(status="interrupted")`，包括空闲但仍可复用的 ACP 子进程异常退出；只有运行时已进入受管 shutdown 的 clean exit 才保留 idle。`task.open` 返回持久化后的 `{ taskId, sessionId?, title, status, mode?, model?, reasoning?, workspaceStrategy, workspaceAvailable, cursor, events, attempt }`；其中 `workspaceAvailable` 只能由后端对持久化策略和规范化路径进行验证后给出，Renderer 不推导真实 cwd。Renderer 必须先应用该快照再接收增量事件。为避免长回复的数千个流式 chunk 使快照失真或超限，后端读取完整 append-only 会话日志，把连续 Assistant delta 压缩成保留原始末尾序号的单个安全显示事件；因此快照内事件序号允许稀疏，`cursor` 才是快照与后续实时增量之间的权威连续性边界。
 
 ## 6. 信任边界与权限

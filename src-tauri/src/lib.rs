@@ -223,7 +223,9 @@ pub fn run() {
             // events never enter the task/session persistence stream.
             let vision_runtime: Arc<dyn AgentRuntime> =
                 AgentRuntimeImpl::new(GrokAcpAdapter::new(RuntimeConfig::default()));
-            let artifacts: Arc<dyn ArtifactService> = Arc::new(ManagedArtifactService::new());
+            let artifacts: Arc<dyn ArtifactService> = Arc::new(
+                ManagedArtifactService::with_protected_database(db_path.clone()),
+            );
 
             // --- Task runtime (GAG-006): task/session isolation, ordering,
             // persistence, and task-scoped event publication. ---
