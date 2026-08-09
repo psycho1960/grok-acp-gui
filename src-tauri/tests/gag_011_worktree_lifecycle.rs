@@ -473,7 +473,7 @@ fn reconcile_marks_an_externally_removed_worktree_missing() {
     let adopted = service
         .adopt_worktree(
             TaskId::new("GAG-011-adopt"),
-            &external,
+            &external.join("."),
             &adoption.confirmation_token,
             &adoption.absolute_path,
         )

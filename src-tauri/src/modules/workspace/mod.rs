@@ -548,11 +548,14 @@ impl WorkspaceService for ManagedWorkspaceService {
                 "Confirmed adoption path is invalid",
             )
         })?;
+        let candidate = canonicalize_existing_directory(path).map_err(|_| {
+            workspace_error("WORKTREE_MISSING", "External worktree is not accessible")
+        })?;
         if pending.task_id != task_id
             || pending.token != confirmation_token
             || std::time::Instant::now() > pending.expires_at
             || !same_path_identity(&pending.path, &confirmed)
-            || !same_path_identity(&pending.path, path)
+            || !same_path_identity(&pending.path, &candidate)
         {
             return Err(workspace_error(
                 "WORKTREE_CONFIRMATION_INVALID",
@@ -575,9 +578,6 @@ impl WorkspaceService for ManagedWorkspaceService {
                 "Task already has a worktree registration",
             ));
         }
-        let candidate = std::fs::canonicalize(path).map_err(|_| {
-            workspace_error("WORKTREE_MISSING", "External worktree is not accessible")
-        })?;
         let repository = self
             .git
             .inspect_repository(&candidate)
