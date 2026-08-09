@@ -140,16 +140,28 @@ pub enum WorktreeOwnership {
     Managed,
     /// Externally created; read-only unless explicitly adopted.
     External,
+    /// Explicitly adopted by the user; destructive cleanup still requires
+    /// the managed-root containment invariant.
+    Adopted,
 }
 
 /// Operational state of a Worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeState {
+    Allocating,
     /// Worktree is clean and ready.
     Ready,
+    Active,
+    Closing,
+    Archived,
+    Removed,
+    CreationFailed,
+    Missing,
     /// Worktree has uncommitted changes.
     Dirty,
+    Orphaned,
+    Quarantined,
     /// Integration is in progress on this worktree.
     Integrating,
     /// Worktree has been deleted (pruned).
@@ -274,6 +286,24 @@ pub struct WorktreeRecord {
     pub base_commit: String,
     pub ownership: WorktreeOwnership,
     pub state: WorktreeState,
+    #[serde(default)]
+    pub repo_identity: String,
+    #[serde(default)]
+    pub common_git_dir: String,
+    #[serde(default)]
+    pub relative_path: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub last_verified_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_bundle_id: Option<String>,
+    #[serde(default)]
+    pub disk_usage_bytes: u64,
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub merged: bool,
 }
 
 /// Metadata record for an imported artifact (image, file).

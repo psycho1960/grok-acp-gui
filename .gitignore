@@ -48,7 +48,7 @@ src-tauri/gen/
 data/
 runtime/
 logs/
-worktrees/
+/worktrees/
 recovery/
 artifacts/cache/
 sessions/

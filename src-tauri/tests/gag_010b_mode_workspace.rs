@@ -354,6 +354,15 @@ async fn missing_worktree_path_starts_no_acp_process_and_writes_no_workspace_fil
         base_commit: "0000000".into(),
         ownership: WorktreeOwnership::Managed,
         state: WorktreeState::Ready,
+        repo_identity: String::new(),
+        common_git_dir: String::new(),
+        relative_path: String::new(),
+        created_at: String::new(),
+        last_verified_at: String::new(),
+        recovery_bundle_id: None,
+        disk_usage_bytes: 0,
+        locked: false,
+        merged: false,
     })
     .expect("worktree record");
 
@@ -436,6 +445,15 @@ async fn managed_record_pointing_at_project_checkout_is_rejected() {
         base_commit: "0000000".into(),
         ownership: WorktreeOwnership::Managed,
         state: WorktreeState::Ready,
+        repo_identity: String::new(),
+        common_git_dir: String::new(),
+        relative_path: String::new(),
+        created_at: String::new(),
+        last_verified_at: String::new(),
+        recovery_bundle_id: None,
+        disk_usage_bytes: 0,
+        locked: false,
+        merged: false,
     })
     .expect("worktree record");
 
@@ -537,6 +555,15 @@ async fn unsafe_worktree_relationships_are_rejected() {
             base_commit: "0000000".into(),
             ownership: WorktreeOwnership::Managed,
             state: WorktreeState::Ready,
+            repo_identity: String::new(),
+            common_git_dir: String::new(),
+            relative_path: String::new(),
+            created_at: String::new(),
+            last_verified_at: String::new(),
+            recovery_bundle_id: None,
+            disk_usage_bytes: 0,
+            locked: false,
+            merged: false,
         })
         .expect("worktree record");
         let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
@@ -589,6 +616,15 @@ async fn workspace_change_rebinds_next_session_and_rejects_an_active_turn() {
         base_commit: "0000000".into(),
         ownership: WorktreeOwnership::Managed,
         state: WorktreeState::Ready,
+        repo_identity: String::new(),
+        common_git_dir: String::new(),
+        relative_path: String::new(),
+        created_at: String::new(),
+        last_verified_at: String::new(),
+        recovery_bundle_id: None,
+        disk_usage_bytes: 0,
+        locked: false,
+        merged: false,
     })
     .expect("worktree record");
 
@@ -767,6 +803,15 @@ async fn retained_session_rejects_a_drifted_workspace_path() {
         base_commit: "0000000".into(),
         ownership: WorktreeOwnership::Managed,
         state: WorktreeState::Ready,
+        repo_identity: String::new(),
+        common_git_dir: String::new(),
+        relative_path: String::new(),
+        created_at: String::new(),
+        last_verified_at: String::new(),
+        recovery_bundle_id: None,
+        disk_usage_bytes: 0,
+        locked: false,
+        merged: false,
     })
     .expect("worktree record");
 

@@ -163,6 +163,10 @@ GAG-009 将 `permission.resolve` 固定为 `{ taskId, sessionId, requestId, corr
 
 GAG-010C 将 `artifact.save` 固定为单文件契约 `{ taskId, artifactId, targetPath, overwrite }`。`targetPath` 只能来自 Renderer 通过系统保存对话框取得的用户选择；`overwrite` 首次必须为 `false`，后端返回 `conflict` 后由用户明确确认才可重试为 `true`。返回 `ArtifactSaveResult.status` 为 `saved|cancelled|conflict|rejected|failed`，不返回受管源路径或文件正文。`artifact.reveal` 可选携带同一已选择目标路径；后端验证该目标仍与受管 Artifact 的大小及 SHA-256 一致后，仅在资源管理器中定位，不执行文件。批量保存和目录替换不在该契约内。
 
+GAG-011 增加 `worktree.create`、`worktree.inspect`、`worktree.reconcile`、`worktree.prepareRemoval`、`worktree.prepareAdoption` 和 `worktree.remove`。创建请求中的 repo、slug 与 base ref 均视为低信任提示；后端必须从持久化 Task → Project 关系重新派生仓库、任务标题与当前 base，并拒绝 common git dir 不一致的请求。删除必须先取得一次性、十分钟有效的 prepare token，再把 UI 展示的准确绝对路径逐字回传；未合并或 dirty 时还必须明确确认强制清理并依赖已验证恢复包。token、task、登记记录、Git porcelain、repo identity、relative path、canonical managed-root 证明、prepare 后内容指纹和恢复包 hash 任一不一致都拒绝删除。外部 Worktree 接管同样使用十分钟 prepare token 与准确路径二次确认，但保持 `adopted` 所有权，不能进入受管删除。旧 `worktree.cleanup(force)` 不承载这些证明，继续 fail-closed，不作为删除入口。
+
+任务启动与清理使用 SQLite `IMMEDIATE` 事务协调：任务只能在登记 Worktree 为 `ready|dirty|active` 时进入运行态，清理只能在任务不含 live process 状态时把同一登记原子切换为 `closing`。先完成的一方阻止另一方，消除 ACP 启动与 `git worktree remove` 的 TOCTOU。对账同时返回未登记的外部 Worktree（只读、不可清理）；只有显式绑定到同仓库 Task 后才登记为 `adopted`。
+
 GAG-008 的规范化会话载荷如下：用户与 Assistant 文本使用 `message.delta` 的 `{ role, text }`；工具生命周期同样使用 `message.delta`，载荷为 `{ toolCall }`，其中只允许显示 `toolCallId`、标题、种类、状态、位置、脱敏后的输入/结果摘要、起止时间和耗时，不得包含 ACP `rawInput`/`rawOutput`。Turn 正常完成发布 `task.state(status="idle", detail.completed=true)`；用户停止发布 `task.state(status="idle", detail.reason="cancelled")`；请求失败发布 `activity.updated({ kind: "error", code, detail, retryable })` 并把 Renderer 会话终止为可恢复的 `error`；进程异常退出发布并持久化 `task.state(status="interrupted")`，包括空闲但仍可复用的 ACP 子进程异常退出；只有运行时已进入受管 shutdown 的 clean exit 才保留 idle。`task.open` 返回持久化后的 `{ taskId, sessionId?, title, status, mode?, model?, reasoning?, workspaceStrategy, workspaceAvailable, cursor, events, attempt }`；其中 `workspaceAvailable` 只能由后端对持久化策略和规范化路径进行验证后给出，Renderer 不推导真实 cwd。Renderer 必须先应用该快照再接收增量事件。为避免长回复的数千个流式 chunk 使快照失真或超限，后端读取完整 append-only 会话日志，把连续 Assistant delta 压缩成保留原始末尾序号的单个安全显示事件；因此快照内事件序号允许稀疏，`cursor` 才是快照与后续实时增量之间的权威连续性边界。
 
 ## 6. 信任边界与权限
@@ -233,6 +237,8 @@ Migration 版本从 `0001_initial.sql` 开始，使用事务。核心表：
 
 Migration `0003_permissions_and_plans.sql` 只保存 hash、脱敏摘要和决策元数据，不保存原始敏感参数或 Renderer 可复用令牌。新 Plan 版本在同一事务中 supersede 旧 Plan 并使旧批准失效；一次批准以条件 UPDATE 原子转为 consumed。
 
+Migration `0004_worktree_lifecycle.sql` 只追加 Worktree 生命周期列：repo identity、common git dir、受管相对路径、创建/最近校验时间、恢复包关联、磁盘占用、locked 与 merged。既有 Migration 不修改；旧记录使用安全默认值并在破坏性操作前通过 Git 与文件系统重新对账。
+
 ## 10. Worktree 与集成算法
 
 ### 创建
@@ -242,6 +248,8 @@ Migration `0003_permissions_and_plans.sql` 只保存 hash、脱敏摘要和决�
 3. 生成合法 slug/shortId，检查 branch/path 冲突。
 4. `git worktree add -b <branch> <path> <baseCommit>`，参数数组调用。
 5. 验证 `git worktree list --porcelain` 中存在并写入 DB。
+
+GAG-011 的生产 Git Adapter 固定使用 `git` 可执行文件加 argv 数组、显式绝对 cwd、15 秒超时和 1 MiB stdout/stderr 上限。受管路径为 `<managedRoot>/<sha256(commonGitDir)[0..16]>/<taskId>`；所有已存在祖先先 canonicalize，Windows `\\?\`、大小写、junction/symlink 均按文件系统身份比较。创建失败只回滚本次已证明创建的 Worktree 和分支。
 
 ### 检查点
 
@@ -270,6 +278,8 @@ Migration `0003_permissions_and_plans.sql` 只保存 hash、脱敏摘要和决�
 - `untracked.zip`：`git ls-files --others --exclude-standard` 返回的文件，不含 ignored。
 
 创建后检查文件存在、长度、manifest hash 和可读性。验证失败则禁止删除。默认 7 天，应用启动和每日首次打开时清理过期项；删除恢复项也需明确确认。
+
+GAG-011 的删除准备会生成并验证 `branch.bundle`、tracked/staged binary patch、未忽略 untracked 的标准 ZIP 以及 SHA-256 manifest。执行删除前再次检查任务锁、登记、Git branch/path、managed-root containment、dirty 状态和恢复 hash；只调用 `git worktree remove --force <exact-path>`，不对不确定目录使用递归删除。
 
 ## 12. Artifact 管理
 

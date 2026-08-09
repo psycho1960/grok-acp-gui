@@ -21,6 +21,7 @@ use crate::modules::agent_runtime::{
 use crate::modules::artifacts::ArtifactService;
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::TaskRuntime;
+use crate::modules::workspace::{CreateManagedWorktree, WorkspaceService};
 
 /// Wrapper that the `execute` Tauri command returns.
 ///
@@ -279,7 +280,7 @@ pub async fn execute_impl(
     // Compatibility wrapper: without a dedicated visual runtime the main
     // runtime is reused, and without a managed artifact service attachment
     // operations fail closed inside the handlers.
-    execute_impl_inner(repo, runtime, runtime, task_runtime, None, raw).await
+    execute_impl_inner(repo, runtime, runtime, task_runtime, None, None, raw).await
 }
 
 /// Production dispatcher with a dedicated visual runtime. Keeping Luna
@@ -299,6 +300,29 @@ pub async fn execute_impl_with_vision(
         vision_runtime,
         task_runtime,
         Some(artifacts),
+        None,
+        raw,
+    )
+    .await
+}
+
+/// Production dispatcher with all deep-module interfaces attached.
+pub async fn execute_impl_with_services(
+    repo: &dyn Repository,
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    vision_runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    task_runtime: &dyn TaskRuntime,
+    artifacts: &dyn ArtifactService,
+    workspace: &dyn WorkspaceService,
+    raw: serde_json::Value,
+) -> DesktopResult {
+    execute_impl_inner(
+        repo,
+        runtime,
+        vision_runtime,
+        task_runtime,
+        Some(artifacts),
+        Some(workspace),
         raw,
     )
     .await
@@ -310,6 +334,7 @@ async fn execute_impl_inner(
     vision_runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
     task_runtime: &dyn TaskRuntime,
     artifacts: Option<&dyn ArtifactService>,
+    workspace: Option<&dyn WorkspaceService>,
     raw: serde_json::Value,
 ) -> DesktopResult {
     // Reject oversized payloads before any deserialization.
@@ -355,7 +380,16 @@ async fn execute_impl_inner(
         return DesktopResult::err(err);
     }
 
-    dispatch(repo, runtime, vision_runtime, task_runtime, artifacts, cmd).await
+    dispatch(
+        repo,
+        runtime,
+        vision_runtime,
+        task_runtime,
+        artifacts,
+        workspace,
+        cmd,
+    )
+    .await
 }
 
 use super::commands::DesktopCommand;
@@ -366,6 +400,7 @@ async fn dispatch(
     vision_runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
     task_runtime: &dyn TaskRuntime,
     artifacts: Option<&dyn ArtifactService>,
+    workspace: Option<&dyn WorkspaceService>,
     cmd: DesktopCommand,
 ) -> DesktopResult {
     match &cmd {
@@ -382,6 +417,7 @@ async fn dispatch(
                 vision_runtime,
                 task_runtime,
                 artifacts,
+                workspace,
                 payload,
             )
             .await
@@ -427,8 +463,53 @@ async fn dispatch(
             )),
         },
 
-        DesktopCommand::WorkspaceInspect(payload) => workspace_inspect(payload),
-        DesktopCommand::WorktreeAdopt(_) => not_implemented("worktree.adopt"),
+        DesktopCommand::WorkspaceInspect(payload) => match workspace {
+            Some(service) => workspace_inspect_managed(service, payload),
+            None => workspace_inspect(payload),
+        },
+        DesktopCommand::WorktreeCreate(payload) => match workspace {
+            Some(service) => worktree_create(service, payload),
+            None => not_implemented("worktree.create"),
+        },
+        DesktopCommand::WorktreeInspect(payload) => match workspace {
+            Some(service) => worktree_inspect(service, payload),
+            None => not_implemented("worktree.inspect"),
+        },
+        DesktopCommand::WorktreeReconcile(_) => match workspace {
+            Some(service) => worktree_reconcile(service),
+            None => not_implemented("worktree.reconcile"),
+        },
+        DesktopCommand::WorktreePrepareRemoval(payload) => match workspace {
+            Some(service) => worktree_prepare_removal(service, payload),
+            None => not_implemented("worktree.prepareRemoval"),
+        },
+        DesktopCommand::WorktreePrepareAdoption(payload) => match workspace {
+            Some(service) => match service
+                .prepare_adoption(payload.task_id.clone(), std::path::Path::new(&payload.path))
+            {
+                Ok(preparation) => {
+                    DesktopResult::ok(serde_json::json!({ "preparation": preparation }))
+                }
+                Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+            },
+            None => not_implemented("worktree.prepareAdoption"),
+        },
+        DesktopCommand::WorktreeRemove(payload) => match workspace {
+            Some(service) => worktree_remove(service, payload),
+            None => not_implemented("worktree.remove"),
+        },
+        DesktopCommand::WorktreeAdopt(payload) => match workspace {
+            Some(service) => match service.adopt_worktree(
+                payload.task_id.clone(),
+                std::path::Path::new(&payload.path),
+                &payload.confirmation_token,
+                std::path::Path::new(&payload.confirmed_path),
+            ) {
+                Ok(record) => DesktopResult::ok(serde_json::json!({ "worktree": record })),
+                Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+            },
+            None => not_implemented("worktree.adopt"),
+        },
 
         DesktopCommand::ReviewDiff(_) => not_implemented("review.diff"),
         DesktopCommand::ReviewCheckpoint(_) => not_implemented("review.checkpoint"),
@@ -879,6 +960,7 @@ async fn task_create(
     vision_runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
     task_runtime: &dyn TaskRuntime,
     artifacts: Option<&dyn ArtifactService>,
+    workspace: Option<&dyn WorkspaceService>,
     payload: &super::commands::TaskCreatePayload,
 ) -> DesktopResult {
     use crate::domain::types::{utc_now, Task, TaskId, TaskStatus};
@@ -903,12 +985,15 @@ async fn task_create(
     };
 
     // Ensure project exists
-    if repo.get_project(&payload.project_id.0).is_err() {
-        return DesktopResult::err(
-            AppError::new(domain::error::codes::PROJECT_NOT_FOUND, "Project not found")
-                .with_action("Open a project before creating a task."),
-        );
-    }
+    let project = match repo.get_project(&payload.project_id.0) {
+        Ok(project) => project,
+        Err(_) => {
+            return DesktopResult::err(
+                AppError::new(domain::error::codes::PROJECT_NOT_FOUND, "Project not found")
+                    .with_action("Open a project before creating a task."),
+            )
+        }
+    };
 
     let workspace_kind = match payload.workspace_strategy.as_deref() {
         Some(value) => match parse_workspace_strategy(value) {
@@ -940,6 +1025,68 @@ async fn task_create(
         Err(e) => return DesktopResult::err(AppError::new(e.code, e.message)),
     }
 
+    if workspace_kind == crate::domain::types::WorkspaceKind::Worktree {
+        let Some(service) = workspace else {
+            // Compatibility dispatchers used by older interface tests do not
+            // attach MOD-WORKSPACE. They retain the GAG-010B fail-closed path.
+            return task_create_start_turn(
+                repo,
+                runtime,
+                vision_runtime,
+                task_runtime,
+                artifacts,
+                payload,
+                task,
+            )
+            .await;
+        };
+        let Some(repo_root) = project.repo_root.as_deref() else {
+            let _ = repo.update_task_status(&task.id.0, "failed", Some("Git repository required"));
+            return DesktopResult::err(AppError::new(
+                domain::error::codes::WORKTREE_OUTSIDE_REPO,
+                "Isolated worktree requires a Git repository",
+            ));
+        };
+        let inspection = match service.inspect_repository(std::path::Path::new(repo_root)) {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                let _ = repo.update_task_status(&task.id.0, "failed", Some(error.message));
+                return DesktopResult::err(AppError::new(error.code, error.message));
+            }
+        };
+        let base_ref = inspection.branch.unwrap_or_else(|| inspection.head.clone());
+        if let Err(error) = service.create_managed_worktree(CreateManagedWorktree {
+            repo_root: std::path::PathBuf::from(repo_root),
+            task_id: task.id.clone(),
+            task_slug: task.title.clone(),
+            base_ref,
+        }) {
+            let _ = repo.update_task_status(&task.id.0, "failed", Some(error.message));
+            return DesktopResult::err(AppError::new(error.code, error.message));
+        }
+    }
+
+    task_create_start_turn(
+        repo,
+        runtime,
+        vision_runtime,
+        task_runtime,
+        artifacts,
+        payload,
+        task,
+    )
+    .await
+}
+
+async fn task_create_start_turn(
+    repo: &dyn Repository,
+    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    vision_runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
+    task_runtime: &dyn TaskRuntime,
+    artifacts: Option<&dyn ArtifactService>,
+    payload: &super::commands::TaskCreatePayload,
+    task: crate::domain::types::Task,
+) -> DesktopResult {
     let task_data = serde_json::json!({
         "taskId": task.id.0,
         "task": {
@@ -982,6 +1129,78 @@ async fn task_create(
             result["startError"] = serde_json::to_value(error).unwrap_or_default();
             DesktopResult::ok(result)
         }
+    }
+}
+
+fn workspace_inspect_managed(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorkspaceInspectPayload,
+) -> DesktopResult {
+    match workspace.inspect_repository(std::path::Path::new(&payload.path)) {
+        Ok(repository) => DesktopResult::ok(serde_json::json!({
+            "repoRoot": repository.canonical_root,
+            "commonGitDir": repository.common_git_dir,
+            "head": repository.head,
+            "branch": repository.branch,
+            "dirty": repository.dirty,
+        })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn worktree_create(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorktreeCreatePayload,
+) -> DesktopResult {
+    match workspace.create_managed_worktree(CreateManagedWorktree {
+        repo_root: std::path::PathBuf::from(&payload.repo_root),
+        task_id: payload.task_id.clone(),
+        task_slug: payload.task_slug.clone(),
+        base_ref: payload.base_ref.clone(),
+    }) {
+        Ok(record) => DesktopResult::ok(serde_json::json!({ "worktree": record })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn worktree_inspect(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorktreeTaskPayload,
+) -> DesktopResult {
+    match workspace.inspect_worktree(&payload.task_id.0) {
+        Ok(record) => DesktopResult::ok(serde_json::json!({ "worktree": record })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn worktree_reconcile(workspace: &dyn WorkspaceService) -> DesktopResult {
+    match workspace.reconcile_registry() {
+        Ok(records) => DesktopResult::ok(serde_json::json!({ "worktrees": records })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn worktree_prepare_removal(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorktreeTaskPayload,
+) -> DesktopResult {
+    match workspace.prepare_removal(&payload.task_id.0) {
+        Ok(preparation) => DesktopResult::ok(serde_json::json!({ "preparation": preparation })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
+    }
+}
+
+fn worktree_remove(
+    workspace: &dyn WorkspaceService,
+    payload: &super::commands::WorktreeRemovePayload,
+) -> DesktopResult {
+    match workspace.remove_managed_worktree(
+        &payload.task_id.0,
+        &payload.confirmation_token,
+        std::path::Path::new(&payload.confirmed_path),
+    ) {
+        Ok(record) => DesktopResult::ok(serde_json::json!({ "worktree": record })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }
 

@@ -6,9 +6,11 @@ pub mod modules {
     pub mod artifacts;
     pub mod persistence;
     pub mod task_runtime;
+    pub mod workspace;
 }
 pub mod adapters {
     pub mod filesystem;
+    pub mod git_cli;
     pub mod grok_acp;
     pub mod sqlite;
 }
@@ -18,6 +20,7 @@ use crate::modules::agent_runtime::{AgentRuntime, AgentRuntimeImpl, RuntimeConfi
 use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
 use crate::modules::persistence::Repository;
 use crate::modules::task_runtime::{TaskRuntime, TaskRuntimeImpl};
+use crate::modules::workspace::{ManagedWorkspaceService, WorkspaceService};
 use bridge::dispatch::{self as br_dispatch, DesktopResult};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,6 +32,7 @@ pub struct AppState {
     pub vision_runtime: Arc<dyn AgentRuntime>,
     pub task_runtime: Arc<dyn TaskRuntime>,
     pub artifacts: Arc<dyn ArtifactService>,
+    pub workspace: Arc<dyn WorkspaceService>,
     pub db_init_error: Option<String>,
 }
 
@@ -52,6 +56,12 @@ fn application_data_dir(app_handle: &AppHandle) -> PathBuf {
 async fn bootstrap(
     state: tauri::State<'_, AppState>,
 ) -> Result<br_dispatch::BootstrapSnapshot, String> {
+    if state.db_init_error.is_none() {
+        // A process restart loses in-memory confirmation tokens. Reconcile
+        // first so stale `closing` rows are safely restored to ready/dirty
+        // before the Renderer receives its initial snapshot.
+        let _ = state.workspace.reconcile_registry();
+    }
     let mut snapshot =
         br_dispatch::bootstrap_impl(state.repo.as_ref(), state.db_init_error.as_deref());
     if snapshot.ready {
@@ -91,12 +101,14 @@ async fn execute(
     let vision_runtime = state.inner().vision_runtime.clone();
     let task_runtime = state.inner().task_runtime.clone();
     let artifacts = state.inner().artifacts.clone();
-    Ok(br_dispatch::execute_impl_with_vision(
+    let workspace = state.inner().workspace.clone();
+    Ok(br_dispatch::execute_impl_with_services(
         &*repo,
         &*runtime,
         &*vision_runtime,
         &*task_runtime,
         &*artifacts,
+        &*workspace,
         command,
     )
     .await)
@@ -226,6 +238,11 @@ pub fn run() {
             let artifacts: Arc<dyn ArtifactService> = Arc::new(
                 ManagedArtifactService::with_protected_database(db_path.clone()),
             );
+            let workspace: Arc<dyn WorkspaceService> = Arc::new(ManagedWorkspaceService::new(
+                repo.clone(),
+                data_dir.join("worktrees"),
+                data_dir.join("recovery"),
+            ));
 
             // --- Task runtime (GAG-006): task/session isolation, ordering,
             // persistence, and task-scoped event publication. ---
@@ -248,6 +265,7 @@ pub fn run() {
                 vision_runtime,
                 task_runtime,
                 artifacts,
+                workspace,
                 db_init_error,
             });
             Ok(())

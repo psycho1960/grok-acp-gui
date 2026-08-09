@@ -60,7 +60,21 @@ pub fn utc_now() -> String {
     let dur = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = dur.as_secs();
+    format_utc_epoch(dur.as_secs())
+}
+
+/// ISO-8601 UTC timestamp a fixed number of days from now.
+pub fn utc_after_days(days: u64) -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_add(days.saturating_mul(86_400));
+    format_utc_epoch(secs)
+}
+
+fn format_utc_epoch(secs: u64) -> String {
     // Decompose into date components (civil time)
     let days = secs / 86400;
     let time_secs = secs % 86400;

@@ -316,6 +316,11 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
             }
         };
 
+        // This transaction races safely with worktree cleanup: either the
+        // task becomes running first, or cleanup marks the worktree closing.
+        // The unrecorded permit is released automatically if the claim fails.
+        self.repo.begin_task_execution(&task_id.0)?;
+
         // Store the permit so it is released when this session ends.
         {
             let mut permits = self.permits.lock().await;
@@ -334,9 +339,6 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
 
         // Create the mailbox for this session.
         self.get_or_create_mailbox(&task_id, &session_id).await;
-
-        // Transition task to Running.
-        self.repo.update_task_status(&task_id.0, "running", None)?;
 
         Ok(())
     }
@@ -362,6 +364,8 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
                 format!("task {} is bound to a different session", task_id),
             ));
         }
+
+        self.repo.begin_task_execution(&task_id.0)?;
 
         // A stopped/idle task may retain a reusable ACP process after its
         // active-task permit was released. Reacquire the slot before the next

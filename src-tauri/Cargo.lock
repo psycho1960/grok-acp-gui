@@ -1168,6 +1168,7 @@ version = "0.1.16"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "crc32fast",
  "rusqlite",
  "serde",
  "serde_json",

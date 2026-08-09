@@ -138,7 +138,7 @@ pub fn transition_worktree(
 
     match (current, transition) {
         // Deleted is terminal — handle it first for all transitions
-        (Deleted, _) => Err(DomainError::illegal_transition(
+        (Deleted | Removed, _) => Err(DomainError::illegal_transition(
             "Worktree",
             "deleted",
             &format!("{:?}", transition),

@@ -169,11 +169,20 @@ export type WorkspaceKind = "worktree" | "readonly" | "direct";
 /** Persisted task policy used to resolve the backend-owned execution cwd. */
 export type WorkspaceStrategy = WorkspaceKind;
 
-export type WorktreeOwnership = "managed" | "external";
+export type WorktreeOwnership = "managed" | "external" | "adopted";
 
 export type WorktreeState =
+  | "allocating"
   | "ready"
+  | "active"
+  | "closing"
+  | "archived"
+  | "removed"
+  | "creation_failed"
+  | "missing"
   | "dirty"
+  | "orphaned"
+  | "quarantined"
   | "integrating"
   | "deleted"
   | "unknown";
@@ -233,6 +242,15 @@ export interface WorktreeRecord {
   baseCommit: string;
   ownership: WorktreeOwnership;
   state: WorktreeState;
+  repoIdentity?: string;
+  commonGitDir?: string;
+  relativePath?: string;
+  createdAt?: string;
+  lastVerifiedAt?: string;
+  recoveryBundleId?: string;
+  diskUsageBytes?: number;
+  locked?: boolean;
+  merged?: boolean;
 }
 
 export interface RecoveryItem {
@@ -274,6 +292,12 @@ export type DesktopCommand =
   | { type: "artifact.reveal"; payload: ArtifactRevealPayload }
   | { type: "artifact.save"; payload: ArtifactSavePayload }
   | { type: "workspace.inspect"; payload: WorkspaceInspectPayload }
+  | { type: "worktree.create"; payload: WorktreeCreatePayload }
+  | { type: "worktree.inspect"; payload: WorktreeTaskPayload }
+  | { type: "worktree.reconcile"; payload: Record<string, never> }
+  | { type: "worktree.prepareRemoval"; payload: WorktreeTaskPayload }
+  | { type: "worktree.prepareAdoption"; payload: WorktreePrepareAdoptionPayload }
+  | { type: "worktree.remove"; payload: WorktreeRemovePayload }
   | { type: "worktree.adopt"; payload: WorktreeAdoptPayload }
   | { type: "review.diff"; payload: ReviewDiffPayload }
   | { type: "review.checkpoint"; payload: ReviewCheckpointPayload }
@@ -411,8 +435,55 @@ export interface WorkspaceInspectPayload {
   path: string;
 }
 
+export interface WorktreeCreatePayload {
+  taskId: TaskId;
+  repoRoot: string;
+  taskSlug: string;
+  baseRef: string;
+}
+
+export interface WorktreeTaskPayload {
+  taskId: TaskId;
+}
+
+export interface WorktreeRemovePayload {
+  taskId: TaskId;
+  confirmationToken: string;
+  confirmedPath: string;
+}
+
+export interface RecoveryEvidence {
+  id: string;
+  manifestPath: string;
+  branchBundle: string;
+  trackedPatch: string;
+  untrackedZip: string;
+}
+
+export interface RemovalPreparation {
+  confirmationToken: string;
+  absolutePath: string;
+  dirty: boolean;
+  untrackedFiles: number;
+  forceRequired: boolean;
+  recovery?: RecoveryEvidence;
+}
+
 export interface WorktreeAdoptPayload {
+  taskId: TaskId;
   path: string;
+  confirmationToken: string;
+  confirmedPath: string;
+}
+
+export interface WorktreePrepareAdoptionPayload {
+  taskId: TaskId;
+  path: string;
+}
+
+export interface AdoptionPreparation {
+  confirmationToken: string;
+  absolutePath: string;
 }
 
 export interface ReviewDiffPayload {
@@ -756,6 +827,16 @@ export const ErrorCodes = {
   GIT_LOCKED: "GIT_LOCKED",
   WORKTREE_ALREADY_EXISTS: "WORKTREE_ALREADY_EXISTS",
   WORKTREE_OUTSIDE_REPO: "WORKTREE_OUTSIDE_REPO",
+  WORKTREE_INVALID_ROOT: "WORKTREE_INVALID_ROOT",
+  WORKTREE_MISSING: "WORKTREE_MISSING",
+  WORKTREE_LOCKED: "WORKTREE_LOCKED",
+  WORKTREE_REGISTRY_MISMATCH: "WORKTREE_REGISTRY_MISMATCH",
+  WORKTREE_RECOVERY_REQUIRED: "WORKTREE_RECOVERY_REQUIRED",
+  WORKTREE_RECOVERY_INVALID: "WORKTREE_RECOVERY_INVALID",
+  WORKTREE_CONFIRMATION_REQUIRED: "WORKTREE_CONFIRMATION_REQUIRED",
+  WORKTREE_CONFIRMATION_INVALID: "WORKTREE_CONFIRMATION_INVALID",
+  WORKTREE_CONFIRMATION_EXPIRED: "WORKTREE_CONFIRMATION_EXPIRED",
+  WORKTREE_TASK_RUNNING: "WORKTREE_TASK_RUNNING",
   INTEGRATION_CONFLICT: "INTEGRATION_CONFLICT",
   INTEGRATION_DIRTY: "INTEGRATION_DIRTY",
   ARTIFACT_TOO_LARGE: "ARTIFACT_TOO_LARGE",

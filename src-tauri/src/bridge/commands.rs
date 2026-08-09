@@ -187,7 +187,40 @@ pub struct WorkspaceInspectPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorktreeCreatePayload {
+    pub task_id: super::types::TaskId,
+    pub repo_root: String,
+    pub task_slug: String,
+    pub base_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeTaskPayload {
+    pub task_id: super::types::TaskId,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRemovePayload {
+    pub task_id: super::types::TaskId,
+    pub confirmation_token: String,
+    pub confirmed_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorktreeAdoptPayload {
+    pub task_id: super::types::TaskId,
+    pub path: String,
+    pub confirmation_token: String,
+    pub confirmed_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreePrepareAdoptionPayload {
+    pub task_id: super::types::TaskId,
     pub path: String,
 }
 
@@ -292,6 +325,18 @@ pub enum DesktopCommand {
 
     #[serde(rename = "workspace.inspect")]
     WorkspaceInspect(WorkspaceInspectPayload),
+    #[serde(rename = "worktree.create")]
+    WorktreeCreate(WorktreeCreatePayload),
+    #[serde(rename = "worktree.inspect")]
+    WorktreeInspect(WorktreeTaskPayload),
+    #[serde(rename = "worktree.reconcile")]
+    WorktreeReconcile(EmptyPayload),
+    #[serde(rename = "worktree.prepareRemoval")]
+    WorktreePrepareRemoval(WorktreeTaskPayload),
+    #[serde(rename = "worktree.prepareAdoption")]
+    WorktreePrepareAdoption(WorktreePrepareAdoptionPayload),
+    #[serde(rename = "worktree.remove")]
+    WorktreeRemove(WorktreeRemovePayload),
     #[serde(rename = "worktree.adopt")]
     WorktreeAdopt(WorktreeAdoptPayload),
 
@@ -342,6 +387,11 @@ pub fn is_known_command(cmd_type: &str) -> bool {
             | "artifact.reveal"
             | "artifact.save"
             | "workspace.inspect"
+            | "worktree.create"
+            | "worktree.inspect"
+            | "worktree.reconcile"
+            | "worktree.prepareRemoval"
+            | "worktree.remove"
             | "worktree.adopt"
             | "review.diff"
             | "review.checkpoint"
@@ -540,7 +590,38 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             Ok(())
         }
 
+        DesktopCommand::WorktreeCreate(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_non_empty_path(&p.repo_root)?;
+            validate_non_empty_text(&p.task_slug, "taskSlug")?;
+            validate_id_non_empty(&p.base_ref)?;
+            Ok(())
+        }
+
+        DesktopCommand::WorktreeInspect(p) | DesktopCommand::WorktreePrepareRemoval(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            Ok(())
+        }
+
+        DesktopCommand::WorktreeReconcile(_) => Ok(()),
+
+        DesktopCommand::WorktreeRemove(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_id_non_empty(&p.confirmation_token)?;
+            validate_non_empty_path(&p.confirmed_path)?;
+            Ok(())
+        }
+
         DesktopCommand::WorktreeAdopt(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_non_empty_path(&p.path)?;
+            validate_id_non_empty(&p.confirmation_token)?;
+            validate_non_empty_path(&p.confirmed_path)?;
+            Ok(())
+        }
+
+        DesktopCommand::WorktreePrepareAdoption(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
             validate_non_empty_path(&p.path)?;
             Ok(())
         }

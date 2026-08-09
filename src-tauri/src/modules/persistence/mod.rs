@@ -63,6 +63,10 @@ pub trait Repository: Send + Sync {
     ) -> RepoResult<()>;
     /// Transactionally update task status (used by startup recovery).
     fn update_task_status(&self, id: &str, status: &str, reason: Option<&str>) -> RepoResult<()>;
+    /// Atomically marks a task running only when its persisted workspace is
+    /// launchable. A Worktree task whose record is closing/archived/missing is
+    /// rejected so cleanup and process start cannot cross in flight.
+    fn begin_task_execution(&self, id: &str) -> RepoResult<()>;
     /// GAG-006: List tasks in states implying a live process.
     fn list_tasks_by_statuses(&self, statuses: &[&str]) -> RepoResult<Vec<Task>>;
     /// GAG-006: Get lightweight task summaries for task center.
@@ -137,6 +141,9 @@ pub trait Repository: Send + Sync {
     fn update_worktree(&self, wt: &WorktreeRecord) -> RepoResult<()>;
     fn delete_worktree(&self, id: &str) -> RepoResult<()>;
     fn list_active_worktrees(&self) -> RepoResult<Vec<WorktreeRecord>>;
+    /// Atomically moves one managed worktree to closing only when its task is
+    /// not in a state that implies a live process.
+    fn begin_worktree_removal(&self, task_id: &str, worktree_id: &str) -> RepoResult<()>;
 
     // ------------------------------------------------------------------
     // Attachments
