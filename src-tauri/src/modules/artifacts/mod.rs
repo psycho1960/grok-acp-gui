@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::adapters::filesystem::{
+    reveal_saved_artifact, save_managed_artifact, ArtifactFileExpectation, ArtifactSaveIoError,
+};
 use crate::bridge::types::TaskId;
 use crate::domain::error::{codes, DomainError};
 use crate::domain::types::{utc_now, AttachmentId, AttachmentRecord};
@@ -44,6 +47,29 @@ pub struct ResolvedImage {
 pub struct BlobImage {
     pub display_name: String,
     pub base64_data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactSaveStatus {
+    Saved,
+    Cancelled,
+    Conflict,
+    Rejected,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactSaveResult {
+    pub status: ArtifactSaveStatus,
+    pub artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extension_warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 pub trait ArtifactService: Send + Sync {
@@ -92,6 +118,23 @@ pub trait ArtifactService: Send + Sync {
         artifact_id: &str,
     ) -> Result<(), DomainError>;
 
+    fn save(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        artifact_id: &str,
+        target_path: &str,
+        overwrite: bool,
+    ) -> ArtifactSaveResult;
+
+    fn reveal_saved(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        artifact_id: &str,
+        target_path: &str,
+    ) -> Result<(), DomainError>;
+
     fn enforce_cache_quota(
         &self,
         repo: &dyn Repository,
@@ -103,11 +146,25 @@ pub trait ArtifactService: Send + Sync {
 /// a caller-supplied path. This lets the ACP process use the same workspace
 /// while preventing it from receiving the original selected-file path.
 #[derive(Default)]
-pub struct ManagedArtifactService;
+pub struct ManagedArtifactService {
+    protected_paths: Vec<PathBuf>,
+}
 
 impl ManagedArtifactService {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_protected_database(database_path: PathBuf) -> Self {
+        let database = database_path.to_string_lossy().into_owned();
+        Self {
+            protected_paths: vec![
+                database_path,
+                PathBuf::from(format!("{database}-wal")),
+                PathBuf::from(format!("{database}-shm")),
+                PathBuf::from(format!("{database}-journal")),
+            ],
+        }
     }
 
     fn workspace_for_task(
@@ -572,6 +629,106 @@ impl ArtifactService for ManagedArtifactService {
         Ok(())
     }
 
+    fn save(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        artifact_id: &str,
+        target_path: &str,
+        overwrite: bool,
+    ) -> ArtifactSaveResult {
+        // Only fully validated imports create AttachmentRecord rows. Missing,
+        // quarantined, rejected, invalid, and cross-task IDs therefore fail
+        // this backend lookup/ownership gate before any destination I/O.
+        let record = match repo.get_attachment(artifact_id) {
+            Ok(record) if record.task_id == *task_id => record,
+            Ok(_) => {
+                return artifact_save_failure(
+                    artifact_id,
+                    None,
+                    None,
+                    ArtifactSaveIoError::Rejected("制品不属于当前任务"),
+                )
+            }
+            Err(_) => {
+                return artifact_save_failure(
+                    artifact_id,
+                    None,
+                    None,
+                    ArtifactSaveIoError::Rejected("制品不存在或不可保存"),
+                )
+            }
+        };
+        let root = match self.root_for_task(repo, task_id) {
+            Ok(root) => root,
+            Err(_) => {
+                return artifact_save_failure(
+                    artifact_id,
+                    None,
+                    None,
+                    ArtifactSaveIoError::Rejected("受管制品存储不可用"),
+                )
+            }
+        };
+        let raw_target = Path::new(target_path);
+        let target_name = raw_target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned);
+        let warning = artifact_extension_warning(raw_target, &record.mime);
+        let expectation = ArtifactFileExpectation {
+            bytes: record.bytes,
+            sha256: &record.sha256,
+        };
+        match save_managed_artifact(
+            Path::new(&record.cache_path),
+            &root,
+            target_path,
+            &expectation,
+            overwrite,
+            &self.protected_paths,
+        ) {
+            Ok(saved) => ArtifactSaveResult {
+                status: ArtifactSaveStatus::Saved,
+                artifact_id: artifact_id.to_owned(),
+                target_name: saved.target_name,
+                extension_warning: warning,
+                message: Some("制品已安全保存".into()),
+            },
+            Err(error) => artifact_save_failure(artifact_id, target_name, warning, error),
+        }
+    }
+
+    fn reveal_saved(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        artifact_id: &str,
+        target_path: &str,
+    ) -> Result<(), DomainError> {
+        let record = repo.get_attachment(artifact_id).map_err(|_| {
+            DomainError::new(codes::ARTIFACT_NOT_FOUND, "Saved artifact is unavailable")
+        })?;
+        if record.task_id != *task_id {
+            return Err(DomainError::new(
+                codes::ARTIFACT_NOT_FOUND,
+                "Saved artifact does not belong to this task",
+            ));
+        }
+        let root = self.root_for_task(repo, task_id)?;
+        reveal_saved_artifact(
+            Path::new(&record.cache_path),
+            &root,
+            target_path,
+            &ArtifactFileExpectation {
+                bytes: record.bytes,
+                sha256: &record.sha256,
+            },
+            &self.protected_paths,
+        )
+        .map_err(artifact_save_domain_error)
+    }
+
     fn enforce_cache_quota(
         &self,
         repo: &dyn Repository,
@@ -603,6 +760,50 @@ impl ArtifactService for ManagedArtifactService {
         }
         Ok(())
     }
+}
+
+fn artifact_save_failure(
+    artifact_id: &str,
+    target_name: Option<String>,
+    extension_warning: Option<String>,
+    failure: ArtifactSaveIoError,
+) -> ArtifactSaveResult {
+    let (status, message) = match failure {
+        ArtifactSaveIoError::Conflict => (
+            ArtifactSaveStatus::Conflict,
+            "目标文件已存在或已变化；请选择取消、另存为新名称或再次明确覆盖",
+        ),
+        ArtifactSaveIoError::Rejected(message) => (ArtifactSaveStatus::Rejected, message),
+        ArtifactSaveIoError::Failed(message) => (ArtifactSaveStatus::Failed, message),
+    };
+    ArtifactSaveResult {
+        status,
+        artifact_id: artifact_id.to_owned(),
+        target_name,
+        extension_warning,
+        message: Some(message.into()),
+    }
+}
+
+fn artifact_save_domain_error(failure: ArtifactSaveIoError) -> DomainError {
+    match failure {
+        ArtifactSaveIoError::Conflict => DomainError::new(
+            codes::ARTIFACT_INVALID_FORMAT,
+            "Saved artifact target conflicts with an existing file",
+        ),
+        ArtifactSaveIoError::Rejected(message) => {
+            DomainError::new(codes::ARTIFACT_INVALID_FORMAT, message)
+        }
+        ArtifactSaveIoError::Failed(message) => {
+            DomainError::new(codes::ARTIFACT_CACHE_MISSING, message)
+        }
+    }
+}
+
+fn artifact_extension_warning(path: &Path, mime: &str) -> Option<String> {
+    validate_extension(path, mime)
+        .err()
+        .map(|_| format!("所选扩展名与 {mime} 内容不一致；文件只会被复制，不会执行"))
 }
 
 fn collect_files(

@@ -35,6 +35,9 @@ tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macr
 # async_trait for the AgentRuntime trait object (GAG-005).
 async-trait = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 # Used by integration tests that spawn the real tokio runtime.
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread", "test-util"] }

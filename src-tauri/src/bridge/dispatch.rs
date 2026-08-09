@@ -415,8 +415,17 @@ async fn dispatch(
         DesktopCommand::ArtifactImportBlob(payload) => artifact_import_blob(repo, payload),
         DesktopCommand::ArtifactList(payload) => artifact_list(repo, payload),
         DesktopCommand::ArtifactPreview(payload) => artifact_preview(repo, payload),
-        DesktopCommand::ArtifactReveal(payload) => artifact_reveal(repo, payload),
-        DesktopCommand::ArtifactSave(_) => not_implemented("artifact.save"),
+        DesktopCommand::ArtifactReveal(payload) => match artifacts {
+            Some(service) => artifact_reveal(repo, service, payload),
+            None => not_implemented("artifact.reveal"),
+        },
+        DesktopCommand::ArtifactSave(payload) => match artifacts {
+            Some(service) => artifact_save(repo, service, payload),
+            None => DesktopResult::err(AppError::new(
+                domain::error::codes::ARTIFACT_CACHE_MISSING,
+                "Artifact service is unavailable",
+            )),
+        },
 
         DesktopCommand::WorkspaceInspect(payload) => workspace_inspect(payload),
         DesktopCommand::WorktreeAdopt(_) => not_implemented("worktree.adopt"),
@@ -496,13 +505,40 @@ fn artifact_preview(
 
 fn artifact_reveal(
     repo: &dyn Repository,
-    payload: &super::commands::ArtifactIdPayload,
+    service: &dyn ArtifactService,
+    payload: &super::commands::ArtifactRevealPayload,
 ) -> DesktopResult {
-    use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
-    match ManagedArtifactService::new().reveal(repo, &payload.task_id, &payload.artifact_id) {
+    let result = match &payload.target_path {
+        Some(target_path) => {
+            service.reveal_saved(repo, &payload.task_id, &payload.artifact_id, target_path)
+        }
+        None => service.reveal(repo, &payload.task_id, &payload.artifact_id),
+    };
+    match result {
         Ok(()) => DesktopResult::ok(serde_json::json!({ "revealed": true })),
         Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
+}
+
+fn artifact_save(
+    repo: &dyn Repository,
+    service: &dyn ArtifactService,
+    payload: &super::commands::ArtifactSavePayload,
+) -> DesktopResult {
+    let result = service.save(
+        repo,
+        &payload.task_id,
+        &payload.artifact_id,
+        &payload.target_path,
+        payload.overwrite,
+    );
+    DesktopResult::ok(serde_json::to_value(result).unwrap_or_else(|_| {
+        serde_json::json!({
+            "status": "failed",
+            "artifactId": payload.artifact_id,
+            "message": "无法生成保存结果"
+        })
+    }))
 }
 
 async fn permission_resolve(

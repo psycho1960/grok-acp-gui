@@ -271,7 +271,7 @@ export type DesktopCommand =
   | { type: "artifact.import.blob"; payload: ArtifactImportBlobPayload }
   | { type: "artifact.list"; payload: ArtifactListPayload }
   | { type: "artifact.preview"; payload: ArtifactIdPayload }
-  | { type: "artifact.reveal"; payload: ArtifactIdPayload }
+  | { type: "artifact.reveal"; payload: ArtifactRevealPayload }
   | { type: "artifact.save"; payload: ArtifactSavePayload }
   | { type: "workspace.inspect"; payload: WorkspaceInspectPayload }
   | { type: "worktree.adopt"; payload: WorktreeAdoptPayload }
@@ -384,6 +384,10 @@ export interface ArtifactImportBlobPayload {
 
 export interface ArtifactListPayload { taskId: TaskId; }
 export interface ArtifactIdPayload { taskId: TaskId; artifactId: string; }
+export interface ArtifactRevealPayload extends ArtifactIdPayload {
+  /** Destination returned by the native save dialog; omitted for managed copy. */
+  targetPath?: string;
+}
 
 /** Metadata-only Artifact DTO. Cache paths and bytes never cross DesktopBridge. */
 export interface ArtifactDescriptor {
@@ -397,8 +401,10 @@ export interface ArtifactDescriptor {
 
 export interface ArtifactSavePayload {
   taskId: TaskId;
-  artifactIds: string[];
+  artifactId: string;
   targetPath: string;
+  /** Must remain false until the backend has returned a conflict. */
+  overwrite: boolean;
 }
 
 export interface WorkspaceInspectPayload {
@@ -657,6 +663,16 @@ export interface ArtifactPreviewResult {
   artifact: ArtifactDescriptor;
   /** Opaque custom-scheme URL. Never a filesystem path or data URL. */
   url: string;
+}
+
+export type ArtifactSaveStatus = "saved" | "cancelled" | "conflict" | "rejected" | "failed";
+
+export interface ArtifactSaveResult {
+  status: ArtifactSaveStatus;
+  artifactId: string;
+  targetName?: string;
+  extensionWarning?: string;
+  message?: string;
 }
 
 export interface WorkspaceInspectResult {

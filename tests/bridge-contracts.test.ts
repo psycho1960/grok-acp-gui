@@ -148,6 +148,21 @@ describe("DesktopCommand round-trip", () => {
     expect(cmd.payload.blobs[0].displayName).toBe("截图.png");
   });
 
+  it("parses artifact.save as a single-file, explicit-overwrite command", () => {
+    const cmd = {
+      type: "artifact.save",
+      payload: {
+        taskId: "task-1" as TaskId,
+        artifactId: "artifact-1",
+        targetPath: "C:\\Users\\tester\\result.png",
+        overwrite: false,
+      },
+    } satisfies DesktopCommand;
+    expect(cmd.payload.artifactId).toBe("artifact-1");
+    expect(cmd.payload.overwrite).toBe(false);
+    expect(JSON.stringify(cmd)).not.toMatch(/artifactIds|base64|cachePath/i);
+  });
+
   it("parses session.configure settings", () => {
     const cmd = {
       type: "session.configure",

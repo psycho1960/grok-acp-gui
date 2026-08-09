@@ -154,6 +154,17 @@ pub struct ArtifactIdPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ArtifactRevealPayload {
+    pub task_id: super::types::TaskId,
+    pub artifact_id: String,
+    /// Present only when revealing a destination previously selected by the
+    /// native save dialog. The backend revalidates it against the artifact.
+    #[serde(default)]
+    pub target_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArtifactListPayload {
     pub task_id: super::types::TaskId,
 }
@@ -162,8 +173,10 @@ pub struct ArtifactListPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactSavePayload {
     pub task_id: super::types::TaskId,
-    pub artifact_ids: Vec<String>,
+    pub artifact_id: String,
     pub target_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -273,7 +286,7 @@ pub enum DesktopCommand {
     #[serde(rename = "artifact.preview")]
     ArtifactPreview(ArtifactIdPayload),
     #[serde(rename = "artifact.reveal")]
-    ArtifactReveal(ArtifactIdPayload),
+    ArtifactReveal(ArtifactRevealPayload),
     #[serde(rename = "artifact.save")]
     ArtifactSave(ArtifactSavePayload),
 
@@ -500,19 +513,24 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             Ok(())
         }
 
-        DesktopCommand::ArtifactPreview(p) | DesktopCommand::ArtifactReveal(p) => {
+        DesktopCommand::ArtifactPreview(p) => {
             validate_id_non_empty(&p.task_id.0)?;
             validate_id_non_empty(&p.artifact_id)?;
             Ok(())
         }
 
+        DesktopCommand::ArtifactReveal(p) => {
+            validate_id_non_empty(&p.task_id.0)?;
+            validate_id_non_empty(&p.artifact_id)?;
+            if let Some(path) = &p.target_path {
+                validate_non_empty_path(path)?;
+            }
+            Ok(())
+        }
+
         DesktopCommand::ArtifactSave(p) => {
             validate_id_non_empty(&p.task_id.0)?;
-            if p.artifact_ids.is_empty() {
-                return Err(validation_err(
-                    "artifact.save requires at least one artifact ID",
-                ));
-            }
+            validate_id_non_empty(&p.artifact_id)?;
             validate_non_empty_path(&p.target_path)?;
             Ok(())
         }
@@ -709,6 +727,29 @@ mod tests {
         } else {
             panic!("wrong variant");
         }
+    }
+
+    #[test]
+    fn artifact_save_is_single_file_and_requires_explicit_overwrite() {
+        let json = r#"{"type":"artifact.save","payload":{"taskId":"task-1","artifactId":"artifact-1","targetPath":"C:\\Users\\tester\\result.png","overwrite":false}}"#;
+        let command: DesktopCommand = serde_json::from_str(json).expect("save command");
+        validate(&command).expect("valid save command");
+        let DesktopCommand::ArtifactSave(payload) = command else {
+            panic!("wrong command variant");
+        };
+        assert_eq!(payload.artifact_id, "artifact-1");
+        assert!(!payload.overwrite);
+    }
+
+    #[test]
+    fn artifact_save_rejects_empty_artifact_id() {
+        let command = DesktopCommand::ArtifactSave(ArtifactSavePayload {
+            task_id: super::super::types::TaskId::new("task-1"),
+            artifact_id: " ".into(),
+            target_path: r"C:\Users\tester\result.png".into(),
+            overwrite: false,
+        });
+        assert!(validate(&command).is_err());
     }
 
     #[test]

@@ -6,6 +6,7 @@ import type {
   ArtifactImportResult,
   ArtifactListResult,
   ArtifactPreviewResult,
+  ArtifactSaveResult,
   BootstrapSnapshot,
   DesktopBridge,
   DesktopResult,
@@ -41,6 +42,13 @@ export interface ConversationFacade {
   listArtifacts(taskId: TaskId): Promise<DesktopResult<ArtifactListResult>>;
   previewArtifact(taskId: TaskId, artifactId: string): Promise<DesktopResult<ArtifactPreviewResult>>;
   revealArtifact(taskId: TaskId, artifactId: string): Promise<DesktopResult>;
+  saveArtifact(
+    taskId: TaskId,
+    artifactId: string,
+    targetPath: string,
+    overwrite: boolean,
+  ): Promise<DesktopResult<ArtifactSaveResult>>;
+  revealSavedArtifact(taskId: TaskId, artifactId: string, targetPath: string): Promise<DesktopResult>;
   resolvePermission(payload: import("../../bridge/types").PermissionResolvePayload): Promise<DesktopResult>;
   resolvePlan(payload: import("../../bridge/types").PlanResolvePayload): Promise<DesktopResult>;
   subscribe(
@@ -109,6 +117,20 @@ export function createConversationFacade(
 
     async revealArtifact(taskId, artifactId) {
       return bridge.execute({ type: "artifact.reveal", payload: { taskId, artifactId } });
+    },
+
+    async saveArtifact(taskId, artifactId, targetPath, overwrite) {
+      return bridge.execute({
+        type: "artifact.save",
+        payload: { taskId, artifactId, targetPath, overwrite },
+      }) as Promise<DesktopResult<ArtifactSaveResult>>;
+    },
+
+    async revealSavedArtifact(taskId, artifactId, targetPath) {
+      return bridge.execute({
+        type: "artifact.reveal",
+        payload: { taskId, artifactId, targetPath },
+      });
     },
 
     async resolvePermission(payload) {

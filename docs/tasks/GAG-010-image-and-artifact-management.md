@@ -66,7 +66,7 @@ Luna 可补充已知 MIME 的预览快照、元数据表格和文档；Flash 可
 
 Artifact 状态：`importing -> ready|rejected|failed`，已存在项可进入 `missing` 或 `quarantined`。状态不得从 failed 自动回 ready，必须重新验证。
 
-`ArtifactService`：`import`、`register_agent_artifact`、`list`、`get_metadata`、`open_preview_stream`、`reveal`、`remove_reference`、`enforce_cache_quota`。
+`ArtifactService`：`import`、`register_agent_artifact`、`list`、`get_metadata`、`open_preview_stream`、`save`、`reveal`、`remove_reference`、`enforce_cache_quota`。`save` 仅处理单个 `artifactId`，从 Repository 解析真实受管路径，并以同目录临时文件和原子提交完成；覆盖必须先返回冲突，再由用户明确确认。
 
 `ArtifactDescriptor` 含 ID、owner task/session、original name、managed relative path、MIME、size、sha256、source、created_at、preview capability、redaction classification。
 
