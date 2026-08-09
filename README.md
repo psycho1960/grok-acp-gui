@@ -2,7 +2,9 @@
 
 Grok ACP GUI 是 Windows 优先的本地桌面应用，计划通过结构化 Agent Client Protocol（ACP）连接 Grok Build，为开发者提供可观察、可审批、可恢复的编码工作流。
 
-当前分支完成 GAG-001 工程基线：保留上游 ACP UI 的源版本记录、Vue/Pinia、Tauri、Windows 桌面壳、文件夹选择、本地存储插件能力和 ACP SDK 依赖基线；暂不持久化项目、任务、会话或密钥，不创建或启动业务子进程，也不实现 Grok 探测、ACP framing/transport、ACP 会话、任务、权限、图片、Diff、Worktree 或数据库。ACP runtime 与 stdio transport 由 GAG-005 在 Rust `agent_runtime`/`grok_acp` 边界实现。
+当前 `main` 已合并 GAG-001～GAG-010 的工程基线、设计系统、DesktopBridge、持久化、ACP runtime、恢复、任务中心、对话、Plan/权限和受管 Artifact 能力。对话模式、模型与 reasoning、Slash Commands、剪贴板图片、标题派生与中文化的归档编号为 GAG-010A；详见 [`docs/tasks/GAG-010A-conversation-controls-and-localization.md`](docs/tasks/GAG-010A-conversation-controls-and-localization.md)。
+
+GAG-011 仍专指安全的 Worktree 生命周期，GAG-012 仍专指 Diff 与 Checkpoint；二者尚未因 GAG-010A 而实现或改变定义。
 
 ## 上游基线
 
@@ -45,4 +47,4 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - [`docs/tasks/`](docs/tasks/)：GAG 任务说明书
 - [`docs/adr/`](docs/adr/)：已接受的架构与仓库决策
 
-后续任务会逐步替换当前 bootstrap 占位，并实现 DesktopBridge、Grok ACP runtime、任务中心、审查和 Worktree 生命周期。
+后续工作从 GAG-011 的 Worktree 生命周期开始，随后是 GAG-012 的 Diff 与 Checkpoint；任务顺序和依赖以路线图为准。

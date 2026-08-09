@@ -1,4 +1,4 @@
-// GAG-010 / goal: mode ↔ workspace strategy linkage in the conversation.
+// GAG-010A / goal: mode ↔ workspace strategy linkage in the conversation.
 // Drives the real shipped pure mapping, store, header control, and view.
 
 import { createPinia, setActivePinia } from "pinia";

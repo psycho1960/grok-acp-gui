@@ -22,6 +22,7 @@
 | GAG-008 | D4 | Grok 4.5 | GPT-5.6 Sol | 对话、工具时间线 |
 | GAG-009 | D5 | GPT-5.6 Sol | DeepSeek V4 Pro | 权限、Plan gate |
 | GAG-010 | D4 | Grok 4.5 | GPT-5.6 Terra | 图片、Artifact |
+| GAG-010A | D3 | GPT-5.6 Terra | GPT-5.6 Luna（机械同步） | 对话配置、Slash Command、剪贴板与中文化归档 |
 | GAG-011 | D5 | GPT-5.6 Sol | DeepSeek V4 Pro | Worktree 生命周期 |
 | GAG-012 | D4 | DeepSeek V4 Pro | GPT-5.6 Sol | Diff、检查点 |
 | GAG-013 | D5 | GPT-5.6 Sol | DeepSeek V4 Pro | Squash 集成 |
@@ -52,6 +53,9 @@ flowchart TD
     T4 --> T10["GAG-010 Artifacts"]
     T8 --> T10
     T9 --> T10
+    T8 --> T10A["GAG-010A Conversation Controls"]
+    T9 --> T10A
+    T10 --> T10A
     T4 --> T11["GAG-011 Worktree"]
     T5 --> T11
     T6 --> T11
@@ -64,6 +68,7 @@ flowchart TD
     T6 --> T15["GAG-015 Test & Harden"]
     T9 --> T15
     T10 --> T15
+    T10A --> T15
     T14 --> T15
     T15 --> T16["GAG-016 Windows Package"]
 ```
@@ -86,6 +91,7 @@ flowchart TD
 
 - GAG-006、GAG-008、GAG-009 完成并发、对话、权限和 Plan。
 - GAG-010 可在 GAG-008 稳定后与 GAG-011 并行。
+- GAG-010A 归档既有的对话配置、Slash Command、剪贴板与中文化成果；它依赖 GAG-008～010 的已存在契约，不实现或阻塞 GAG-011 Worktree 生命周期。
 - Gate C：三会话事件不串线；Plan 写入负面测试通过；图片缓存可恢复。
 
 ### Phase D：Git 闭环
@@ -127,7 +133,7 @@ PRD 第 9 节是完整追踪矩阵；本路线图按实施批次给出同一组 
 
 ## 7. 路线图完成定义
 
-- 16 个任务的 Definition of Done 均满足。
+- 17 个任务的 Definition of Done 均满足。
 - 所有 FR/NFR 有自动化或明确手工验收证据。
 - D5 任务存在独立旗舰模型审查记录。
 - Windows 安装包可在干净机器完成首次启动主路径。

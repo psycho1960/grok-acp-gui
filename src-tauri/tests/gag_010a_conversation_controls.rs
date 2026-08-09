@@ -1,4 +1,4 @@
-//! GAG-010 / goal: per-task model & reasoning settings, ACP slash-command
+//! GAG-010A / goal: per-task model & reasoning settings, ACP slash-command
 //! discovery, clipboard blob imports, and auto-derived task titles.
 //!
 //! Public seam: DesktopBridge dispatcher backed by real SQLite,

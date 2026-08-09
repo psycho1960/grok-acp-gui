@@ -1,4 +1,4 @@
-// GAG-010 / goal: clipboard screenshot paste, in-conversation model &
+// GAG-010A / goal: clipboard screenshot paste, in-conversation model &
 // reasoning switching, optional task title with auto-derivation, slash
 // command menu, and a full-Chinese UI audit.
 //

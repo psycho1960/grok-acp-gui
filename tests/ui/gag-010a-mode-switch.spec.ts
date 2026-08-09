@@ -1,4 +1,4 @@
-// GAG-011 / goal: in-conversation mode switching (智能体/计划/问答).
+// GAG-010A / goal: in-conversation mode switching (智能体/计划/问答).
 // Drives the real shipped store, header control, and view wiring.
 
 import { createPinia, setActivePinia } from "pinia";
