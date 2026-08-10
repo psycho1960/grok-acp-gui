@@ -150,6 +150,7 @@ Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该
 - `review.diff`、`review.checkpoint`
 - `integration.preflight`、`integration.execute`、`integration.status`、`integration.abort`、`integration.publish`、`integration.cleanup`
 - `worktree.cleanup`、`recovery.restore`、`recovery.delete`
+- `recovery.scan`、`recovery.getIssue`、`recovery.prepareAction`、`recovery.executeAction`、`recovery.createBundle`、`recovery.verifyBundle`、`recovery.history`
 
 事件联合类型：`runtime.updated`、`task.snapshot`、`task.state`、`message.delta`、`activity.updated`、`permission.requested`、`plan.updated`、`changes.updated`、`artifact.available`、`resource.warning`、`diagnostic.notice`。
 
@@ -164,6 +165,8 @@ GAG-009 将 `permission.resolve` 固定为 `{ taskId, sessionId, requestId, corr
 GAG-010C 将 `artifact.save` 固定为单文件契约 `{ taskId, artifactId, targetPath, overwrite }`。`targetPath` 只能来自 Renderer 通过系统保存对话框取得的用户选择；`overwrite` 首次必须为 `false`，后端返回 `conflict` 后由用户明确确认才可重试为 `true`。返回 `ArtifactSaveResult.status` 为 `saved|cancelled|conflict|rejected|failed`，不返回受管源路径或文件正文。`artifact.reveal` 可选携带同一已选择目标路径；后端验证该目标仍与受管 Artifact 的大小及 SHA-256 一致后，仅在资源管理器中定位，不执行文件。批量保存和目录替换不在该契约内。
 
 GAG-011 增加 `worktree.create`、`worktree.inspect`、`worktree.reconcile`、`worktree.prepareRemoval`、`worktree.prepareAdoption` 和 `worktree.remove`。创建请求中的 repo、slug 与 base ref 均视为低信任提示；后端必须从持久化 Task → Project 关系重新派生仓库、任务标题与当前 base，并拒绝 common git dir 不一致的请求。删除必须先取得一次性、十分钟有效的 prepare token，再把 UI 展示的准确绝对路径逐字回传；未合并或 dirty 时还必须明确确认强制清理并依赖已验证恢复包。token、task、登记记录、Git porcelain、repo identity、relative path、canonical managed-root 证明、prepare 后内容指纹和恢复包 hash 任一不一致都拒绝删除。外部 Worktree 接管同样使用十分钟 prepare token 与准确路径二次确认，但保持 `adopted` 所有权，不能进入受管删除。旧 `worktree.cleanup(force)` 不承载这些证明，继续 fail-closed，不作为删除入口。
+
+GAG-014 的 `RecoveryService` 固定为 `scan`、`get_issue`、`prepare_action`、`execute_action`、`create_bundle`、`verify_bundle`、`list_history`。扫描只追加带稳定 identity 和递增 revision 的证据，不执行清理；动作必须来自对应 revision 的 `safeActions`，经 `detected → assessed → ready` 生成绑定资源、canonical path、预期状态、步骤、审批摘要和十分钟有效期的计划，执行时再次核对最新 revision。旧 `recovery.restore`/`recovery.delete` 直接入口不接受执行，恢复与删除恢复包也必须通过计划动作。
 
 任务启动与清理使用 SQLite `IMMEDIATE` 事务协调：任务只能在登记 Worktree 为 `ready|dirty|active` 时进入运行态，清理只能在任务不含 live process 状态时把同一登记原子切换为 `closing`。先完成的一方阻止另一方，消除 ACP 启动与 `git worktree remove` 的 TOCTOU。对账同时返回未登记的外部 Worktree（只读、不可清理）；只有显式绑定到同仓库 Task 后才登记为 `adopted`。
 
@@ -241,6 +244,8 @@ Migration `0004_worktree_lifecycle.sql` 只追加 Worktree 生命周期列：rep
 
 Migration `0006_squash_integrations.sql` 保存冻结的 source/target SHA、Checkpoint range、来源 dirty 标志与结构化 status digest、提交说明、验证命令摘要、审批摘要、临时 Worktree 证明、冲突/验证结果、result commit、恢复包和清理状态；`integration_audit_events` 以 append-only 事件保留每次状态变化。`0007_squash_integration_recovery.sql` 在不改写既有 Migration 的前提下追加稳定 repo identity：新 attempt 通过 SQLite partial unique index 持有以 common git dir 派生的 repo 级 lease；v6 遗留 active attempt 不进入索引，以允许含重复记录的数据库升级，但在全部遗留 attempt 清理完成前 fail-closed 阻止任何新集成，避免不同 Worktree 路径绕过身份锁。Renderer 只回传本次 preflight 返回的 attempt ID 与 approval digest，后端仍从持久化计划重新派生全部 Git argv。预检返回由冻结 target/source SHA 派生的预计文件清单，该清单序列化后也纳入 approval digest。未选择变更允许保留在来源 Worktree，但其 status digest 纳入审批；start/publish 前发生变化即 fail closed。merge/rebase/cherry-pick/revert/bisect 等进行中 Git 操作直接拒绝预检。
 
+Migration `0008_recovery_center.sql` 追加 `recovery_scans`、append-only `recovery_issues`、`recovery_action_plans`、`recovery_bundles` 和 `recovery_step_results`。旧 issue revision、计划和步骤结果不更新或覆盖；重新扫描和状态推进均写入新 revision/新记录。
+
 ## 10. Worktree 与集成算法
 
 ### 创建
@@ -280,9 +285,10 @@ GAG-013 将 Integration Interface 固定为 `prepare_squash`、`start_squash`、
 
 强制清理恢复包目录包含：
 
-- `manifest.json`：仓库、任务、分支、base/head、路径、文件清单、hash、创建/到期时间。
+- `manifest.json`（version 2）：应用版本、task/session/worktree/integration IDs、仓库与数据库摘要、分支、base/head、结构化 Git status 摘要、路径、文件大小与 SHA-256、未跟踪文件包含/跳过清单、创建/到期时间。
 - `branch.bundle`：未合并提交可达对象。
-- `tracked.patch`：staged/unstaged binary patch。
+- `tracked.patch`：相对 HEAD 的 tracked binary patch。
+- `staged.patch`：可安全取得时保存相对 HEAD 的 staged binary patch。
 - `untracked.zip`：`git ls-files --others --exclude-standard` 返回的文件，不含 ignored。
 
 创建后检查文件存在、长度、manifest hash 和可读性。验证失败则禁止删除。默认 7 天，应用启动和每日首次打开时清理过期项；删除恢复项也需明确确认。
