@@ -51,15 +51,18 @@ impl SqliteRepository {
         conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))
             .map_err(|e| db_error("Failed to set busy timeout", &e))?;
 
-        // Enable WAL mode and foreign keys.
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA foreign_keys=ON;",
-        )
-        .map_err(|e| db_error("Failed to set pragmas", &e))?;
+        // Foreign-key enforcement is connection-local and does not mutate a
+        // database that may belong to a newer application version.  Defer
+        // the persistent WAL journal-mode change until the schema gate and
+        // all pending migrations have succeeded.
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .map_err(|e| db_error("Failed to enable foreign keys", &e))?;
 
         migration::run_migrations_transactional(&mut conn)
             .map_err(|e| DomainError::new("DB_MIGRATION_FAILED", e.to_string()))?;
+
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(|e| db_error("Failed to enable WAL mode", &e))?;
 
         Ok(SqliteRepository {
             conn: Mutex::new(conn),

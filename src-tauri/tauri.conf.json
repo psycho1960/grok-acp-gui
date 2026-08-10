@@ -27,6 +27,30 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "msi"],
-    "icon": ["icons/icon.ico"]
+    "publisher": "Grok ACP GUI contributors",
+    "copyright": "Copyright (c) 2026 Grok ACP GUI contributors",
+    "license": "MIT",
+    "category": "DeveloperTool",
+    "shortDescription": "Windows desktop client for Grok ACP",
+    "longDescription": "A Windows desktop client for running Grok through the Agent Client Protocol with isolated task workspaces.",
+    "icon": ["icons/icon.ico"],
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "wix": {
+        "upgradeCode": "59b1c3c7-7027-5376-86b5-69993d342750",
+        "language": "en-US"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "languages": ["English", "SimpChinese"]
+      }
+    }
   }
 }
