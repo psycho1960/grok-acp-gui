@@ -8,6 +8,7 @@ coverage/
 test-results/
 test-results-*/
 .gag-015-evidence/
+.gag-016-evidence/
 .pw-out-*/
 _ci_logs*/
 *.zip

@@ -1,0 +1,102 @@
+name: Windows Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Candidate signing mode
+        required: true
+        default: internal-unsigned
+        type: choice
+        options:
+          - internal-unsigned
+          - signed
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  GAG016_TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout fixed candidate
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Rust stable MSVC
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Verify GAG-015 release gate
+        run: npm run gate:gag015
+
+      - name: Verify Windows packaging configuration
+        run: npm run release:gag016:verify
+
+      - name: Prepare ephemeral code-signing configuration
+        if: inputs.candidate == 'signed'
+        env:
+          GAG016_SIGNING_CERTIFICATE_BASE64: ${{ secrets.GAG016_SIGNING_CERTIFICATE_BASE64 }}
+          GAG016_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.GAG016_SIGNING_CERTIFICATE_PASSWORD }}
+          GAG016_SIGNING_TIMESTAMP_URL: ${{ secrets.GAG016_SIGNING_TIMESTAMP_URL }}
+        shell: pwsh
+        run: >-
+          ./scripts/gag-016-signing.ps1 -Action Prepare
+          -ConfigPath "$env:RUNNER_TEMP/gag016-signing.json"
+          -ReceiptPath "$env:RUNNER_TEMP/gag016-signing.receipt"
+
+      - name: Build unsigned x64 NSIS and MSI
+        if: inputs.candidate == 'internal-unsigned'
+        run: npm run tauri build -- --target ${{ env.GAG016_TARGET }}
+
+      - name: Build signed x64 NSIS and MSI
+        if: inputs.candidate == 'signed'
+        run: npm run tauri build -- --target ${{ env.GAG016_TARGET }} --config "$env:RUNNER_TEMP/gag016-signing.json"
+
+      - name: Run ephemeral installer and data-retention smoke test
+        shell: pwsh
+        env:
+          GAG016_SMOKE_ALLOW_EPHEMERAL_RUNNER: '1'
+        run: >-
+          ./scripts/gag-016-installer-smoke.ps1
+          -BundlePath "src-tauri/target/${{ env.GAG016_TARGET }}/release/bundle"
+
+      - name: Generate unsigned candidate manifest
+        if: inputs.candidate == 'internal-unsigned'
+        run: npm run release:gag016:manifest -- "src-tauri/target/${{ env.GAG016_TARGET }}/release/bundle" ".gag-016-evidence"
+
+      - name: Generate and verify signed candidate manifest
+        if: inputs.candidate == 'signed'
+        run: npm run release:gag016:manifest -- "src-tauri/target/${{ env.GAG016_TARGET }}/release/bundle" ".gag-016-evidence" --require-signed
+
+      - name: Remove ephemeral signing material
+        if: always() && inputs.candidate == 'signed'
+        shell: pwsh
+        run: >-
+          ./scripts/gag-016-signing.ps1 -Action Cleanup
+          -ConfigPath "$env:RUNNER_TEMP/gag016-signing.json"
+          -ReceiptPath "$env:RUNNER_TEMP/gag016-signing.receipt"
+
+      - name: Upload installers and evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-acp-gui-${{ inputs.candidate }}-${{ env.GAG016_TARGET }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            src-tauri/target/${{ env.GAG016_TARGET }}/release/bundle/nsis/*.exe
+            src-tauri/target/${{ env.GAG016_TARGET }}/release/bundle/msi/*.msi
+            .gag-016-evidence/**
