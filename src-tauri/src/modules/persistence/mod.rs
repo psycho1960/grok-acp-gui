@@ -13,6 +13,10 @@ use crate::modules::task_runtime::permission::{
     ApprovalEvidence, ExecutionContext, PermissionDecision, PermissionRecord,
 };
 use crate::modules::task_runtime::plan::{PlanDecision, PlanRecord};
+use crate::modules::task_runtime::recovery::{
+    RecoveryActionPlan, RecoveryBundleRecord, RecoveryHistory, RecoveryIssue, RecoveryScan,
+    RecoveryStepResult,
+};
 
 /// Result alias used throughout the persistence layer.
 pub type RepoResult<T> = Result<T, DomainError>;
@@ -192,6 +196,25 @@ pub trait Repository: Send + Sync {
     fn delete_recovery_item(&self, id: &str) -> RepoResult<()>;
 
     // ------------------------------------------------------------------
+    // GAG-014 Recovery Center (append-only)
+    // ------------------------------------------------------------------
+
+    fn create_recovery_scan(&self, scan: &RecoveryScan) -> RepoResult<()>;
+    fn append_recovery_issue(&self, issue: &RecoveryIssue) -> RepoResult<()>;
+    fn latest_recovery_issue(&self, stable_key: &str) -> RepoResult<Option<RecoveryIssue>>;
+    fn get_recovery_issue(
+        &self,
+        issue_id: &str,
+        revision: Option<u32>,
+    ) -> RepoResult<RecoveryIssue>;
+    fn create_recovery_action_plan(&self, plan: &RecoveryActionPlan) -> RepoResult<()>;
+    fn get_recovery_action_plan(&self, id: &str) -> RepoResult<RecoveryActionPlan>;
+    fn append_recovery_step_result(&self, result: &RecoveryStepResult) -> RepoResult<()>;
+    fn create_recovery_bundle_record(&self, bundle: &RecoveryBundleRecord) -> RepoResult<()>;
+    fn get_recovery_bundle_record(&self, id: &str) -> RepoResult<RecoveryBundleRecord>;
+    fn list_recovery_history(&self) -> RepoResult<RecoveryHistory>;
+
+    // ------------------------------------------------------------------
     // Settings
     // ------------------------------------------------------------------
 
@@ -248,4 +271,8 @@ pub trait Repository: Send + Sync {
     /// (running, waiting_permission, integrating) to interrupted,
     /// recording the reason. Returns the count of affected tasks.
     fn recover_interrupted_tasks(&self, reason: &str) -> RepoResult<u32>;
+
+    /// All durable integration attempts whose temporary resources have not
+    /// reached cleanup completion.
+    fn list_active_integrations(&self) -> RepoResult<Vec<IntegrationAttempt>>;
 }

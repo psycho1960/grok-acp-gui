@@ -262,6 +262,106 @@ export interface RecoveryItem {
   state: RecoveryState;
 }
 
+export type RecoveryIssueKind =
+  | "interrupted_task"
+  | "orphaned_session"
+  | "worktree_mismatch"
+  | "temporary_integration"
+  | "artifact_temporary_file"
+  | "persistence_marker"
+  | "recovery_bundle";
+export type RecoverySeverity = "immediate" | "deferred" | "informational";
+export type RecoveryIssueStatus =
+  | "detected"
+  | "assessed"
+  | "ready"
+  | "executing"
+  | "resolved"
+  | "retained"
+  | "failed"
+  | "needs_manual_action";
+export type RecoveryActionKind =
+  | "mark_interrupted"
+  | "reregister"
+  | "retain"
+  | "show_location"
+  | "resume_session"
+  | "continue_integration"
+  | "abort_integration"
+  | "verify_and_cleanup"
+  | "restore_bundle"
+  | "delete_bundle";
+
+export interface RecoveryIssue {
+  issueId: string;
+  revision: number;
+  scanId?: string;
+  stableKey: string;
+  kind: RecoveryIssueKind;
+  severity: RecoverySeverity;
+  status: RecoveryIssueStatus;
+  taskId?: TaskId;
+  resourceId: string;
+  canonicalPath?: string;
+  evidence: Record<string, unknown>;
+  impact: string;
+  recommendedAction: string;
+  safeActions: RecoveryActionKind[];
+  detectedAt: string;
+}
+
+export interface RecoveryActionPlan {
+  id: string;
+  issueId: string;
+  issueRevision: number;
+  actionKind: RecoveryActionKind;
+  resourceIdentity: string;
+  canonicalPath?: string;
+  expectedState: Record<string, unknown>;
+  steps: string[];
+  destructiveLevel: "non_destructive" | "destructive";
+  approvalDigest: string;
+  expiresAtEpoch: number;
+  createdAt: string;
+}
+
+export interface RecoveryBundleRecord {
+  id: string;
+  issueId: string;
+  issueRevision: number;
+  recoveryItemId: string;
+  manifestPath: string;
+  manifestSha256: string;
+  verified: boolean;
+  createdAt: string;
+}
+
+export interface RecoveryScan {
+  id: string;
+  triggerKind: "startup" | "manual";
+  startedAt: string;
+  completedAt: string;
+  issueCount: number;
+}
+
+export interface RecoveryStepResult {
+  id: number;
+  planId: string;
+  stepIndex: number;
+  stepName: string;
+  status: string;
+  detailRedacted: string;
+  occurredAt: string;
+}
+
+export interface RecoveryHistory {
+  scans: RecoveryScan[];
+  issues: RecoveryIssue[];
+  plans: RecoveryActionPlan[];
+  bundles: RecoveryBundleRecord[];
+  steps: RecoveryStepResult[];
+}
+
 export interface Settings {
   key: string;
   jsonValue: unknown;
@@ -314,7 +414,14 @@ export type DesktopCommand =
   | { type: "integration.openWorktree"; payload: IntegrationAttemptPayload }
   | { type: "worktree.cleanup"; payload: WorktreeCleanupPayload }
   | { type: "recovery.restore"; payload: RecoveryRestorePayload }
-  | { type: "recovery.delete"; payload: RecoveryDeletePayload };
+  | { type: "recovery.delete"; payload: RecoveryDeletePayload }
+  | { type: "recovery.scan"; payload: RecoveryScanPayload }
+  | { type: "recovery.getIssue"; payload: RecoveryIssuePayload }
+  | { type: "recovery.prepareAction"; payload: RecoveryPrepareActionPayload }
+  | { type: "recovery.executeAction"; payload: RecoveryExecuteActionPayload }
+  | { type: "recovery.createBundle"; payload: RecoveryCreateBundlePayload }
+  | { type: "recovery.verifyBundle"; payload: RecoveryVerifyBundlePayload }
+  | { type: "recovery.history"; payload: Record<string, never> };
 
 export interface RuntimeLoginPayload {
   method?: "oauth" | "device_auth" | "status" | "cancel";
@@ -466,6 +573,7 @@ export interface RecoveryEvidence {
   manifestPath: string;
   branchBundle: string;
   trackedPatch: string;
+  stagedPatch?: string;
   untrackedZip: string;
 }
 
@@ -542,6 +650,19 @@ export interface RecoveryRestorePayload {
 export interface RecoveryDeletePayload {
   itemId: string;
 }
+
+export interface RecoveryScanPayload {
+  triggerKind?: "startup" | "manual";
+}
+export interface RecoveryIssuePayload { issueId: string; revision?: number; }
+export interface RecoveryPrepareActionPayload {
+  issueId: string;
+  revision: number;
+  action: RecoveryActionKind;
+}
+export interface RecoveryExecuteActionPayload { planId: string; approvalDigest: string; }
+export interface RecoveryCreateBundlePayload { issueId: string; revision: number; }
+export interface RecoveryVerifyBundlePayload { bundleId: string; }
 
 // ---------------------------------------------------------------------------
 // DesktopEvent

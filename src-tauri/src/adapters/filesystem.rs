@@ -461,6 +461,28 @@ pub fn reveal_managed_directory(path: &Path, managed_root: &Path) -> Result<(), 
     Ok(())
 }
 
+/// Selects one verified regular file in Explorer. The caller supplies a
+/// module-owned root; arbitrary Renderer paths never reach this function.
+pub fn reveal_managed_file(path: &Path, managed_root: &Path) -> Result<(), &'static str> {
+    let root = managed_root
+        .canonicalize()
+        .map_err(|_| "受管文件根目录不可用")?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| "受管文件已不可用")?;
+    if !metadata.is_file() || is_link_or_reparse(&metadata) {
+        return Err("受管文件未通过普通文件验证");
+    }
+    let target = path.canonicalize().map_err(|_| "受管文件已不可用")?;
+    if !target.starts_with(&root) {
+        return Err("受管文件未通过根目录验证");
+    }
+    std::process::Command::new("explorer.exe")
+        .arg("/select,")
+        .arg(&target)
+        .spawn()
+        .map_err(|_| "无法在资源管理器中显示受管文件")?;
+    Ok(())
+}
+
 fn validate_managed_source(
     source_path: &Path,
     managed_root: &Path,

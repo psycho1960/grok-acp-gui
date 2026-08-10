@@ -294,6 +294,49 @@ pub struct RecoveryDeletePayload {
     pub item_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryScanPayload {
+    #[serde(default)]
+    pub trigger_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryIssuePayload {
+    pub issue_id: String,
+    #[serde(default)]
+    pub revision: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryPrepareActionPayload {
+    pub issue_id: String,
+    pub revision: u32,
+    pub action: crate::modules::task_runtime::recovery::RecoveryActionKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryExecuteActionPayload {
+    pub plan_id: String,
+    pub approval_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryCreateBundlePayload {
+    pub issue_id: String,
+    pub revision: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryVerifyBundlePayload {
+    pub bundle_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Discriminated union
 // ---------------------------------------------------------------------------
@@ -397,6 +440,20 @@ pub enum DesktopCommand {
     RecoveryRestore(RecoveryRestorePayload),
     #[serde(rename = "recovery.delete")]
     RecoveryDelete(RecoveryDeletePayload),
+    #[serde(rename = "recovery.scan")]
+    RecoveryScan(RecoveryScanPayload),
+    #[serde(rename = "recovery.getIssue")]
+    RecoveryGetIssue(RecoveryIssuePayload),
+    #[serde(rename = "recovery.prepareAction")]
+    RecoveryPrepareAction(RecoveryPrepareActionPayload),
+    #[serde(rename = "recovery.executeAction")]
+    RecoveryExecuteAction(RecoveryExecuteActionPayload),
+    #[serde(rename = "recovery.createBundle")]
+    RecoveryCreateBundle(RecoveryCreateBundlePayload),
+    #[serde(rename = "recovery.verifyBundle")]
+    RecoveryVerifyBundle(RecoveryVerifyBundlePayload),
+    #[serde(rename = "recovery.history")]
+    RecoveryHistory(EmptyPayload),
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +506,13 @@ pub fn is_known_command(cmd_type: &str) -> bool {
             | "worktree.cleanup"
             | "recovery.restore"
             | "recovery.delete"
+            | "recovery.scan"
+            | "recovery.getIssue"
+            | "recovery.prepareAction"
+            | "recovery.executeAction"
+            | "recovery.createBundle"
+            | "recovery.verifyBundle"
+            | "recovery.history"
     )
 }
 
@@ -738,6 +802,37 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
             validate_id_non_empty(&p.item_id)?;
             Ok(())
         }
+        DesktopCommand::RecoveryScan(payload) => {
+            if payload
+                .trigger_kind
+                .as_deref()
+                .is_some_and(|value| !matches!(value, "startup" | "manual"))
+            {
+                return Err(validation_err("recovery trigger must be startup or manual"));
+            }
+            Ok(())
+        }
+        DesktopCommand::RecoveryGetIssue(payload) => validate_id_non_empty(&payload.issue_id),
+        DesktopCommand::RecoveryPrepareAction(payload) => {
+            validate_id_non_empty(&payload.issue_id)?;
+            if payload.revision == 0 {
+                return Err(validation_err("recovery revision must be positive"));
+            }
+            Ok(())
+        }
+        DesktopCommand::RecoveryExecuteAction(payload) => {
+            validate_id_non_empty(&payload.plan_id)?;
+            validate_id_non_empty(&payload.approval_digest)
+        }
+        DesktopCommand::RecoveryCreateBundle(payload) => {
+            validate_id_non_empty(&payload.issue_id)?;
+            if payload.revision == 0 {
+                return Err(validation_err("recovery revision must be positive"));
+            }
+            Ok(())
+        }
+        DesktopCommand::RecoveryVerifyBundle(payload) => validate_id_non_empty(&payload.bundle_id),
+        DesktopCommand::RecoveryHistory(_) => Ok(()),
     }
 }
 
@@ -925,6 +1020,12 @@ mod tests {
         let json = r#"{"type":"not.a.command","payload":{}}"#;
         let result: Result<DesktopCommand, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_recovery_action_fails_closed() {
+        let json = r#"{"type":"recovery.prepareAction","payload":{"issueId":"issue-1","revision":1,"action":"wipe_everything"}}"#;
+        assert!(serde_json::from_str::<DesktopCommand>(json).is_err());
     }
 
     #[test]

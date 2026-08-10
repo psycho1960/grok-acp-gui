@@ -53,6 +53,8 @@ pub struct RecoveryEvidence {
     pub manifest_path: PathBuf,
     pub branch_bundle: PathBuf,
     pub tracked_patch: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_patch: Option<PathBuf>,
     pub untracked_zip: PathBuf,
 }
 
@@ -72,6 +74,24 @@ pub struct RemovalPreparation {
 pub struct AdoptionPreparation {
     pub confirmation_token: String,
     pub absolute_path: PathBuf,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryBundleVerification {
+    pub recovery_item_id: String,
+    pub manifest_path: String,
+    pub manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryRestoreReceipt {
+    pub recovery_item_id: String,
+    pub task_id: TaskId,
+    pub worktree_path: String,
+    pub branch: String,
+    pub state: WorktreeState,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +189,23 @@ pub trait WorkspaceService: Send + Sync {
         attempt_id: &str,
     ) -> Result<crate::domain::types::IntegrationAttempt, WorkspaceError>;
     fn open_integration_worktree(&self, attempt_id: &str) -> Result<(), WorkspaceError>;
+    fn open_worktree(&self, task_id: &str) -> Result<(), WorkspaceError>;
+    fn verify_recovery_bundle(
+        &self,
+        recovery_item_id: &str,
+    ) -> Result<RecoveryBundleVerification, WorkspaceError>;
+    fn cancel_removal(&self, task_id: &str) -> Result<WorktreeRecord, WorkspaceError>;
+    fn open_recovery_bundle(&self, recovery_item_id: &str) -> Result<(), WorkspaceError>;
+    fn restore_recovery_bundle(
+        &self,
+        recovery_item_id: &str,
+        expected_manifest_sha256: &str,
+    ) -> Result<RecoveryRestoreReceipt, WorkspaceError>;
+    fn delete_recovery_bundle(
+        &self,
+        recovery_item_id: &str,
+        expected_manifest_sha256: &str,
+    ) -> Result<RecoveryItem, WorkspaceError>;
 }
 
 pub struct ManagedWorkspaceService {
@@ -276,6 +313,507 @@ impl WorkspaceService for ManagedWorkspaceService {
     }
     fn open_integration_worktree(&self, attempt_id: &str) -> Result<(), WorkspaceError> {
         self.open_integration_worktree_attempt(attempt_id)
+    }
+    fn open_worktree(&self, task_id: &str) -> Result<(), WorkspaceError> {
+        let record = active_registered_record(self.repo.as_ref(), task_id)?;
+        if record.ownership != WorktreeOwnership::Managed {
+            return Err(workspace_error(
+                "WORKTREE_EXTERNAL_READ_ONLY",
+                "Only a proven managed Worktree can be opened through this action",
+            ));
+        }
+        let managed_root = self.ensure_managed_root()?;
+        let target = validate_managed_worktree_target(&managed_root, Path::new(&record.path))
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_OUTSIDE_MANAGED_ROOT",
+                    "Worktree path failed managed-root validation",
+                )
+            })?;
+        reveal_managed_directory(&target, &managed_root)
+            .map_err(|_| workspace_error("WORKTREE_REVEAL_FAILED", "Worktree could not be opened"))
+    }
+    fn verify_recovery_bundle(
+        &self,
+        recovery_item_id: &str,
+    ) -> Result<RecoveryBundleVerification, WorkspaceError> {
+        validate_identifier(recovery_item_id, "recovery item ID")?;
+        let item = self
+            .repo
+            .get_recovery_item(recovery_item_id)
+            .map_err(map_repo_error)?;
+        if !matches!(
+            item.state,
+            RecoveryState::Available
+                | RecoveryState::Expired
+                | RecoveryState::Restoring
+                | RecoveryState::Restored
+        ) {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery item is not available for verification",
+            ));
+        }
+        let root = std::fs::canonicalize(&self.recovery_root).map_err(|_| {
+            workspace_error("WORKTREE_RECOVERY_INVALID", "Recovery root is unavailable")
+        })?;
+        let directory = std::fs::canonicalize(&item.directory).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery directory is unavailable",
+            )
+        })?;
+        if directory
+            .parent()
+            .is_none_or(|parent| !same_path_identity(parent, &root))
+        {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery directory failed managed-root proof",
+            ));
+        }
+        let manifest = directory.join("manifest.json");
+        let expected_manifest = std::fs::canonicalize(&item.manifest_path).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery manifest is unavailable",
+            )
+        })?;
+        let canonical_manifest = std::fs::canonicalize(&manifest).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery manifest is unavailable",
+            )
+        })?;
+        if !same_path_identity(&canonical_manifest, &expected_manifest) {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery manifest identity no longer matches its registration",
+            ));
+        }
+        let evidence = RecoveryEvidence {
+            id: recovery_item_id.to_owned(),
+            manifest_path: canonical_manifest.clone(),
+            branch_bundle: directory.join("branch.bundle"),
+            tracked_patch: directory.join("tracked.patch"),
+            staged_patch: directory
+                .join("staged.patch")
+                .exists()
+                .then(|| directory.join("staged.patch")),
+            untracked_zip: directory.join("untracked.zip"),
+        };
+        verify_recovery_package(&evidence)?;
+        Ok(RecoveryBundleVerification {
+            recovery_item_id: recovery_item_id.to_owned(),
+            manifest_path: canonical_manifest.to_string_lossy().into_owned(),
+            manifest_sha256: sha256_file(&canonical_manifest)?,
+        })
+    }
+    fn cancel_removal(&self, task_id: &str) -> Result<WorktreeRecord, WorkspaceError> {
+        validate_identifier(task_id, "task ID")?;
+        self.pending_removals
+            .lock()
+            .map_err(|_| workspace_error("WORKTREE_LOCKED", "Removal confirmation is unavailable"))?
+            .remove(task_id);
+        self.inspect_worktree(task_id)
+    }
+    fn open_recovery_bundle(&self, recovery_item_id: &str) -> Result<(), WorkspaceError> {
+        self.verify_recovery_bundle(recovery_item_id)?;
+        let item = self
+            .repo
+            .get_recovery_item(recovery_item_id)
+            .map_err(map_repo_error)?;
+        reveal_managed_directory(Path::new(&item.directory), &self.recovery_root).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_REVEAL_FAILED",
+                "Recovery bundle directory could not be opened",
+            )
+        })
+    }
+    fn restore_recovery_bundle(
+        &self,
+        recovery_item_id: &str,
+        expected_manifest_sha256: &str,
+    ) -> Result<RecoveryRestoreReceipt, WorkspaceError> {
+        let verification = self.verify_recovery_bundle(recovery_item_id)?;
+        if !constant_time_path_digest_equal(&verification.manifest_sha256, expected_manifest_sha256)
+        {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery manifest changed after planning",
+            ));
+        }
+        let mut item = self
+            .repo
+            .get_recovery_item(recovery_item_id)
+            .map_err(map_repo_error)?;
+        if !matches!(
+            item.state,
+            RecoveryState::Available | RecoveryState::Expired | RecoveryState::Restoring
+        ) {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery item is not available for restore",
+            ));
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&item.manifest_path).map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery manifest is not readable",
+                )
+            })?)
+            .map_err(|_| {
+                workspace_error("WORKTREE_RECOVERY_INVALID", "Recovery manifest is invalid")
+            })?;
+        let task_id = manifest
+            .get("taskId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery manifest task identity is missing",
+                )
+            })?;
+        if task_id != item.task_id.0 {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery manifest task identity does not match registration",
+            ));
+        }
+        let mut records = self
+            .repo
+            .list_worktrees_by_task(task_id)
+            .map_err(map_repo_error)?
+            .into_iter()
+            .filter(|record| {
+                record.ownership == WorktreeOwnership::Managed
+                    && record.recovery_bundle_id.as_deref() == Some(recovery_item_id)
+            });
+        let mut record = records.next().ok_or_else(|| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery bundle has no owned Worktree registration",
+            )
+        })?;
+        if records.next().is_some() {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery bundle maps to multiple Worktree registrations",
+            ));
+        }
+        let repository_raw = manifest
+            .get("repository")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery repository identity is missing",
+                )
+            })?;
+        let worktree_raw = manifest
+            .get("worktree")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery Worktree path is missing",
+                )
+            })?;
+        let branch = manifest
+            .get("branch")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                workspace_error("WORKTREE_RECOVERY_INVALID", "Recovery branch is missing")
+            })?;
+        if repository_raw != record.repo_root
+            || worktree_raw != record.path
+            || branch != record.branch
+        {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery manifest no longer matches the registered resource",
+            ));
+        }
+        validate_git_ref(branch)?;
+        let managed_root = self.ensure_managed_root()?;
+        let target = validate_managed_worktree_target(&managed_root, Path::new(worktree_raw))
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery target failed managed-root proof",
+                )
+            })?;
+        if target.exists() {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_TARGET_EXISTS",
+                "Recovery target already exists",
+            ));
+        }
+        let recovery_root = std::fs::canonicalize(&self.recovery_root).map_err(|_| {
+            workspace_error("WORKTREE_RECOVERY_INVALID", "Recovery root is unavailable")
+        })?;
+        if recovery_root.starts_with(&target) || target.starts_with(&recovery_root) {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery bundle is not independent from the restore target",
+            ));
+        }
+        let repository = self
+            .git
+            .inspect_repository(Path::new(repository_raw))
+            .map_err(map_git_error)?;
+        if !same_path_identity(
+            &repository.common_git_dir,
+            Path::new(&record.common_git_dir),
+        ) {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Repository identity changed after bundle creation",
+            ));
+        }
+        if self
+            .git
+            .list_worktrees(&repository.canonical_root)
+            .map_err(map_git_error)?
+            .iter()
+            .any(|entry| same_path_identity(&entry.path, &target))
+        {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_TARGET_EXISTS",
+                "Git already registers the recovery target",
+            ));
+        }
+        let directory = PathBuf::from(&item.directory);
+        let bundle = directory.join("branch.bundle");
+        let bundle_arg = bundle.to_string_lossy().into_owned();
+        let branch_ref = format!("refs/heads/{branch}");
+        let heads = self
+            .git
+            .capture(
+                &repository.canonical_root,
+                &["bundle", "list-heads", &bundle_arg],
+            )
+            .map_err(map_git_error)?;
+        let heads = String::from_utf8(heads).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery bundle heads are not UTF-8",
+            )
+        })?;
+        let bundle_head = heads
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                let sha = fields.next()?;
+                (fields.next() == Some(branch_ref.as_str())).then_some(sha.to_owned())
+            })
+            .ok_or_else(|| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery bundle does not contain the registered branch",
+                )
+            })?;
+        let existing = self
+            .git
+            .capture_allow_status(
+                &repository.canonical_root,
+                &["rev-parse", "--verify", "--quiet", &branch_ref],
+                &[0, 1],
+            )
+            .map_err(map_git_error)?;
+        if existing.status == 0 {
+            let sha = String::from_utf8(existing.stdout).map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Existing branch identity is invalid",
+                )
+            })?;
+            if sha.trim() != bundle_head {
+                return Err(workspace_error(
+                    "WORKTREE_RECOVERY_TARGET_EXISTS",
+                    "An existing branch conflicts with the recovery bundle",
+                ));
+            }
+        } else {
+            let refspec = format!("{branch_ref}:{branch_ref}");
+            let args = ["fetch", bundle_arg.as_str(), refspec.as_str()];
+            authorize_managed_git(
+                &repository.canonical_root,
+                &args,
+                &[&repository.common_git_dir],
+            )?;
+            self.git
+                .run_checked(&repository.canonical_root, &args)
+                .map_err(map_git_error)?;
+        }
+        item.state = RecoveryState::Restoring;
+        self.repo
+            .update_recovery_item(&item)
+            .map_err(map_repo_error)?;
+        let target_arg = target.to_string_lossy().into_owned();
+        let add_args = ["worktree", "add", target_arg.as_str(), branch];
+        authorize_managed_git(
+            &repository.canonical_root,
+            &add_args,
+            &[&repository.common_git_dir, &target],
+        )?;
+        self.git
+            .run_checked(&repository.canonical_root, &add_args)
+            .map_err(map_git_error)?;
+        let tracked = directory.join("tracked.patch");
+        if std::fs::metadata(&tracked)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+            > 0
+        {
+            let tracked_arg = tracked.to_string_lossy().into_owned();
+            let args = ["apply", "--binary", tracked_arg.as_str()];
+            authorize_managed_git(&target, &args, &[&target])?;
+            self.git
+                .run_checked(&target, &args)
+                .map_err(map_git_error)?;
+        }
+        let staged = directory.join("staged.patch");
+        if staged.exists()
+            && std::fs::metadata(&staged)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+                > 0
+        {
+            let staged_arg = staged.to_string_lossy().into_owned();
+            let args = ["apply", "--cached", "--binary", staged_arg.as_str()];
+            authorize_managed_git(&target, &args, &[&repository.common_git_dir])?;
+            self.git
+                .run_checked(&target, &args)
+                .map_err(map_git_error)?;
+        }
+        extract_stored_zip(&directory.join("untracked.zip"), &target)?;
+        let status = self
+            .git
+            .capture(
+                &target,
+                &["status", "--porcelain=v2", "--untracked-files=all"],
+            )
+            .map_err(map_git_error)?;
+        record.state = if status.is_empty() {
+            WorktreeState::Ready
+        } else {
+            WorktreeState::Dirty
+        };
+        record.last_verified_at = crate::domain::types::utc_now();
+        record.disk_usage_bytes = directory_size(&target).unwrap_or(0);
+        self.repo.update_worktree(&record).map_err(map_repo_error)?;
+        item.state = RecoveryState::Restored;
+        self.repo
+            .update_recovery_item(&item)
+            .map_err(map_repo_error)?;
+        Ok(RecoveryRestoreReceipt {
+            recovery_item_id: recovery_item_id.to_owned(),
+            task_id: item.task_id,
+            worktree_path: target.to_string_lossy().into_owned(),
+            branch: branch.into(),
+            state: record.state,
+        })
+    }
+    fn delete_recovery_bundle(
+        &self,
+        recovery_item_id: &str,
+        expected_manifest_sha256: &str,
+    ) -> Result<RecoveryItem, WorkspaceError> {
+        let verification = self.verify_recovery_bundle(recovery_item_id)?;
+        if !constant_time_path_digest_equal(&verification.manifest_sha256, expected_manifest_sha256)
+        {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery manifest changed after planning",
+            ));
+        }
+        let mut item = self
+            .repo
+            .get_recovery_item(recovery_item_id)
+            .map_err(map_repo_error)?;
+        let root = std::fs::canonicalize(&self.recovery_root).map_err(|_| {
+            workspace_error("WORKTREE_RECOVERY_INVALID", "Recovery root is unavailable")
+        })?;
+        let directory = std::fs::canonicalize(&item.directory).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery directory is unavailable",
+            )
+        })?;
+        if directory
+            .parent()
+            .is_none_or(|parent| !same_path_identity(parent, &root))
+        {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery directory failed managed-root proof",
+            ));
+        }
+        let allowed = [
+            "branch.bundle",
+            "tracked.patch",
+            "staged.patch",
+            "untracked.zip",
+            "manifest.json",
+        ];
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery directory is unavailable",
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery directory could not be inspected",
+                )
+            })?;
+        if entries.iter().any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_none_or(|name| !allowed.contains(&name))
+        }) {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_DELETE_REJECTED",
+                "Recovery directory contains an unknown entry",
+            ));
+        }
+        for entry in entries {
+            let metadata = entry.metadata().map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_DELETE_REJECTED",
+                    "Recovery entry could not be verified",
+                )
+            })?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(workspace_error(
+                    "WORKTREE_RECOVERY_DELETE_REJECTED",
+                    "Recovery entry is not a regular file",
+                ));
+            }
+            std::fs::remove_file(entry.path()).map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_DELETE_FAILED",
+                    "Recovery file could not be deleted",
+                )
+            })?;
+        }
+        std::fs::remove_dir(&directory).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_DELETE_FAILED",
+                "Recovery directory could not be deleted",
+            )
+        })?;
+        item.state = RecoveryState::Deleted;
+        self.repo
+            .update_recovery_item(&item)
+            .map_err(map_repo_error)?;
+        Ok(item)
     }
     fn inspect_repository(&self, path: &Path) -> Result<RepositoryInspection, WorkspaceError> {
         self.git.inspect_repository(path).map_err(map_git_error)
@@ -1298,6 +1836,7 @@ impl ManagedWorkspaceService {
         })?;
         let bundle = directory.join("branch.bundle");
         let patch = directory.join("tracked.patch");
+        let staged_patch = directory.join("staged.patch");
         let archive = directory.join("untracked.zip");
         let manifest = directory.join("manifest.json");
         let bundle_arg = bundle.to_string_lossy().into_owned();
@@ -1326,16 +1865,14 @@ impl ManagedWorkspaceService {
                 "Branch recovery bundle could not be verified",
             ));
         }
-        let mut tracked = self
+        let tracked = self
             .git
             .capture(worktree, &["diff", "--binary", "HEAD"])
             .map_err(map_git_error)?;
-        tracked.extend_from_slice(
-            &self
-                .git
-                .capture(worktree, &["diff", "--binary", "--cached", "HEAD"])
-                .map_err(map_git_error)?,
-        );
+        let staged = self
+            .git
+            .capture(worktree, &["diff", "--binary", "--cached", "HEAD"])
+            .map_err(map_git_error)?;
         authorize_managed_fs_write(&directory, &[&patch])?;
         std::fs::write(&patch, tracked).map_err(|_| {
             workspace_error(
@@ -1343,25 +1880,127 @@ impl ManagedWorkspaceService {
                 "Tracked recovery patch could not be written",
             )
         })?;
+        authorize_managed_fs_write(&directory, &[&staged_patch])?;
+        std::fs::write(&staged_patch, staged).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_FAILED",
+                "Staged recovery patch could not be written",
+            )
+        })?;
         authorize_managed_fs_write(&directory, &[&archive])?;
         write_stored_zip(worktree, split_nul(untracked), &archive)?;
         let bundle_hash = sha256_file(&bundle)?;
         let patch_hash = sha256_file(&patch)?;
+        let staged_patch_hash = sha256_file(&staged_patch)?;
         let archive_hash = sha256_file(&archive)?;
+        let bundle_bytes = std::fs::metadata(&bundle)
+            .map(|value| value.len())
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_FAILED",
+                    "Recovery bundle size is unavailable",
+                )
+            })?;
+        let patch_bytes = std::fs::metadata(&patch)
+            .map(|value| value.len())
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_FAILED",
+                    "Tracked patch size is unavailable",
+                )
+            })?;
+        let staged_patch_bytes = std::fs::metadata(&staged_patch)
+            .map(|value| value.len())
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_FAILED",
+                    "Staged patch size is unavailable",
+                )
+            })?;
+        let archive_bytes = std::fs::metadata(&archive)
+            .map(|value| value.len())
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_FAILED",
+                    "Untracked archive size is unavailable",
+                )
+            })?;
+        let head = String::from_utf8(
+            self.git
+                .capture(worktree, &["rev-parse", "HEAD"])
+                .map_err(map_git_error)?,
+        )
+        .map_err(|_| workspace_error("WORKTREE_RECOVERY_FAILED", "Git HEAD is not UTF-8"))?;
+        let status = self
+            .git
+            .capture(
+                worktree,
+                &["status", "--porcelain=v2", "--untracked-files=all"],
+            )
+            .map_err(map_git_error)?;
+        let session_id = self
+            .repo
+            .get_binding_by_task(&record.task_id.0)
+            .map_err(map_repo_error)?
+            .map(|binding| binding.session_id.0);
+        let integration_ids: Vec<String> = self
+            .repo
+            .list_active_integrations()
+            .map_err(map_repo_error)?
+            .into_iter()
+            .filter(|attempt| attempt.task_id == record.task_id)
+            .map(|attempt| attempt.id.0)
+            .collect();
+        let database_summary = serde_json::json!({
+            "taskId": record.task_id.0,
+            "sessionId": session_id,
+            "worktreeId": record.id.0,
+            "integrationIds": integration_ids,
+            "worktreeState": record.state,
+            "ownership": record.ownership,
+        });
+        let database_summary_sha256 = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&database_summary).unwrap_or_default())
+        );
+        let included_untracked: Vec<&str> = split_nul(untracked).collect();
         let expires_at = crate::bridge::types::utc_after_days(7);
         let manifest_value = serde_json::json!({
-            "version": 1,
+            "version": 2,
+            "applicationVersion": env!("CARGO_PKG_VERSION"),
             "taskId": record.task_id.0,
+            "sessionId": database_summary["sessionId"],
+            "worktreeId": record.id.0,
+            "integrationIds": database_summary["integrationIds"],
             "repository": record.repo_root,
             "worktree": record.path,
             "branch": record.branch,
             "baseCommit": record.base_commit,
+            "git": {
+                "repoIdentity": record.repo_identity,
+                "baseBranch": record.base_branch,
+                "headSha": head.trim(),
+                "statusSha256": format!("{:x}", Sha256::digest(&status)),
+            },
+            "databaseSummary": database_summary,
+            "databaseSummarySha256": database_summary_sha256,
+            "untracked": {
+                "included": included_untracked,
+                "skipped": [],
+            },
             "createdAt": crate::domain::types::utc_now(),
             "expiresAt": expires_at.clone(),
             "files": {
                 "branch.bundle": bundle_hash,
                 "tracked.patch": patch_hash,
+                "staged.patch": staged_patch_hash,
                 "untracked.zip": archive_hash,
+            },
+            "fileSizes": {
+                "branch.bundle": bundle_bytes,
+                "tracked.patch": patch_bytes,
+                "staged.patch": staged_patch_bytes,
+                "untracked.zip": archive_bytes,
             }
         });
         authorize_managed_fs_write(&directory, &[&manifest])?;
@@ -1396,6 +2035,7 @@ impl ManagedWorkspaceService {
             manifest_path: manifest,
             branch_bundle: bundle,
             tracked_patch: patch,
+            staged_patch: Some(staged_patch),
             untracked_zip: archive,
         })
     }
@@ -1678,6 +2318,20 @@ fn verify_recovery_package(evidence: &RecoveryEvidence) -> Result<(), WorkspaceE
             ));
         }
     }
+    if let Some(path) = evidence.staged_patch.as_ref() {
+        let metadata = std::fs::metadata(path).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery package is incomplete",
+            )
+        })?;
+        if !metadata.is_file() {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery package contains an invalid entry",
+            ));
+        }
+    }
     if std::fs::metadata(&evidence.branch_bundle)
         .map(|value| value.len())
         .unwrap_or(0)
@@ -1723,6 +2377,23 @@ fn verify_recovery_package(evidence: &RecoveryEvidence) -> Result<(), WorkspaceE
                 workspace_error(
                     "WORKTREE_RECOVERY_INVALID",
                     "Recovery manifest hash is missing",
+                )
+            })?;
+        if sha256_file(path)? != expected {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Recovery package hash verification failed",
+            ));
+        }
+    }
+    if let Some(path) = evidence.staged_patch.as_ref() {
+        let expected = files
+            .get("staged.patch")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_INVALID",
+                    "Recovery staged patch hash is missing",
                 )
             })?;
         if sha256_file(path)? != expected {
@@ -1914,6 +2585,193 @@ fn zip_write_error(_: std::io::Error) -> WorkspaceError {
         "WORKTREE_RECOVERY_FAILED",
         "Untracked recovery archive could not be written",
     )
+}
+
+fn extract_stored_zip(archive: &Path, target_root: &Path) -> Result<(), WorkspaceError> {
+    const MAX_ENTRY_BYTES: u64 = 200 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+    let canonical_root = std::fs::canonicalize(target_root).map_err(|_| {
+        workspace_error(
+            "WORKTREE_RECOVERY_RESTORE_FAILED",
+            "Restore target is unavailable",
+        )
+    })?;
+    let mut reader = std::fs::File::open(archive).map_err(|_| {
+        workspace_error(
+            "WORKTREE_RECOVERY_INVALID",
+            "Untracked recovery archive is unavailable",
+        )
+    })?;
+    let mut total = 0_u64;
+    loop {
+        let mut signature = [0_u8; 4];
+        reader.read_exact(&mut signature).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery archive is truncated",
+            )
+        })?;
+        let signature = u32::from_le_bytes(signature);
+        if matches!(signature, 0x0201_4b50 | 0x0605_4b50) {
+            return Ok(());
+        }
+        if signature != 0x0403_4b50 {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery archive has an unknown entry",
+            ));
+        }
+        let mut header = [0_u8; 26];
+        reader.read_exact(&mut header).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery header is truncated",
+            )
+        })?;
+        let flags = u16::from_le_bytes([header[2], header[3]]);
+        let compression = u16::from_le_bytes([header[4], header[5]]);
+        let crc = u32::from_le_bytes([header[10], header[11], header[12], header[13]]);
+        let compressed =
+            u32::from_le_bytes([header[14], header[15], header[16], header[17]]) as u64;
+        let uncompressed =
+            u32::from_le_bytes([header[18], header[19], header[20], header[21]]) as u64;
+        let name_len = u16::from_le_bytes([header[22], header[23]]) as usize;
+        let extra_len = u16::from_le_bytes([header[24], header[25]]) as usize;
+        if compression != 0
+            || flags & 0x0008 != 0
+            || compressed != uncompressed
+            || uncompressed > MAX_ENTRY_BYTES
+        {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery entry uses an unsupported encoding or size",
+            ));
+        }
+        total = total.saturating_add(uncompressed);
+        if total > MAX_TOTAL_BYTES || name_len == 0 || name_len > 4096 || extra_len > 4096 {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery archive exceeds safe limits",
+            ));
+        }
+        let mut name = vec![0_u8; name_len];
+        reader.read_exact(&mut name).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery name is truncated",
+            )
+        })?;
+        let name = String::from_utf8(name).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery name is not UTF-8",
+            )
+        })?;
+        let relative = PathBuf::from(name);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::CurDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery path escaped the restore target",
+            ));
+        }
+        if extra_len > 0 {
+            reader
+                .seek(std::io::SeekFrom::Current(extra_len as i64))
+                .map_err(|_| {
+                    workspace_error(
+                        "WORKTREE_RECOVERY_INVALID",
+                        "Untracked recovery extra data is truncated",
+                    )
+                })?;
+        }
+        let mut data = vec![0_u8; uncompressed as usize];
+        reader.read_exact(&mut data).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery data is truncated",
+            )
+        })?;
+        if crc32fast::hash(&data) != crc {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery entry failed CRC verification",
+            ));
+        }
+        let destination = canonical_root.join(&relative);
+        let parent = destination.parent().ok_or_else(|| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery path has no parent",
+            )
+        })?;
+        authorize_managed_fs_write(&canonical_root, &[parent])?;
+        std::fs::create_dir_all(parent).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_RESTORE_FAILED",
+                "Untracked recovery directory could not be created",
+            )
+        })?;
+        let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
+            workspace_error(
+                "WORKTREE_RECOVERY_RESTORE_FAILED",
+                "Untracked recovery directory could not be verified",
+            )
+        })?;
+        if !canonical_parent.starts_with(&canonical_root) {
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery path escaped through a filesystem link",
+            ));
+        }
+        let destination = canonical_parent.join(destination.file_name().ok_or_else(|| {
+            workspace_error(
+                "WORKTREE_RECOVERY_INVALID",
+                "Untracked recovery filename is invalid",
+            )
+        })?);
+        authorize_managed_fs_write(&canonical_root, &[&destination])?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(|_| {
+                workspace_error(
+                    "WORKTREE_RECOVERY_RESTORE_FAILED",
+                    "Untracked recovery destination already exists",
+                )
+            })?;
+        if output.write_all(&data).is_err() {
+            drop(output);
+            let _ = std::fs::remove_file(&destination);
+            return Err(workspace_error(
+                "WORKTREE_RECOVERY_RESTORE_FAILED",
+                "Untracked recovery file could not be written",
+            ));
+        }
+    }
+}
+
+fn constant_time_path_digest_equal(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 fn active_managed_record(

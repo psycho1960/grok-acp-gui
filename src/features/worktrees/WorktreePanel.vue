@@ -272,6 +272,7 @@ watch(
         <ul>
           <li>branch.bundle</li>
           <li>tracked.patch</li>
+          <li>staged.patch</li>
           <li>untracked.zip</li>
           <li>manifest.json</li>
         </ul>

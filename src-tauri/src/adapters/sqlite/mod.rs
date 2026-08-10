@@ -26,6 +26,10 @@ use crate::modules::task_runtime::permission::{
     PermissionOptionAction, PermissionRecord, PermissionState,
 };
 use crate::modules::task_runtime::plan::{PlanDecision, PlanOptionAction, PlanRecord, PlanState};
+use crate::modules::task_runtime::recovery::{
+    RecoveryActionKind, RecoveryActionPlan, RecoveryBundleRecord, RecoveryHistory, RecoveryIssue,
+    RecoveryIssueKind, RecoveryIssueStatus, RecoveryScan, RecoverySeverity, RecoveryStepResult,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::Mutex;
@@ -214,6 +218,122 @@ fn row_to_recovery(row: &rusqlite::Row) -> rusqlite::Result<RecoveryItem> {
         manifest_path: row.get(3)?,
         expires_at: row.get(4)?,
         state: parse_recovery_state(&row.get::<_, String>(5)?),
+    })
+}
+
+fn recovery_row_error(index: usize, message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        index,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message.into(),
+        )),
+    )
+}
+
+fn row_to_recovery_scan(row: &rusqlite::Row) -> rusqlite::Result<RecoveryScan> {
+    Ok(RecoveryScan {
+        id: row.get(0)?,
+        trigger_kind: row.get(1)?,
+        started_at: row.get(2)?,
+        completed_at: row.get(3)?,
+        issue_count: row.get::<_, i64>(4)?.max(0) as u32,
+    })
+}
+
+fn row_to_recovery_issue(row: &rusqlite::Row) -> rusqlite::Result<RecoveryIssue> {
+    let kind_raw: String = row.get(4)?;
+    let severity_raw: String = row.get(5)?;
+    let status_raw: String = row.get(6)?;
+    let evidence_raw: String = row.get(10)?;
+    let actions_raw: String = row.get(13)?;
+    let kind = RecoveryIssueKind::parse(&kind_raw)
+        .ok_or_else(|| recovery_row_error(4, format!("unknown recovery issue kind: {kind_raw}")))?;
+    let severity = RecoverySeverity::parse(&severity_raw).ok_or_else(|| {
+        recovery_row_error(5, format!("unknown recovery severity: {severity_raw}"))
+    })?;
+    let status = RecoveryIssueStatus::parse(&status_raw)
+        .ok_or_else(|| recovery_row_error(6, format!("unknown recovery status: {status_raw}")))?;
+    let evidence = serde_json::from_str(&evidence_raw)
+        .map_err(|error| recovery_row_error(10, format!("invalid recovery evidence: {error}")))?;
+    let action_names: Vec<String> = serde_json::from_str(&actions_raw)
+        .map_err(|error| recovery_row_error(13, format!("invalid recovery actions: {error}")))?;
+    let safe_actions = action_names
+        .into_iter()
+        .map(|name| {
+            RecoveryActionKind::parse(&name)
+                .ok_or_else(|| recovery_row_error(13, format!("unknown recovery action: {name}")))
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(RecoveryIssue {
+        issue_id: row.get(0)?,
+        revision: row.get::<_, i64>(1)?.max(0) as u32,
+        scan_id: row.get(2)?,
+        stable_key: row.get(3)?,
+        kind,
+        severity,
+        status,
+        task_id: row.get::<_, Option<String>>(7)?.map(TaskId::new),
+        resource_id: row.get(8)?,
+        canonical_path: row.get(9)?,
+        evidence,
+        impact: row.get(11)?,
+        recommended_action: row.get(12)?,
+        safe_actions,
+        detected_at: row.get(14)?,
+    })
+}
+
+fn row_to_recovery_action_plan(row: &rusqlite::Row) -> rusqlite::Result<RecoveryActionPlan> {
+    let action_raw: String = row.get(3)?;
+    let action_kind = RecoveryActionKind::parse(&action_raw)
+        .ok_or_else(|| recovery_row_error(3, format!("unknown recovery action: {action_raw}")))?;
+    let expected_raw: String = row.get(6)?;
+    let steps_raw: String = row.get(7)?;
+    let context_raw: String = row.get(8)?;
+    Ok(RecoveryActionPlan {
+        id: row.get(0)?,
+        issue_id: row.get(1)?,
+        issue_revision: row.get::<_, i64>(2)?.max(0) as u32,
+        action_kind,
+        resource_identity: row.get(4)?,
+        canonical_path: row.get(5)?,
+        expected_state: serde_json::from_str(&expected_raw)
+            .map_err(|error| recovery_row_error(6, format!("invalid expected state: {error}")))?,
+        steps: serde_json::from_str(&steps_raw)
+            .map_err(|error| recovery_row_error(7, format!("invalid recovery steps: {error}")))?,
+        internal_context: serde_json::from_str(&context_raw)
+            .map_err(|error| recovery_row_error(8, format!("invalid recovery context: {error}")))?,
+        destructive_level: row.get(9)?,
+        approval_digest: row.get(10)?,
+        expires_at_epoch: row.get::<_, i64>(11)?.max(0) as u64,
+        created_at: row.get(12)?,
+    })
+}
+
+fn row_to_recovery_bundle_record(row: &rusqlite::Row) -> rusqlite::Result<RecoveryBundleRecord> {
+    Ok(RecoveryBundleRecord {
+        id: row.get(0)?,
+        issue_id: row.get(1)?,
+        issue_revision: row.get::<_, i64>(2)?.max(0) as u32,
+        recovery_item_id: row.get(3)?,
+        manifest_path: row.get(4)?,
+        manifest_sha256: row.get(5)?,
+        verified: row.get::<_, i64>(6)? != 0,
+        created_at: row.get(7)?,
+    })
+}
+
+fn row_to_recovery_step_result(row: &rusqlite::Row) -> rusqlite::Result<RecoveryStepResult> {
+    Ok(RecoveryStepResult {
+        id: row.get(0)?,
+        plan_id: row.get(1)?,
+        step_index: row.get::<_, i64>(2)?.max(0) as u32,
+        step_name: row.get(3)?,
+        status: row.get(4)?,
+        detail_redacted: row.get(5)?,
+        occurred_at: row.get(6)?,
     })
 }
 
@@ -1273,6 +1393,17 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
+    fn list_active_integrations(&self) -> RepoResult<Vec<IntegrationAttempt>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, task_id, repo_root, source_ref, source_tip_sha, source_range, source_dirty, source_worktree_digest, target_ref, expected_target_sha, commit_message, validation_commands_json, validation_digest, approval_digest, state, temporary_worktree_id, temporary_worktree_path, temporary_branch, conflict_summary_json, validation_result_json, result_commit_sha, recovery_bundle_path, cleanup_status, created_at, updated_at, repo_identity FROM integration_attempts WHERE cleanup_status <> 'completed' ORDER BY created_at DESC"
+        ).map_err(|error| db_error("list_active_integrations", &error))?;
+        let rows = statement
+            .query_map([], row_to_integration)
+            .map_err(|error| db_error("list_active_integrations map", &error))?;
+        collect_rows(rows, "list_active_integrations row")
+    }
+
     // ==================================================================
     // Attachments
     // ==================================================================
@@ -1385,6 +1516,186 @@ impl Repository for SqliteRepository {
         conn.execute("DELETE FROM recovery_items WHERE id = ?1", params![id])
             .map_err(|e| db_error("delete_recovery_item", &e))?;
         Ok(())
+    }
+
+    fn create_recovery_scan(&self, scan: &RecoveryScan) -> RepoResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO recovery_scans (id, trigger_kind, started_at, completed_at, issue_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![scan.id, scan.trigger_kind, scan.started_at, scan.completed_at, scan.issue_count as i64],
+        ).map_err(|error| db_error("create_recovery_scan", &error))?;
+        Ok(())
+    }
+
+    fn append_recovery_issue(&self, issue: &RecoveryIssue) -> RepoResult<()> {
+        if issue.revision == 0 || issue.safe_actions.is_empty() {
+            return Err(DomainError::new(
+                "DB_QUERY_FAILED",
+                "Recovery issue revision and safe actions are required",
+            ));
+        }
+        let evidence = serde_json::to_string(&issue.evidence).map_err(|error| {
+            DomainError::new(
+                "DB_QUERY_FAILED",
+                format!("serialize recovery evidence: {error}"),
+            )
+        })?;
+        let actions: Vec<&str> = issue
+            .safe_actions
+            .iter()
+            .map(|action| action.as_str())
+            .collect();
+        let actions = serde_json::to_string(&actions).map_err(|error| {
+            DomainError::new(
+                "DB_QUERY_FAILED",
+                format!("serialize recovery actions: {error}"),
+            )
+        })?;
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO recovery_issues (issue_id, revision, scan_id, stable_key, kind, severity, status, task_id, resource_id, canonical_path, evidence_json, impact, recommended_action, safe_actions_json, detected_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![issue.issue_id, issue.revision as i64, issue.scan_id, issue.stable_key, issue.kind.as_str(), issue.severity.as_str(), issue.status.as_str(), issue.task_id.as_ref().map(|id| id.0.as_str()), issue.resource_id, issue.canonical_path, evidence, issue.impact, issue.recommended_action, actions, issue.detected_at],
+        ).map_err(|error| db_error("append_recovery_issue", &error))?;
+        Ok(())
+    }
+
+    fn latest_recovery_issue(&self, stable_key: &str) -> RepoResult<Option<RecoveryIssue>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT issue_id, revision, scan_id, stable_key, kind, severity, status, task_id, resource_id, canonical_path, evidence_json, impact, recommended_action, safe_actions_json, detected_at FROM recovery_issues WHERE stable_key = ?1 ORDER BY revision DESC LIMIT 1",
+            params![stable_key], row_to_recovery_issue,
+        ).optional().map_err(|error| db_error("latest_recovery_issue", &error))
+    }
+
+    fn get_recovery_issue(
+        &self,
+        issue_id: &str,
+        revision: Option<u32>,
+    ) -> RepoResult<RecoveryIssue> {
+        let conn = self.lock()?;
+        let result = match revision {
+            Some(revision) => conn.query_row(
+                "SELECT issue_id, revision, scan_id, stable_key, kind, severity, status, task_id, resource_id, canonical_path, evidence_json, impact, recommended_action, safe_actions_json, detected_at FROM recovery_issues WHERE issue_id = ?1 AND revision = ?2",
+                params![issue_id, revision as i64], row_to_recovery_issue,
+            ),
+            None => conn.query_row(
+                "SELECT issue_id, revision, scan_id, stable_key, kind, severity, status, task_id, resource_id, canonical_path, evidence_json, impact, recommended_action, safe_actions_json, detected_at FROM recovery_issues WHERE issue_id = ?1 ORDER BY revision DESC LIMIT 1",
+                params![issue_id], row_to_recovery_issue,
+            ),
+        };
+        result.map_err(|error| db_error("get_recovery_issue", &error))
+    }
+
+    fn create_recovery_action_plan(&self, plan: &RecoveryActionPlan) -> RepoResult<()> {
+        let expected = serde_json::to_string(&plan.expected_state).map_err(|error| {
+            DomainError::new(
+                "DB_QUERY_FAILED",
+                format!("serialize recovery expected state: {error}"),
+            )
+        })?;
+        let steps = serde_json::to_string(&plan.steps).map_err(|error| {
+            DomainError::new(
+                "DB_QUERY_FAILED",
+                format!("serialize recovery steps: {error}"),
+            )
+        })?;
+        let context = serde_json::to_string(&plan.internal_context).map_err(|error| {
+            DomainError::new(
+                "DB_QUERY_FAILED",
+                format!("serialize recovery context: {error}"),
+            )
+        })?;
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO recovery_action_plans (id, issue_id, issue_revision, action_kind, resource_identity, canonical_path, expected_state_json, steps_json, internal_context_json, destructive_level, approval_digest, expires_at_epoch, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![plan.id, plan.issue_id, plan.issue_revision as i64, plan.action_kind.as_str(), plan.resource_identity, plan.canonical_path, expected, steps, context, plan.destructive_level, plan.approval_digest, plan.expires_at_epoch as i64, plan.created_at],
+        ).map_err(|error| db_error("create_recovery_action_plan", &error))?;
+        Ok(())
+    }
+
+    fn get_recovery_action_plan(&self, id: &str) -> RepoResult<RecoveryActionPlan> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, issue_id, issue_revision, action_kind, resource_identity, canonical_path, expected_state_json, steps_json, internal_context_json, destructive_level, approval_digest, expires_at_epoch, created_at FROM recovery_action_plans WHERE id = ?1",
+            params![id], row_to_recovery_action_plan,
+        ).map_err(|error| db_error("get_recovery_action_plan", &error))
+    }
+
+    fn append_recovery_step_result(&self, result: &RecoveryStepResult) -> RepoResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO recovery_step_results (plan_id, step_index, step_name, status, detail_redacted, occurred_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![result.plan_id, result.step_index as i64, result.step_name, result.status, result.detail_redacted, result.occurred_at],
+        ).map_err(|error| db_error("append_recovery_step_result", &error))?;
+        Ok(())
+    }
+
+    fn create_recovery_bundle_record(&self, bundle: &RecoveryBundleRecord) -> RepoResult<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO recovery_bundles (id, issue_id, issue_revision, recovery_item_id, manifest_path, manifest_sha256, verified, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![bundle.id, bundle.issue_id, bundle.issue_revision as i64, bundle.recovery_item_id, bundle.manifest_path, bundle.manifest_sha256, bundle.verified as i64, bundle.created_at],
+        ).map_err(|error| db_error("create_recovery_bundle_record", &error))?;
+        Ok(())
+    }
+
+    fn get_recovery_bundle_record(&self, id: &str) -> RepoResult<RecoveryBundleRecord> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, issue_id, issue_revision, recovery_item_id, manifest_path, manifest_sha256, verified, created_at FROM recovery_bundles WHERE id = ?1",
+            params![id], row_to_recovery_bundle_record,
+        ).map_err(|error| db_error("get_recovery_bundle_record", &error))
+    }
+
+    fn list_recovery_history(&self) -> RepoResult<RecoveryHistory> {
+        let conn = self.lock()?;
+        let scans = {
+            let mut statement = conn.prepare("SELECT id, trigger_kind, started_at, completed_at, issue_count FROM recovery_scans ORDER BY completed_at DESC")
+                .map_err(|error| db_error("list_recovery_history scans", &error))?;
+            let rows = statement
+                .query_map([], row_to_recovery_scan)
+                .map_err(|error| db_error("list_recovery_history scans map", &error))?;
+            collect_rows(rows, "list_recovery_history scans row")?
+        };
+        let issues = {
+            let mut statement = conn.prepare("SELECT issue_id, revision, scan_id, stable_key, kind, severity, status, task_id, resource_id, canonical_path, evidence_json, impact, recommended_action, safe_actions_json, detected_at FROM recovery_issues ORDER BY detected_at DESC, issue_id, revision DESC")
+                .map_err(|error| db_error("list_recovery_history issues", &error))?;
+            let rows = statement
+                .query_map([], row_to_recovery_issue)
+                .map_err(|error| db_error("list_recovery_history issues map", &error))?;
+            collect_rows(rows, "list_recovery_history issues row")?
+        };
+        let plans = {
+            let mut statement = conn.prepare("SELECT id, issue_id, issue_revision, action_kind, resource_identity, canonical_path, expected_state_json, steps_json, internal_context_json, destructive_level, approval_digest, expires_at_epoch, created_at FROM recovery_action_plans ORDER BY created_at DESC")
+                .map_err(|error| db_error("list_recovery_history plans", &error))?;
+            let rows = statement
+                .query_map([], row_to_recovery_action_plan)
+                .map_err(|error| db_error("list_recovery_history plans map", &error))?;
+            collect_rows(rows, "list_recovery_history plans row")?
+        };
+        let bundles = {
+            let mut statement = conn.prepare("SELECT id, issue_id, issue_revision, recovery_item_id, manifest_path, manifest_sha256, verified, created_at FROM recovery_bundles ORDER BY created_at DESC")
+                .map_err(|error| db_error("list_recovery_history bundles", &error))?;
+            let rows = statement
+                .query_map([], row_to_recovery_bundle_record)
+                .map_err(|error| db_error("list_recovery_history bundles map", &error))?;
+            collect_rows(rows, "list_recovery_history bundles row")?
+        };
+        let steps = {
+            let mut statement = conn.prepare("SELECT id, plan_id, step_index, step_name, status, detail_redacted, occurred_at FROM recovery_step_results ORDER BY id")
+                .map_err(|error| db_error("list_recovery_history steps", &error))?;
+            let rows = statement
+                .query_map([], row_to_recovery_step_result)
+                .map_err(|error| db_error("list_recovery_history steps map", &error))?;
+            collect_rows(rows, "list_recovery_history steps row")?
+        };
+        Ok(RecoveryHistory {
+            scans,
+            issues,
+            plans,
+            bundles,
+            steps,
+        })
     }
 
     // ==================================================================

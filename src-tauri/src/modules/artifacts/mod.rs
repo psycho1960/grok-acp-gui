@@ -10,7 +10,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::adapters::filesystem::{
-    reveal_saved_artifact, save_managed_artifact, ArtifactFileExpectation, ArtifactSaveIoError,
+    reveal_managed_file, reveal_saved_artifact, save_managed_artifact, ArtifactFileExpectation,
+    ArtifactSaveIoError,
 };
 use crate::bridge::types::TaskId;
 use crate::domain::error::{codes, DomainError};
@@ -47,6 +48,15 @@ pub struct ResolvedImage {
 pub struct BlobImage {
     pub display_name: String,
     pub base64_data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactTemporaryFile {
+    pub task_id: TaskId,
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,6 +149,31 @@ pub trait ArtifactService: Send + Sync {
         &self,
         repo: &dyn Repository,
         task_id: &TaskId,
+    ) -> Result<(), DomainError>;
+
+    /// Read-only inventory of interrupted-import files inside proven managed
+    /// artifact roots. Registered originals are never returned.
+    fn diagnose_temporary_files(
+        &self,
+        repo: &dyn Repository,
+    ) -> Result<Vec<ArtifactTemporaryFile>, DomainError>;
+
+    /// Remove one exact temporary file after owner, root and digest are
+    /// revalidated. This never walks or removes a directory.
+    fn cleanup_temporary_file(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        path: &str,
+        expected_sha256: &str,
+    ) -> Result<(), DomainError>;
+
+    fn reveal_temporary_file(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        path: &str,
+        expected_sha256: &str,
     ) -> Result<(), DomainError>;
 }
 
@@ -760,6 +795,150 @@ impl ArtifactService for ManagedArtifactService {
         }
         Ok(())
     }
+
+    fn diagnose_temporary_files(
+        &self,
+        repo: &dyn Repository,
+    ) -> Result<Vec<ArtifactTemporaryFile>, DomainError> {
+        let mut diagnostics = Vec::new();
+        for task in repo.list_active_tasks()? {
+            let Ok(workspace) = self.workspace_for_task(repo, &task.id) else {
+                continue;
+            };
+            let root = workspace.join(".grok-acp-gui").join("artifacts");
+            if !root.exists() {
+                continue;
+            }
+            let root = root.canonicalize().map_err(|_| {
+                DomainError::new(
+                    codes::ARTIFACT_CACHE_MISSING,
+                    "Managed artifact storage is unavailable",
+                )
+            })?;
+            if !root.starts_with(&workspace) {
+                return Err(DomainError::new(
+                    codes::ARTIFACT_CACHE_MISSING,
+                    "Managed artifact storage escaped the task workspace",
+                ));
+            }
+            let mut files = Vec::new();
+            collect_files(&root, &mut files)?;
+            for (path, bytes, _) in files {
+                if !is_temporary_artifact_name(&path) {
+                    continue;
+                }
+                let registered = repo
+                    .list_attachments_by_task(&task.id.0)?
+                    .iter()
+                    .any(|record| {
+                        PathBuf::from(&record.cache_path)
+                            .canonicalize()
+                            .ok()
+                            .as_ref()
+                            == Some(&path)
+                    });
+                if registered {
+                    continue;
+                }
+                diagnostics.push(ArtifactTemporaryFile {
+                    task_id: task.id.clone(),
+                    path: path.to_string_lossy().into_owned(),
+                    bytes,
+                    sha256: sha256_path(&path)?,
+                });
+            }
+        }
+        Ok(diagnostics)
+    }
+
+    fn cleanup_temporary_file(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        path: &str,
+        expected_sha256: &str,
+    ) -> Result<(), DomainError> {
+        let verified = self.verify_temporary_file(repo, task_id, path, expected_sha256)?;
+        std::fs::remove_file(verified).map_err(|_| {
+            DomainError::new(
+                codes::ARTIFACT_CACHE_MISSING,
+                "Managed temporary artifact could not be removed",
+            )
+        })
+    }
+
+    fn reveal_temporary_file(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        path: &str,
+        expected_sha256: &str,
+    ) -> Result<(), DomainError> {
+        let verified = self.verify_temporary_file(repo, task_id, path, expected_sha256)?;
+        let root = self.root_for_task(repo, task_id)?;
+        reveal_managed_file(&verified, &root)
+            .map_err(|message| DomainError::new(codes::ARTIFACT_CACHE_MISSING, message))
+    }
+}
+
+impl ManagedArtifactService {
+    fn verify_temporary_file(
+        &self,
+        repo: &dyn Repository,
+        task_id: &TaskId,
+        raw_path: &str,
+        expected_sha256: &str,
+    ) -> Result<PathBuf, DomainError> {
+        let root = self.root_for_task(repo, task_id)?;
+        let raw = Path::new(raw_path);
+        if !raw.is_absolute() || !is_temporary_artifact_name(raw) {
+            return Err(DomainError::new(
+                codes::ARTIFACT_CACHE_MISSING,
+                "Artifact cleanup target is not a managed temporary file",
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(raw).map_err(|_| {
+            DomainError::new(
+                codes::ARTIFACT_CACHE_MISSING,
+                "Managed temporary artifact is unavailable",
+            )
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(DomainError::new(
+                codes::ARTIFACT_CACHE_MISSING,
+                "Artifact cleanup target is not a regular managed file",
+            ));
+        }
+        let path = raw.canonicalize().map_err(|_| {
+            DomainError::new(
+                codes::ARTIFACT_CACHE_MISSING,
+                "Managed temporary artifact is unavailable",
+            )
+        })?;
+        if !path.starts_with(&root) || sha256_path(&path)? != expected_sha256 {
+            return Err(DomainError::new(
+                codes::ARTIFACT_CACHE_MISSING,
+                "Managed temporary artifact changed after diagnosis",
+            ));
+        }
+        Ok(path)
+    }
+}
+
+fn is_temporary_artifact_name(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.') && name.ends_with(".tmp"))
+}
+
+fn sha256_path(path: &Path) -> Result<String, DomainError> {
+    let bytes = std::fs::read(path).map_err(|_| {
+        DomainError::new(
+            codes::ARTIFACT_CACHE_MISSING,
+            "Managed temporary artifact could not be verified",
+        )
+    })?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn artifact_save_failure(
