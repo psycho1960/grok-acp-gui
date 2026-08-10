@@ -7,6 +7,7 @@ dist-test/
 coverage/
 test-results/
 test-results-*/
+.gag-015-evidence/
 .pw-out-*/
 _ci_logs*/
 *.zip
