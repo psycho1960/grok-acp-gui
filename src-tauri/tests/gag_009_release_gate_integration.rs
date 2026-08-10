@@ -28,6 +28,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -147,11 +148,14 @@ struct Env {
     session_id: SessionId,
 }
 
-fn nanos() -> u128 {
-    std::time::SystemTime::now()
+fn unique_suffix() -> String {
+    static NEXT_SUFFIX: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos()
+        .as_nanos();
+    let sequence = NEXT_SUFFIX.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos}-{sequence}")
 }
 
 /// Boot a full production wiring: real in-memory SQLite, real Fake ACP
@@ -164,7 +168,7 @@ async fn setup_on_disk(scenario: FakeScenario, mode: &str, permission_timeout: D
     let database_path = std::env::temp_dir().join(format!(
         "gag009-rg-db-{}-{}.sqlite",
         std::process::id(),
-        nanos()
+        unique_suffix()
     ));
     setup_with_database_path(scenario, mode, permission_timeout, Some(database_path)).await
 }
@@ -175,8 +179,11 @@ async fn setup_with_database_path(
     permission_timeout: Duration,
     database_path: Option<PathBuf>,
 ) -> Env {
-    let workspace =
-        std::env::temp_dir().join(format!("gag009-rg-{}-{}", std::process::id(), nanos()));
+    let workspace = std::env::temp_dir().join(format!(
+        "gag009-rg-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
     fs::create_dir_all(&workspace).expect("create temp workspace");
 
     let concrete = Arc::new(match database_path.as_ref() {
@@ -196,8 +203,8 @@ async fn setup_with_database_path(
     })
     .unwrap();
 
-    let task_id = TaskId::new(format!("t-rg-{}", nanos()));
-    let session_id = SessionId::new(format!("s-rg-{}", nanos()));
+    let task_id = TaskId::new(format!("t-rg-{}", unique_suffix()));
+    let session_id = SessionId::new(format!("s-rg-{}", unique_suffix()));
     repo.create_task(&Task {
         id: task_id.clone(),
         project_id: ProjectId::new("p-rg"),
