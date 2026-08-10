@@ -55,6 +55,10 @@ fn embedded_migrations() -> Vec<EmbeddedMigration> {
         env!("CARGO_MANIFEST_DIR"),
         "/migrations/0007_squash_integration_recovery.sql"
     ));
+    let sql_0008 = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/migrations/0008_recovery_center.sql"
+    ));
     vec![
         EmbeddedMigration {
             version: 1,
@@ -90,6 +94,11 @@ fn embedded_migrations() -> Vec<EmbeddedMigration> {
             version: 7,
             sql: sql_0007,
             checksum: compute_checksum(sql_0007),
+        },
+        EmbeddedMigration {
+            version: 8,
+            sql: sql_0008,
+            checksum: compute_checksum(sql_0008),
         },
     ]
 }
@@ -333,7 +342,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(run_migrations(&conn).unwrap(), 1);
+        assert_eq!(run_migrations(&conn).unwrap(), 2);
         let has_identity: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('integration_attempts') WHERE name = 'repo_identity'",

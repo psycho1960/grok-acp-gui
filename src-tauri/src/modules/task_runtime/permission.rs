@@ -504,16 +504,28 @@ impl ExecutionGuard<()> {
         allowed_cwd: &Path,
         allowed_write_paths: &[&Path],
     ) -> Result<(), DomainError> {
+        let managed_recovery_git = matches!(
+            operation.args.as_slice(),
+            [command, _, _] if command == "fetch"
+        ) || matches!(
+            operation.args.as_slice(),
+            [command, binary, _] if command == "apply" && binary == "--binary"
+        ) || matches!(
+            operation.args.as_slice(),
+            [command, cached, binary, _]
+                if command == "apply" && cached == "--cached" && binary == "--binary"
+        );
         let managed_git = operation.kind == OperationKind::Git
             && operation.executable.as_deref() == Some("git")
-            && matches!(
-                operation.args.as_slice(),
-                [command, subcommand, ..]
-                    if (command == "worktree" && matches!(subcommand.as_str(), "add" | "remove"))
-                        || (command == "branch" && subcommand == "-D")
-                        || (command == "bundle" && subcommand == "create")
-                        || (command == "update-ref" && operation.args.len() == 4)
-            );
+            && (managed_recovery_git
+                || matches!(
+                    operation.args.as_slice(),
+                    [command, subcommand, ..]
+                        if (command == "worktree" && matches!(subcommand.as_str(), "add" | "remove"))
+                            || (command == "branch" && subcommand == "-D")
+                            || (command == "bundle" && subcommand == "create")
+                            || (command == "update-ref" && operation.args.len() == 4)
+                ));
         if (!managed_git
             && matches!(
                 operation.category(),

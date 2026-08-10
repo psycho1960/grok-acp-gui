@@ -19,6 +19,7 @@ use crate::adapters::grok_acp::GrokAcpAdapter;
 use crate::modules::agent_runtime::{AgentRuntime, AgentRuntimeImpl, RuntimeConfig};
 use crate::modules::artifacts::{ArtifactService, ManagedArtifactService};
 use crate::modules::persistence::Repository;
+use crate::modules::task_runtime::recovery::{ManagedRecoveryService, RecoveryService};
 use crate::modules::task_runtime::{TaskRuntime, TaskRuntimeImpl};
 use crate::modules::workspace::{ManagedWorkspaceService, WorkspaceService};
 use bridge::dispatch::{self as br_dispatch, DesktopResult};
@@ -33,6 +34,7 @@ pub struct AppState {
     pub task_runtime: Arc<dyn TaskRuntime>,
     pub artifacts: Arc<dyn ArtifactService>,
     pub workspace: Arc<dyn WorkspaceService>,
+    pub recovery: Arc<dyn RecoveryService>,
     pub db_init_error: Option<String>,
 }
 
@@ -60,7 +62,10 @@ async fn bootstrap(
         // A process restart loses in-memory confirmation tokens. Reconcile
         // first so stale `closing` rows are safely restored to ready/dirty
         // before the Renderer receives its initial snapshot.
-        let _ = state.workspace.reconcile_registry();
+        if let Err(error) = state.recovery.scan("startup") {
+            eprintln!("Recovery scan failed ({})", error.code);
+            let _ = state.workspace.reconcile_registry();
+        }
     }
     let mut snapshot =
         br_dispatch::bootstrap_impl(state.repo.as_ref(), state.db_init_error.as_deref());
@@ -102,13 +107,17 @@ async fn execute(
     let task_runtime = state.inner().task_runtime.clone();
     let artifacts = state.inner().artifacts.clone();
     let workspace = state.inner().workspace.clone();
-    Ok(br_dispatch::execute_impl_with_services(
-        &*repo,
-        &*runtime,
-        &*vision_runtime,
-        &*task_runtime,
-        &*artifacts,
-        &*workspace,
+    let recovery = state.inner().recovery.clone();
+    Ok(br_dispatch::execute_impl_with_recovery(
+        br_dispatch::RecoveryDispatchServices {
+            repo: &*repo,
+            runtime: &*runtime,
+            vision_runtime: &*vision_runtime,
+            task_runtime: &*task_runtime,
+            artifacts: &*artifacts,
+            workspace: &*workspace,
+            recovery: &*recovery,
+        },
         command,
     )
     .await)
@@ -243,6 +252,11 @@ pub fn run() {
                 data_dir.join("worktrees"),
                 data_dir.join("recovery"),
             ));
+            let recovery: Arc<dyn RecoveryService> = Arc::new(ManagedRecoveryService::new(
+                repo.clone(),
+                workspace.clone(),
+                artifacts.clone(),
+            ));
 
             // --- Task runtime (GAG-006): task/session isolation, ordering,
             // persistence, and task-scoped event publication. ---
@@ -266,6 +280,7 @@ pub fn run() {
                 task_runtime,
                 artifacts,
                 workspace,
+                recovery,
                 db_init_error,
             });
             Ok(())

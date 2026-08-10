@@ -20,6 +20,7 @@ use crate::modules::agent_runtime::{
 };
 use crate::modules::artifacts::ArtifactService;
 use crate::modules::persistence::Repository;
+use crate::modules::task_runtime::recovery::RecoveryService;
 use crate::modules::task_runtime::TaskRuntime;
 use crate::modules::workspace::{CreateManagedWorktree, PrepareSquash, WorkspaceService};
 
@@ -271,6 +272,27 @@ pub struct SlashCommandInfo {
 /// error.  The dispatch classifies errors:
 /// - Unknown `type` -> `BRIDGE_UNSUPPORTED_COMMAND`
 /// - Recognised `type` but invalid payload -> `BRIDGE_INVALID_PAYLOAD`
+#[derive(Clone, Copy)]
+struct DispatchServices<'a> {
+    repo: &'a dyn Repository,
+    runtime: &'a dyn crate::modules::agent_runtime::AgentRuntime,
+    vision_runtime: &'a dyn crate::modules::agent_runtime::AgentRuntime,
+    task_runtime: &'a dyn TaskRuntime,
+    artifacts: Option<&'a dyn ArtifactService>,
+    workspace: Option<&'a dyn WorkspaceService>,
+    recovery: Option<&'a dyn RecoveryService>,
+}
+
+pub struct RecoveryDispatchServices<'a> {
+    pub repo: &'a dyn Repository,
+    pub runtime: &'a dyn crate::modules::agent_runtime::AgentRuntime,
+    pub vision_runtime: &'a dyn crate::modules::agent_runtime::AgentRuntime,
+    pub task_runtime: &'a dyn TaskRuntime,
+    pub artifacts: &'a dyn ArtifactService,
+    pub workspace: &'a dyn WorkspaceService,
+    pub recovery: &'a dyn RecoveryService,
+}
+
 pub async fn execute_impl(
     repo: &dyn Repository,
     runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
@@ -280,7 +302,19 @@ pub async fn execute_impl(
     // Compatibility wrapper: without a dedicated visual runtime the main
     // runtime is reused, and without a managed artifact service attachment
     // operations fail closed inside the handlers.
-    execute_impl_inner(repo, runtime, runtime, task_runtime, None, None, raw).await
+    execute_impl_inner(
+        DispatchServices {
+            repo,
+            runtime,
+            vision_runtime: runtime,
+            task_runtime,
+            artifacts: None,
+            workspace: None,
+            recovery: None,
+        },
+        raw,
+    )
+    .await
 }
 
 /// Production dispatcher with a dedicated visual runtime. Keeping Luna
@@ -295,12 +329,15 @@ pub async fn execute_impl_with_vision(
     raw: serde_json::Value,
 ) -> DesktopResult {
     execute_impl_inner(
-        repo,
-        runtime,
-        vision_runtime,
-        task_runtime,
-        Some(artifacts),
-        None,
+        DispatchServices {
+            repo,
+            runtime,
+            vision_runtime,
+            task_runtime,
+            artifacts: Some(artifacts),
+            workspace: None,
+            recovery: None,
+        },
         raw,
     )
     .await
@@ -317,24 +354,42 @@ pub async fn execute_impl_with_services(
     raw: serde_json::Value,
 ) -> DesktopResult {
     execute_impl_inner(
-        repo,
-        runtime,
-        vision_runtime,
-        task_runtime,
-        Some(artifacts),
-        Some(workspace),
+        DispatchServices {
+            repo,
+            runtime,
+            vision_runtime,
+            task_runtime,
+            artifacts: Some(artifacts),
+            workspace: Some(workspace),
+            recovery: None,
+        },
+        raw,
+    )
+    .await
+}
+
+/// GAG-014 production dispatcher with Recovery Center orchestration.
+pub async fn execute_impl_with_recovery(
+    services: RecoveryDispatchServices<'_>,
+    raw: serde_json::Value,
+) -> DesktopResult {
+    execute_impl_inner(
+        DispatchServices {
+            repo: services.repo,
+            runtime: services.runtime,
+            vision_runtime: services.vision_runtime,
+            task_runtime: services.task_runtime,
+            artifacts: Some(services.artifacts),
+            workspace: Some(services.workspace),
+            recovery: Some(services.recovery),
+        },
         raw,
     )
     .await
 }
 
 async fn execute_impl_inner(
-    repo: &dyn Repository,
-    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
-    vision_runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
-    task_runtime: &dyn TaskRuntime,
-    artifacts: Option<&dyn ArtifactService>,
-    workspace: Option<&dyn WorkspaceService>,
+    services: DispatchServices<'_>,
     raw: serde_json::Value,
 ) -> DesktopResult {
     // Reject oversized payloads before any deserialization.
@@ -380,29 +435,21 @@ async fn execute_impl_inner(
         return DesktopResult::err(err);
     }
 
-    dispatch(
+    dispatch(services, cmd).await
+}
+
+use super::commands::DesktopCommand;
+
+async fn dispatch(services: DispatchServices<'_>, cmd: DesktopCommand) -> DesktopResult {
+    let DispatchServices {
         repo,
         runtime,
         vision_runtime,
         task_runtime,
         artifacts,
         workspace,
-        cmd,
-    )
-    .await
-}
-
-use super::commands::DesktopCommand;
-
-async fn dispatch(
-    repo: &dyn Repository,
-    runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
-    vision_runtime: &dyn crate::modules::agent_runtime::AgentRuntime,
-    task_runtime: &dyn TaskRuntime,
-    artifacts: Option<&dyn ArtifactService>,
-    workspace: Option<&dyn WorkspaceService>,
-    cmd: DesktopCommand,
-) -> DesktopResult {
+        recovery,
+    } = services;
     match &cmd {
         DesktopCommand::RuntimeRefresh(payload) => runtime_refresh(repo, runtime, payload).await,
         DesktopCommand::RuntimeLogin(payload) => runtime_login(runtime, payload).await,
@@ -567,8 +614,50 @@ async fn dispatch(
 
         DesktopCommand::WorktreeCleanup(_) => not_implemented("worktree.cleanup"),
 
-        DesktopCommand::RecoveryRestore(_) => not_implemented("recovery.restore"),
-        DesktopCommand::RecoveryDelete(_) => not_implemented("recovery.delete"),
+        DesktopCommand::RecoveryRestore(_) | DesktopCommand::RecoveryDelete(_) => {
+            DesktopResult::err(AppError::new(
+                "RECOVERY_PLAN_REQUIRED",
+                "Prepare and approve an exact Recovery Center action plan before restoring or deleting a recovery bundle",
+            ))
+        }
+        DesktopCommand::RecoveryScan(payload) => match recovery {
+            Some(service) => recovery_result(service.scan(payload.trigger_kind.as_deref().unwrap_or("manual")), "issues"),
+            None => not_implemented("recovery.scan"),
+        },
+        DesktopCommand::RecoveryGetIssue(payload) => match recovery {
+            Some(service) => recovery_result(service.get_issue(&payload.issue_id, payload.revision), "issue"),
+            None => not_implemented("recovery.getIssue"),
+        },
+        DesktopCommand::RecoveryPrepareAction(payload) => match recovery {
+            Some(service) => recovery_result(service.prepare_action(&payload.issue_id, payload.revision, payload.action), "plan"),
+            None => not_implemented("recovery.prepareAction"),
+        },
+        DesktopCommand::RecoveryExecuteAction(payload) => match recovery {
+            Some(service) => recovery_result(service.execute_action(&payload.plan_id, &payload.approval_digest), "issue"),
+            None => not_implemented("recovery.executeAction"),
+        },
+        DesktopCommand::RecoveryCreateBundle(payload) => match recovery {
+            Some(service) => recovery_result(service.create_bundle(&payload.issue_id, payload.revision), "bundle"),
+            None => not_implemented("recovery.createBundle"),
+        },
+        DesktopCommand::RecoveryVerifyBundle(payload) => match recovery {
+            Some(service) => recovery_result(service.verify_bundle(&payload.bundle_id), "bundle"),
+            None => not_implemented("recovery.verifyBundle"),
+        },
+        DesktopCommand::RecoveryHistory(_) => match recovery {
+            Some(service) => recovery_result(service.list_history(), "history"),
+            None => not_implemented("recovery.history"),
+        },
+    }
+}
+
+fn recovery_result<T: Serialize>(
+    result: Result<T, crate::domain::error::DomainError>,
+    key: &str,
+) -> DesktopResult {
+    match result {
+        Ok(value) => DesktopResult::ok(serde_json::json!({ (key): value })),
+        Err(error) => DesktopResult::err(AppError::new(error.code, error.message)),
     }
 }
 
