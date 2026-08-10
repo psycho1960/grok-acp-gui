@@ -22,6 +22,7 @@ import { createStatefulTaskCenterBridge } from "../features/task-center/stateful
 import { useTaskCenterStore } from "../features/task-center/task-center-store";
 import WorktreePanel from "../features/worktrees/WorktreePanel.vue";
 import ReviewView from "../features/review/ReviewView.vue";
+import RecoveryCenter from "../features/worktrees/RecoveryCenter.vue";
 
 defineProps<{ dataVersion?: string }>();
 
@@ -35,8 +36,9 @@ const reviewTaskId = computed(() => {
   try { return decodeURIComponent(match[1]); } catch { return undefined; }
 });
 const showReview = computed(() => Boolean(reviewTaskId.value));
+const showRecovery = computed(() => routeHash.value === "#recovery");
 const showTaskCenter = computed(() => {
-  if (showConversation.value || showReview.value) return false;
+  if (showConversation.value || showReview.value || showRecovery.value) return false;
   const route = parseTaskCenterHash(routeHash.value);
   // Default shell main area shows Task Center when hash is task-center or empty after bootstrap.
   return (
@@ -93,6 +95,10 @@ function goReview(taskId?: string): void {
   if (target) window.location.hash = `#review/${encodeURIComponent(target)}`;
 }
 
+function goRecovery(): void {
+  window.location.hash = "#recovery";
+}
+
 const left = computed(() =>
   h(
     "nav",
@@ -141,11 +147,24 @@ const left = computed(() =>
         },
         "变更审查",
       ),
+      h(
+        "button",
+        {
+          class: "nav-item",
+          type: "button",
+          "data-testid": "nav-recovery",
+          onClick: goRecovery,
+        },
+        "恢复中心",
+      ),
     ],
   ),
 );
 
 const main = computed(() => {
+  if (showRecovery.value) {
+    return h(RecoveryCenter, { bridge: bridge.value });
+  }
   if (showReview.value && reviewTaskId.value) {
     return h(ReviewView, { bridge: bridge.value, taskId: reviewTaskId.value as TaskId });
   }
@@ -189,6 +208,14 @@ const main = computed(() => {
 });
 
 const inspector = computed(() => {
+  if (showRecovery.value) {
+    return h("section", { class: "inspector-content" }, [
+      h("h2", "恢复说明"),
+      h(StatusIcon, { status: "waiting", label: "等待用户批准" }),
+      h("p", "扫描不会清理资源。每个操作都绑定证据 revision，状态变化会拒绝执行。"),
+      h(Badge, { tone: "warning" }, { default: () => "Fail closed" }),
+    ]);
+  }
   const taskId = reviewTaskId.value ?? taskStore.selectedTaskId;
   if (taskId) {
     return h(WorktreePanel, {
