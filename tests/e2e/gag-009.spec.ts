@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 test.describe("GAG-009 permission and Plan approval", () => {
   test("shows impact, defaults keyboard focus to a safe option, and blocks double submit", async ({ page }) => {

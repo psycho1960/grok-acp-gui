@@ -92,7 +92,16 @@ function scrollSlashItemIntoView(): void {
 function applySlashCommand(command: SlashCommandInfo): void {
   const el = textarea.value;
   if (!el) return;
-  const { text, cursor } = insertSlashCommand(el.value, el.selectionStart, command.name);
+  // Help button can open without a leading "/"; only replace when the caret is
+  // already on a "/..." token so plain draft text is never wiped.
+  const onSlashLine = slashMenuState(el.value, el.selectionStart).open;
+  const mode = onSlashLine ? "replace-slash-line" : "insert-at-cursor";
+  const { text, cursor } = insertSlashCommand(
+    el.value,
+    el.selectionStart,
+    command.name,
+    mode,
+  );
   el.value = text;
   el.setSelectionRange(cursor, cursor);
   emit("update:modelValue", text);
@@ -330,7 +339,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
 }
 .composer-hint {
   margin: 0;
-  color: var(--ctp-overlay0);
+  color: var(--ctp-subtext0);
   font-size: var(--text-sm);
   line-height: var(--leading-tight);
 }

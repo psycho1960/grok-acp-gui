@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 // B-2 (RG-009-X-05): the browser console must never expose tokens,
 // API keys, environment values, or test secrets. The backend redacts

@@ -24,17 +24,17 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 function onPointerDown(event: PointerEvent): void {
+  // Do not setPointerCapture on the panel — it steals click targets from buttons/inputs.
   if (event.pointerType === "mouse" && event.button !== 0) return;
   swipeStartX = event.clientX;
   swipeActive = true;
-  (event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId);
 }
 
 function onPointerUp(event: PointerEvent): void {
   if (!swipeActive) return;
   swipeActive = false;
   const delta = event.clientX - swipeStartX;
-  // Swipe right (away from left-edge content / closing edge panels from the right)
+  // Swipe right closes; pointerup bubbles from children so capture is unnecessary.
   if (delta > 72) close();
 }
 

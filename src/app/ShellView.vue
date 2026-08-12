@@ -59,7 +59,8 @@ const showTaskCenter = computed(() => {
     routeHash.value === "#first-use"
   );
 });
-const forceCoach = computed(() => routeHash.value === "#first-use");
+/** Only force the coach when explicitly requested; #first-use is the empty-shell demo hash. */
+const forceCoach = computed(() => routeHash.value === "#coach");
 
 function resolveBridge(): DesktopBridge {
   try {
@@ -437,6 +438,8 @@ const commandItems = computed((): CommandItem[] => {
             v-if="crumb.onClick && index < breadcrumbTrail.length - 1"
             type="button"
             class="crumb-link"
+            :data-testid="index === 0 ? 'topbar-project' : undefined"
+            :title="crumb.label"
             @click="crumb.onClick"
           >
             {{ crumb.label }}
@@ -473,7 +476,7 @@ const commandItems = computed((): CommandItem[] => {
 }
 .nav-section {
   margin: var(--space-3) 0 var(--space-1);
-  color: var(--ctp-overlay0);
+  color: var(--ctp-subtext0);
   font-size: var(--text-xs);
   letter-spacing: 0.04em;
 }

@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
+import type { Page } from "@playwright/test";
 
 // GAG-010A / goal: clipboard screenshot paste, in-conversation model &
 // reasoning switching, and the "/" quick-command menu — driven through the

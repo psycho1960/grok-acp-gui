@@ -2,6 +2,7 @@
 import { onMounted, ref } from "vue";
 import Button from "./Button.vue";
 
+/** localStorage flag: set to "1" after dismiss (keep in sync with tests/e2e/fixtures.ts). */
 const STORAGE_KEY = "gag-ui-first-use-coach-v1";
 
 const props = defineProps<{
