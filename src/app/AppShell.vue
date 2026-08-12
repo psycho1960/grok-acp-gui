@@ -203,9 +203,10 @@ onBeforeUnmount(() => {
 :deep(.tooltip) { display: block; width: 4px; height: 100%; min-height: 100%; align-self: stretch; }
 @media (max-width: 1080px) { .shell-main { padding:var(--space-4); } /* BREAKPOINTS.lg */ }
 @media (max-width: 1023px), (min-resolution: 1.75dppx) { .app-shell { min-height:0; }.shell-columns, .shell-columns.has-left-resizer, .shell-columns.has-inspector, .shell-columns.has-left-resizer.has-inspector { grid-template-columns:minmax(0, 1fr); }.shell-main { min-width:0; }.shell-topbar { min-height:48px; }.shell-statusbar { min-height:28px; } /* BREAKPOINTS.compact */ }
-/* High-DPI / fractional scale: keep control hit areas readable at 150%+ */
+/* High-DPI / fractional scale: keep topbar hit area and resizer readable at 150%+.
+   Status bar stays on the 28px grid track — do not raise its min-height or it clips. */
 @media (min-resolution: 1.5dppx) {
-  .shell-topbar, .shell-statusbar { min-height: 48px; }
+  .shell-topbar { min-height: 48px; }
   .resizer { width: 5px; }
 }
 @media print {

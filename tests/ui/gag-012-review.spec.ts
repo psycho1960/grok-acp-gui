@@ -107,4 +107,17 @@ describe("GAG-012 ReviewView", () => {
       payload: { taskId, selection: [{ path: "src/alpha.ts", fingerprint: "fp-alpha" }] },
     });
   });
+
+  it("styles checkpoint textareas under .checkpoint (not .files)", async () => {
+    const commands: DesktopCommand[] = [];
+    const wrapper = mount(ReviewView, { props: { bridge: bridge(commands), taskId } });
+    await flushPromises();
+    const textareas = wrapper.findAll("textarea");
+    expect(textareas.length).toBeGreaterThanOrEqual(2);
+    for (const ta of textareas) {
+      expect(ta.element.closest(".checkpoint")).not.toBeNull();
+      expect(ta.element.closest(".files")).toBeNull();
+      expect(ta.element.matches(".checkpoint textarea")).toBe(true);
+    }
+  });
 });

@@ -328,7 +328,7 @@ onMounted(load);
 .files,.checkpoint { padding:var(--space-3); background:var(--ctp-mantle); }
 .files { border-right:1px solid var(--ctp-surface0); }
 .checkpoint { display:grid; align-content:start; gap:var(--space-3); border-left:1px solid var(--ctp-surface0); }
-.files textarea { box-sizing:border-box; width:100%; color:var(--ctp-text); background:var(--ctp-surface0); border:1px solid var(--ctp-surface1); border-radius:var(--radius-control); padding:var(--space-2); }
+.checkpoint textarea { box-sizing:border-box; width:100%; color:var(--ctp-text); background:var(--ctp-surface0); border:1px solid var(--ctp-surface1); border-radius:var(--radius-control); padding:var(--space-2); }
 .files ul,.history ol { margin:var(--space-3) 0 0; padding:0; list-style:none; }
 .files li { border-radius:var(--radius-control); }
 .files li.active { background:var(--ctp-surface0); }
