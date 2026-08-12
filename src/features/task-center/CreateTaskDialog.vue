@@ -12,6 +12,10 @@ import {
   workspaceStrategyForMode,
   type WorkspaceStrategy,
 } from "../conversation/mode-workspace";
+import Tooltip from "../../shared/ui/Tooltip.vue";
+import IconButton from "../../shared/ui/IconButton.vue";
+import NamedIcon from "../../shared/ui/NamedIcon.vue";
+import { modeHelpFor } from "../../shared/ui/mode-help";
 import { deriveTaskTitle } from "./title";
 
 type ModelOption = {
@@ -154,13 +158,20 @@ function onSubmit(): void {
       <section class="section">
         <h3 class="section-title">模式与模型</h3>
         <div class="grid-2">
-          <Select
-            :model-value="mode"
-            label="模式"
-            :options="modeOptions"
-            data-testid="create-task-mode"
-            @update:model-value="mode = $event"
-          />
+          <div class="field-with-help">
+            <Select
+              :model-value="mode"
+              label="模式"
+              :options="modeOptions"
+              data-testid="create-task-mode"
+              @update:model-value="mode = $event"
+            />
+            <Tooltip :text="modeHelpFor(mode)">
+              <IconButton label="模式说明" data-testid="create-task-mode-help">
+                <NamedIcon name="help" :size="14" />
+              </IconButton>
+            </Tooltip>
+          </div>
           <Select
             :model-value="model"
             label="模型（可选）"
@@ -245,6 +256,14 @@ function onSubmit(): void {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+.field-with-help {
+  display: flex;
+  gap: var(--space-1);
+  align-items: end;
+}
+.field-with-help :deep(.field) {
+  flex: 1;
+}
 .grid-2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -259,7 +278,7 @@ function onSubmit(): void {
   margin: 0;
   padding: var(--space-2);
   color: var(--ctp-yellow);
-  background: color-mix(in srgb, var(--ctp-yellow) 12%, var(--ctp-mantle));
+  background: var(--overlay-warning);
   border: 1px solid var(--ctp-yellow);
   border-radius: var(--radius-control);
   font-size: var(--font-small);

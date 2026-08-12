@@ -2,8 +2,12 @@
 import { computed } from "vue";
 import Badge from "../../shared/ui/Badge.vue";
 import Button from "../../shared/ui/Button.vue";
+import IconButton from "../../shared/ui/IconButton.vue";
+import NamedIcon from "../../shared/ui/NamedIcon.vue";
 import Select from "../../shared/ui/Select.vue";
 import StatusIcon from "../../shared/ui/StatusIcon.vue";
+import Tooltip from "../../shared/ui/Tooltip.vue";
+import { modeHelpFor } from "../../shared/ui/mode-help";
 import type { ModeInfo, ModelInfo, ReasoningEffort } from "../../bridge/types";
 import {
   WORKSPACE_STRATEGY_OPTIONS,
@@ -145,15 +149,22 @@ function onReasoningChange(value: string): void {
     </div>
     <div class="right">
       <div class="settings" aria-label="对话设置">
-        <Select
-          class="settings-select"
-          data-testid="conversation-mode-select"
-          label="模式"
-          :model-value="selectedMode ?? ''"
-          :options="modeOptions"
-          :disabled="settingsDisabled"
-          @update:model-value="onModeChange"
-        />
+        <div class="mode-field">
+          <Select
+            class="settings-select"
+            data-testid="conversation-mode-select"
+            label="模式"
+            :model-value="selectedMode ?? ''"
+            :options="modeOptions"
+            :disabled="settingsDisabled"
+            @update:model-value="onModeChange"
+          />
+          <Tooltip :text="modeHelpFor(selectedMode)">
+            <IconButton label="模式说明" data-testid="conversation-mode-help">
+              <NamedIcon name="help" :size="14" />
+            </IconButton>
+          </Tooltip>
+        </div>
         <Select
           class="settings-select"
           data-testid="conversation-workspace-select"
@@ -230,13 +241,20 @@ function onReasoningChange(value: string): void {
 }
 .title {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--heading-panel);
+  line-height: var(--leading-tight);
+  font-weight: var(--font-weight-semibold);
   color: var(--ctp-text);
 }
 .settings {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+  align-items: end;
+}
+.mode-field {
+  display: flex;
+  gap: var(--space-1);
   align-items: end;
 }
 .settings-select {

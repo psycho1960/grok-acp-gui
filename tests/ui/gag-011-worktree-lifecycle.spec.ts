@@ -74,9 +74,10 @@ describe("GAG-011 WorktreePanel", () => {
     expect(confirm.attributes("disabled")).toBeDefined();
 
     const pathInput = wrapper.get('[data-testid="worktree-confirm-path"] input');
-    await pathInput.setValue("D:\\managed\\wrong");
+    // Force cleanup uses DELETE keyword in the UI; backend still receives absolute path.
+    await pathInput.setValue("WRONG");
     expect(confirm.attributes("disabled")).toBeDefined();
-    await pathInput.setValue(path);
+    await pathInput.setValue("DELETE");
     expect(confirm.attributes("disabled")).toBeDefined();
     await wrapper.get('input[type="checkbox"]').setValue(true);
     expect(confirm.attributes("disabled")).toBeUndefined();

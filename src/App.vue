@@ -10,6 +10,7 @@ import { parseTaskCenterHash } from "./features/task-center/hash-route";
 import ConversationFixture from "./features/conversation/ConversationFixture.vue";
 import { parseConversationHash } from "./features/conversation/hash-route";
 import OnboardingView from "./features/onboarding/OnboardingView.vue";
+import ToastHost from "./shared/ui/ToastHost.vue";
 
 const isLoading = ref(true);
 const startupError = ref<string | null>(null);
@@ -147,6 +148,7 @@ onUnmounted(() => {
   <ConversationFixture v-else-if="showConversationFixture" />
   <TaskCenterFixture v-else-if="showTaskCenterFixture" />
   <ShellView v-else :data-version="bootstrapStatus?.version" />
+  <ToastHost />
 </template>
 
 <style scoped>

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import Button from "../../shared/ui/Button.vue";
+import IconButton from "../../shared/ui/IconButton.vue";
+import NamedIcon from "../../shared/ui/NamedIcon.vue";
 import type { SlashCommandInfo } from "../../bridge/types";
 import { extractImageFiles } from "./clipboard-images";
 import {
@@ -36,6 +38,7 @@ const emit = defineEmits<{
 const textarea = ref<HTMLTextAreaElement | null>(null);
 const hoverDropActive = ref(false);
 const slashOpen = ref(false);
+const slashHelpPinned = ref(false);
 const slashQuery = ref("");
 const slashLineStart = ref(0);
 const slashIndex = ref(0);
@@ -45,7 +48,11 @@ let slashEscapeLock = false;
 const hasContent = computed(() => props.modelValue.trim().length > 0 || (props.attachments?.length ?? 0) > 0);
 
 const filteredCommands = computed(() =>
-  filterSlashCommands(props.slashCommands ?? [], slashQuery.value),
+  filterSlashCommands(props.slashCommands ?? [], slashHelpPinned.value ? "" : slashQuery.value),
+);
+
+const showSlashMenu = computed(
+  () => slashOpen.value || slashHelpPinned.value,
 );
 
 function syncSlashMenu(): void {
@@ -64,8 +71,16 @@ function syncSlashMenu(): void {
 
 function closeSlashMenu(): void {
   slashOpen.value = false;
+  slashHelpPinned.value = false;
   slashQuery.value = "";
   slashEscapeLock = true;
+}
+
+function openSlashHelp(): void {
+  slashHelpPinned.value = true;
+  slashOpen.value = true;
+  slashQuery.value = "";
+  slashIndex.value = 0;
 }
 
 function scrollSlashItemIntoView(): void {
@@ -86,7 +101,7 @@ function applySlashCommand(command: SlashCommandInfo): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
-  if (slashOpen.value) {
+  if (showSlashMenu.value) {
     const commands = filteredCommands.value;
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -206,14 +221,14 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
     <div class="row">
       <div class="composer-input-wrap">
         <div
-          v-if="slashOpen"
+          v-if="showSlashMenu"
           class="slash-menu"
           data-testid="slash-menu"
           role="listbox"
           aria-label="快捷指令"
         >
           <p v-if="filteredCommands.length === 0" class="slash-empty" role="status">
-            没有匹配的快捷指令
+            {{ (slashCommands?.length ?? 0) === 0 ? "暂无可用快捷指令" : "没有匹配的快捷指令" }}
           </p>
           <button
             v-for="(command, index) in filteredCommands"
@@ -242,7 +257,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
           :disabled="!capabilities.canSend && !capabilities.canCancel"
           :placeholder="
             capabilities.bridgeOnline
-              ? '输入消息 · Enter 发送 · Shift+Enter 换行 · Esc 停止 · / 呼出快捷指令'
+              ? '输入消息…'
               : 'Bridge 离线 — 草稿仍会保留'
           "
           @input="onInput"
@@ -252,8 +267,17 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
           @click="onSelectionChange"
           @select="onSelectionChange"
         />
+        <p class="composer-hint">Enter 发送 · Shift+Enter 换行 · / 快捷指令 · Esc 停止</p>
       </div>
       <div class="actions">
+        <IconButton
+          label="查看快捷指令"
+          data-testid="composer-slash-help"
+          :disabled="!capabilities.canSend"
+          @click="openSlashHelp"
+        >
+          <NamedIcon name="help" :size="16" />
+        </IconButton>
         <Button data-testid="composer-add-attachment" :disabled="!capabilities.canSend || sendPending" :state="attachmentPending ? 'loading' : 'default'" @click="emit('addAttachments')">添加图片</Button>
         <Button
           v-if="capabilities.canCancel"
@@ -302,6 +326,13 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
 .composer-input-wrap {
   position: relative;
   display: grid;
+  gap: var(--space-1);
+}
+.composer-hint {
+  margin: 0;
+  color: var(--ctp-overlay0);
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
 }
 .slash-menu {
   position: absolute;
@@ -317,7 +348,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
   background: var(--ctp-surface0);
   border: 1px solid var(--ctp-surface1);
   border-radius: var(--radius-control);
-  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+  box-shadow: var(--elevation-menu);
 }
 .slash-item {
   display: grid;
@@ -334,7 +365,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
 }
 .slash-item:hover,
 .slash-item.active {
-  background: color-mix(in srgb, var(--ctp-blue) 18%, var(--ctp-surface0));
+  background: var(--overlay-menu-active);
 }
 .slash-name {
   font-weight: 600;

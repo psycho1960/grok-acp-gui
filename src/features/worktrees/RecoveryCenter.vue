@@ -33,16 +33,30 @@ const groups = computed(() => [
 ]);
 
 const actionLabels: Record<RecoveryActionKind, string> = {
-  mark_interrupted: "标记已中断",
+  mark_interrupted: "标记中断",
   reregister: "重新登记",
-  retain: "保留",
-  show_location: "显示位置",
+  retain: "稍后处理",
+  show_location: "打开位置",
   resume_session: "恢复会话",
   continue_integration: "继续集成",
-  abort_integration: "中止并清理集成",
-  verify_and_cleanup: "验证后清理",
-  restore_bundle: "恢复此恢复包",
-  delete_bundle: "删除此恢复包",
+  abort_integration: "中止集成",
+  verify_and_cleanup: "验证并清理",
+  restore_bundle: "还原备份",
+  delete_bundle: "删除备份",
+};
+
+/** Short explanations under action buttons for non-expert users. */
+const actionHints: Partial<Record<RecoveryActionKind, string>> = {
+  reregister: "把资源重新挂回应用登记表，不修改磁盘内容。",
+  verify_and_cleanup: "校验安全条件后删除受管资源；失败则保持原状。",
+  continue_integration: "从上次中断的合并步骤继续，不自动推送远程。",
+  abort_integration: "停止集成并保留恢复包，不修改目标分支。",
+  restore_bundle: "用已保存的备份恢复文件与提交。",
+  delete_bundle: "永久删除备份包（不可恢复）。",
+  retain: "标记为暂不处理，可稍后再扫。",
+  show_location: "在资源管理器中显示相关路径。",
+  mark_interrupted: "把任务状态标为中断，便于从列表恢复。",
+  resume_session: "尝试重新连接已有会话。",
 };
 
 function replaceIssue(issue: RecoveryIssue): void {
@@ -170,7 +184,7 @@ onMounted(async () => {
       <div>
         <p class="eyebrow">UI-RECOVERY-001</p>
         <h1 id="recovery-title">恢复中心</h1>
-        <p>先诊断和保全，再执行绑定到证据 revision 的单项操作。</p>
+        <p>先扫描诊断并保全证据，再对单项资源执行安全操作（不会自动推送远程）。</p>
       </div>
       <div class="header-actions">
         <Badge tone="neutral">历史扫描 {{ scanCount }}</Badge>
@@ -215,19 +229,20 @@ onMounted(async () => {
         </dl>
         <details open><summary>检测证据</summary><pre>{{ JSON.stringify(selected.evidence, null, 2) }}</pre></details>
         <div class="actions" aria-label="安全操作集合">
-          <Button
-            v-for="action in selected.safeActions"
-            :key="action"
-            :variant="['verify_and_cleanup', 'abort_integration', 'restore_bundle', 'delete_bundle'].includes(action) ? 'danger' : 'secondary'"
-            :disabled="loading"
-            @click="prepare(action)"
-          >
-            {{ actionLabels[action] }}
-          </Button>
+          <div v-for="action in selected.safeActions" :key="action" class="action-block">
+            <Button
+              :variant="['verify_and_cleanup', 'abort_integration', 'restore_bundle', 'delete_bundle'].includes(action) ? 'danger' : 'secondary'"
+              :disabled="loading"
+              @click="prepare(action)"
+            >
+              {{ actionLabels[action] }}
+            </Button>
+            <p v-if="actionHints[action]" class="action-hint">{{ actionHints[action] }}</p>
+          </div>
         </div>
 
         <section v-if="plan" class="plan" data-testid="recovery-plan">
-          <h3>清理计划预览</h3>
+          <h3>操作预览</h3>
           <p><strong>资源：</strong>{{ plan.resourceIdentity }}</p>
           <p v-if="plan.canonicalPath"><strong>路径：</strong>{{ plan.canonicalPath }}</p>
           <p><strong>破坏性等级：</strong>{{ plan.destructiveLevel }}</p>
@@ -246,7 +261,7 @@ onMounted(async () => {
               data-testid="recovery-execute"
               @click="execute"
             >
-              执行已批准计划
+              确认执行
             </Button>
           </div>
         </section>
@@ -274,10 +289,14 @@ onMounted(async () => {
 .recovery-center { display: grid; gap: var(--space-4); padding: var(--space-5); color: var(--ctp-text); }
 .page-header, .detail-heading, .header-actions, .actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); flex-wrap: wrap; }
 .page-header h1, .page-header p, .detail-heading h2, .detail-heading p, .plan h3, .plan p { margin: 0; }
+.page-header h1 { font-size: var(--heading-page); line-height: var(--leading-tight); font-weight: var(--font-weight-semibold); }
+.detail-heading h2 { font-size: var(--heading-panel); line-height: var(--leading-tight); }
 .page-header > div:first-child { display: grid; gap: var(--space-1); }
 .page-header > div:first-child > p:last-child, .empty, .empty-detail p { color: var(--ctp-subtext0); }
 .eyebrow { color: var(--ctp-blue); font-size: var(--font-small); letter-spacing: .06em; text-transform: uppercase; }
-.banner, .report { margin: 0; padding: var(--space-3); border: 1px solid var(--ctp-blue); border-radius: var(--radius-panel); background: color-mix(in srgb, var(--ctp-blue) 10%, var(--ctp-base)); }
+.banner, .report { margin: 0; padding: var(--space-3); border: 1px solid var(--ctp-blue); border-radius: var(--radius-panel); background: var(--overlay-info-solid); }
+.action-block { display: grid; gap: 2px; }
+.action-hint { margin: 0; max-width: 220px; color: var(--ctp-subtext0); font-size: var(--font-small); line-height: var(--leading-tight); }
 .error { margin: 0; color: var(--ctp-red); }
 .recovery-layout { display: grid; grid-template-columns: minmax(260px, .85fr) minmax(360px, 1.4fr); gap: var(--space-4); min-height: 480px; }
 .issue-list, .issue-detail { padding: var(--space-3); border: 1px solid var(--ctp-surface1); border-radius: var(--radius-panel); background: var(--ctp-mantle); }

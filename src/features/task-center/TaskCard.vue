@@ -173,7 +173,8 @@ function onCardClick(event: MouseEvent): void {
 }
 .task-title {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--heading-card);
+  line-height: var(--leading-tight);
   font-weight: 600;
   line-height: 1.3;
   overflow: hidden;

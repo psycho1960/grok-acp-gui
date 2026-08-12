@@ -54,6 +54,10 @@ onBeforeUnmount(() => {
   <section
     ref="root"
     class="perm-slot surface-card"
+    :class="{
+      'is-submitting': slotData.decisionState === 'submitting',
+      'is-resolved': slotData.decisionState === 'resolved',
+    }"
     data-testid="permission-slot"
     aria-label="权限请求插槽"
   >
@@ -113,6 +117,11 @@ onBeforeUnmount(() => {
   display: grid;
   gap: var(--space-2);
   border-color: var(--ctp-yellow);
+  transition: opacity var(--motion-normal) ease;
+}
+.perm-slot.is-submitting,
+.perm-slot.is-resolved {
+  opacity: 0.6;
 }
 header {
   display: flex;

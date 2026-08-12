@@ -194,7 +194,7 @@ onBeforeUnmount(clearLoginPoll);
 <style scoped>
 .onboarding { width:min(840px, calc(100vw - 48px)); margin:48px auto; padding:var(--space-6); color:var(--ctp-text); background:var(--ctp-mantle); border:1px solid var(--ctp-surface0); border-radius:var(--radius-dialog); }
 .section-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--space-6); }
-h1 { margin:0; font-size:28px; }
+h1 { margin:0; font-size:var(--text-4xl); line-height:var(--leading-tight); font-weight:var(--font-weight-semibold); }
 .intro { margin:var(--space-2) 0 0; color:var(--ctp-subtext0); }
 .overall { padding:6px 10px; color:var(--ctp-blue); border:1px solid var(--ctp-surface1); border-radius:999px; font-size:var(--font-small); white-space:nowrap; }
 .check-list { display:grid; gap:var(--space-2); margin:var(--space-6) 0; padding:0; list-style:none; }

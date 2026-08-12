@@ -24,17 +24,24 @@ const preparing = ref(false);
 const removing = ref(false);
 const error = ref<string | null>(null);
 const preparation = ref<RemovalPreparation | null>(null);
-const confirmedPath = ref("");
+/** User confirmation field: full path for normal cleanup, or DELETE for force. */
+const confirmToken = ref("");
 const riskAcknowledged = ref(false);
 const adoptionPreparation = ref<AdoptionPreparation | null>(null);
 const adoptionConfirmedPath = ref("");
 
-const canConfirmRemoval = computed(
-  () =>
-    preparation.value != null &&
-    confirmedPath.value === preparation.value.absolutePath &&
-    (!preparation.value.forceRequired || riskAcknowledged.value),
-);
+const FORCE_CONFIRM_WORD = "DELETE";
+
+const canConfirmRemoval = computed(() => {
+  if (!preparation.value) return false;
+  if (preparation.value.forceRequired) {
+    return (
+      riskAcknowledged.value &&
+      confirmToken.value.trim() === FORCE_CONFIRM_WORD
+    );
+  }
+  return confirmToken.value === preparation.value.absolutePath;
+});
 
 const formattedSize = computed(() => {
   const bytes = worktree.value?.diskUsageBytes ?? 0;
@@ -151,7 +158,7 @@ async function prepareRemoval(): Promise<void> {
       return;
     }
     preparation.value = (result.data as { preparation: RemovalPreparation }).preparation;
-    confirmedPath.value = "";
+    confirmToken.value = "";
     riskAcknowledged.value = false;
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
@@ -171,7 +178,8 @@ async function removeWorktree(): Promise<void> {
       payload: {
         taskId: props.taskId,
         confirmationToken: ready.confirmationToken,
-        confirmedPath: confirmedPath.value,
+        // Always send the verified absolute path; UI may use DELETE only as a user gate.
+        confirmedPath: ready.absolutePath,
       },
     });
     if (result.success === "false") {
@@ -180,7 +188,7 @@ async function removeWorktree(): Promise<void> {
     }
     worktree.value = (result.data as { worktree: WorktreeRecord }).worktree;
     preparation.value = null;
-    confirmedPath.value = "";
+    confirmToken.value = "";
     riskAcknowledged.value = false;
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause);
@@ -191,7 +199,7 @@ async function removeWorktree(): Promise<void> {
 
 async function cancelRemoval(): Promise<void> {
   preparation.value = null;
-  confirmedPath.value = "";
+  confirmToken.value = "";
   riskAcknowledged.value = false;
   await reconcile();
 }
@@ -200,7 +208,7 @@ watch(
   () => props.taskId,
   () => {
     preparation.value = null;
-    confirmedPath.value = "";
+    confirmToken.value = "";
     riskAcknowledged.value = false;
     void inspect();
   },
@@ -259,16 +267,16 @@ watch(
 
   <Dialog
     :model-value="preparation != null"
-    title="确认清理 Worktree"
-    description="后端已重新校验登记、Git 元数据和受管根。请输入完整绝对路径继续。"
+    title="确认清理工作区"
+    description="将删除应用登记的工作区（Worktree）。后端会再次校验登记、Git 元数据与受管根后才执行。"
     @update:model-value="!$event && cancelRemoval()"
   >
     <div v-if="preparation" class="removal-summary">
-      <p><strong>准确目标：</strong>{{ preparation.absolutePath }}</p>
-      <p>脏状态：{{ preparation.dirty ? "有修改" : "干净" }}</p>
-      <p>未跟踪文件：{{ preparation.untrackedFiles }}</p>
+      <p class="danger-banner" role="alert">此操作不可撤销。请确认目标路径无误。</p>
+      <p><strong>目标路径：</strong>{{ preparation.absolutePath }}</p>
+      <p>未提交修改：{{ preparation.dirty ? "有" : "无" }} · 未跟踪文件：{{ preparation.untrackedFiles }}</p>
       <template v-if="preparation.recovery">
-        <p class="recovery-ok">恢复包已创建并验证。</p>
+        <p class="recovery-ok">恢复包已创建并验证，强制清理后可从恢复中心还原。</p>
         <ul>
           <li>branch.bundle</li>
           <li>tracked.patch</li>
@@ -277,20 +285,28 @@ watch(
           <li>manifest.json</li>
         </ul>
       </template>
-      <p v-else>当前内容已合并且干净，不需要恢复包。</p>
+      <p v-else>内容已合并且干净，通常无需恢复包。</p>
       <label v-if="preparation.forceRequired" class="risk-ack">
         <input v-model="riskAcknowledged" type="checkbox" />
-        我确认这是未合并或含修改的强制清理，且将依赖上方恢复包恢复。
+        我确认强制清理未合并或脏工作区，并依赖恢复包恢复。
       </label>
       <Input
-        v-model="confirmedPath"
-        label="输入上方完整绝对路径"
-        :error="confirmedPath && !canConfirmRemoval ? '路径必须逐字匹配' : undefined"
+        v-if="preparation.forceRequired"
+        v-model="confirmToken"
+        label="输入 DELETE 以确认强制删除"
+        :error="confirmToken && !canConfirmRemoval ? '请先勾选风险确认并输入 DELETE' : undefined"
+        data-testid="worktree-confirm-path"
+      />
+      <Input
+        v-else
+        v-model="confirmToken"
+        label="输入上方完整路径以确认"
+        :error="confirmToken && !canConfirmRemoval ? '路径必须逐字匹配' : undefined"
         data-testid="worktree-confirm-path"
       />
     </div>
     <template #actions>
-      <Button @click="cancelRemoval">保留</Button>
+      <Button @click="cancelRemoval">取消</Button>
       <Button
         variant="danger"
         :disabled="!canConfirmRemoval"
@@ -298,7 +314,7 @@ watch(
         data-testid="worktree-confirm-removal"
         @click="removeWorktree"
       >
-        删除已验证目标
+        确认删除
       </Button>
     </template>
   </Dialog>
@@ -347,6 +363,7 @@ watch(
 .external-list article span { color: var(--ctp-subtext0); overflow-wrap: anywhere; }
 .error { color: var(--ctp-red); }
 .removal-summary { display: grid; gap: var(--space-3); overflow-wrap: anywhere; }
+.danger-banner { padding: var(--space-2); color: var(--ctp-text); background: var(--overlay-danger); border: 1px solid var(--ctp-red); border-radius: var(--radius-control); }
 .recovery-ok { color: var(--ctp-green); }
 .risk-ack { display: flex; align-items: start; gap: var(--space-2); color: var(--ctp-yellow); }
 .removal-summary ul { margin: 0; color: var(--ctp-subtext0); }

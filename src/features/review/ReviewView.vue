@@ -14,6 +14,8 @@ import type {
 } from "../../bridge/types";
 import Button from "../../shared/ui/Button.vue";
 import EmptyState from "../../shared/ui/EmptyState.vue";
+import Input from "../../shared/ui/Input.vue";
+import { toast } from "../../shared/ui/toast";
 
 const props = defineProps<{ bridge: DesktopBridge; taskId: TaskId }>();
 
@@ -33,6 +35,8 @@ const integrationPlan = ref<IntegrationPlan>();
 const integrationAttempt = ref<IntegrationAttempt>();
 const integrationApproved = ref(false);
 const integrating = ref(false);
+const checkpointPhase = ref<"" | "validating" | "committing" | "done">("");
+const checkpointPanelOpen = ref(true);
 
 const conflictFiles = computed<string[]>(() => parseStringArray(integrationAttempt.value?.conflictSummaryJson));
 const validationResults = computed<string[]>(() => parseValidationResults(integrationAttempt.value?.validationResultJson));
@@ -99,6 +103,7 @@ async function openDiff(file: FileChange): Promise<void> {
 async function createCheckpoint(): Promise<void> {
   if (!selection.value.length || committing.value) return;
   committing.value = true;
+  checkpointPhase.value = "validating";
   error.value = "";
   const validation = await props.bridge.execute({
     type: "review.validate",
@@ -106,23 +111,37 @@ async function createCheckpoint(): Promise<void> {
   });
   if (validation.success === "false") {
     error.value = validation.error.message;
+    toast.error("Checkpoint 校验失败", { description: validation.error.message });
     committing.value = false;
+    checkpointPhase.value = "";
     return;
   }
+  checkpointPhase.value = "committing";
   const result = await props.bridge.execute({
     type: "review.checkpoint",
     payload: { taskId: props.taskId, message: message.value, selection: selection.value },
   });
   if (result.success === "false") {
     error.value = result.error.message;
+    toast.error("创建 Checkpoint 失败", { description: result.error.message });
+    checkpointPhase.value = "";
   } else {
     receipt.value = (result.data as { receipt: CheckpointReceipt }).receipt;
     selected.value = new Map();
     document.value = undefined;
     activePath.value = "";
+    checkpointPhase.value = "done";
+    toast.success("Checkpoint 已创建", {
+      description: receipt.value ? receipt.value.commitSha.slice(0, 12) : undefined,
+    });
     await load();
+    checkpointPhase.value = "";
   }
   committing.value = false;
+}
+
+function goTaskCenter(): void {
+  window.location.hash = "#task-center";
 }
 
 async function prepareIntegration(): Promise<void> {
@@ -216,7 +235,11 @@ onMounted(load);
 <template>
   <section class="review" aria-labelledby="review-title">
     <header class="review-header">
-      <div><h1 id="review-title">变更审查</h1><p>选择文件并创建可追踪的 Checkpoint。</p></div>
+      <div>
+        <button type="button" class="back-link" data-testid="review-back" @click="goTaskCenter">← 返回任务中心</button>
+        <h1 id="review-title">变更审查</h1>
+        <p>选择文件并创建可追踪的 Checkpoint。</p>
+      </div>
       <Button variant="secondary" :disabled="loading || committing" @click="load">刷新</Button>
     </header>
     <p v-if="error" class="notice error" role="alert">{{ error }}</p>
@@ -225,7 +248,7 @@ onMounted(load);
     <EmptyState v-else-if="!snapshot?.files.length && !checkpoints.length" title="没有待审查变更" detail="当前任务 Worktree 是干净的。" />
     <div v-else class="review-grid">
       <aside class="files" aria-label="变更文件">
-        <input v-model="query" type="search" placeholder="搜索文件" aria-label="搜索变更文件" />
+        <Input v-model="query" label="搜索文件" placeholder="搜索文件" data-testid="review-file-search" />
         <ul>
           <li v-for="file in visibleFiles" :key="file.path" :class="{ active: activePath === file.path, stale: isStale(file) }">
             <label>
@@ -245,40 +268,87 @@ onMounted(load);
         <div v-else-if="document.oversized && !document.text" class="binary"><h2>{{ document.path }}</h2><p>Diff 超过安全预览限制，请缩小变更后重试。</p></div>
         <div v-else><h2>{{ document.path }}</h2><p v-if="document.truncated" class="notice">预览已截断。</p><pre>{{ document.text }}</pre></div>
       </main>
-      <aside class="checkpoint" aria-label="Checkpoint 摘要">
-        <h2>Checkpoint</h2>
-        <p>已选择 {{ selectableCount }} 个文件</p>
-        <label>提交说明<textarea v-model="message" rows="4" :disabled="committing" /></label>
-        <Button variant="primary" :disabled="!selectableCount || committing" @click="createCheckpoint">{{ committing ? "正在提交…" : `创建 Checkpoint（${selectableCount}）` }}</Button>
-        <section class="history"><h3>历史</h3><p v-if="!checkpoints.length">尚无 Checkpoint</p><ol v-else><li v-for="item in checkpoints" :key="item.id"><code>{{ item.commitSha.slice(0, 10) }}</code><span>{{ item.message }}</span></li></ol></section>
-        <section class="integration" aria-labelledby="integration-title">
-          <h3 id="integration-title">Squash 集成</h3>
-          <label>集成提交说明<textarea v-model="integrationMessage" rows="3" :disabled="integrating || !!integrationPlan || !!integrationAttempt" /></label>
-          <Button v-if="!integrationPlan && !integrationAttempt" variant="secondary" :disabled="integrating || !checkpoints.length" @click="prepareIntegration">集成预检</Button>
-          <template v-else>
-            <template v-if="integrationPlan">
-              <dl><dt>来源</dt><dd><code>{{ integrationPlan.sourceTipSha.slice(0, 12) }}</code>（{{ integrationPlan.sourceRange.length }} 个 Checkpoint）</dd><dt>未选择变更</dt><dd>{{ integrationPlan.sourceDirty ? "存在；保留在来源 Worktree，不进入本次 Squash，状态变化会使审批失效" : "无" }}</dd><dt>目标</dt><dd>{{ integrationPlan.targetRef }} @ <code>{{ integrationPlan.expectedTargetSha.slice(0, 12) }}</code></dd><dt>预计文件</dt><dd><ul><li v-for="file in integrationPlan.expectedFiles" :key="file"><code>{{ file }}</code></li></ul></dd><dt>验证</dt><dd>{{ integrationPlan.validationCommands.length ? integrationPlan.validationCommands.map((item) => item.join(" ")).join("；") : "无已配置命令" }}</dd></dl>
-              <ul class="preflight-checklist" aria-label="集成预检清单"><li>来源 Checkpoint 范围已冻结</li><li>目标引用与 HEAD 已校验</li><li>目标分支未在 Worktree 中检出</li><li>来源未选择变更摘要已绑定审批</li></ul>
-              <label v-if="!integrationAttempt"><input v-model="integrationApproved" type="checkbox" /> 我确认以上 source、target、提交说明与操作摘要</label>
-              <Button v-if="!integrationAttempt" variant="primary" :disabled="!integrationApproved || integrating" @click="startIntegration">{{ integrating ? "正在隔离试合并…" : "开始隔离 Squash" }}</Button>
+      <aside class="checkpoint" :class="{ collapsed: !checkpointPanelOpen }" aria-label="Checkpoint 摘要">
+        <div class="checkpoint-heading">
+          <h2>Checkpoint</h2>
+          <Button class="checkpoint-toggle" variant="ghost" data-testid="toggle-checkpoint-panel" @click="checkpointPanelOpen = !checkpointPanelOpen">
+            {{ checkpointPanelOpen ? "收起" : "展开" }}
+          </Button>
+        </div>
+        <template v-if="checkpointPanelOpen">
+          <p>已选择 {{ selectableCount }} 个文件</p>
+          <p v-if="checkpointPhase" class="progress" role="status" data-testid="checkpoint-progress">
+            <template v-if="checkpointPhase === 'validating'">正在验证文件… (1/2)</template>
+            <template v-else-if="checkpointPhase === 'committing'">正在创建提交… (2/2)</template>
+            <template v-else>完成</template>
+          </p>
+          <label>提交说明<textarea v-model="message" rows="4" :disabled="committing" /></label>
+          <Button variant="primary" :disabled="!selectableCount || committing" @click="createCheckpoint">{{ committing ? "正在提交…" : `创建 Checkpoint（${selectableCount}）` }}</Button>
+          <section class="history"><h3>历史</h3><p v-if="!checkpoints.length">尚无 Checkpoint</p><ol v-else><li v-for="item in checkpoints" :key="item.id"><code>{{ item.commitSha.slice(0, 10) }}</code><span>{{ item.message }}</span></li></ol></section>
+          <section class="integration" aria-labelledby="integration-title">
+            <h3 id="integration-title">Squash 集成</h3>
+            <label>集成提交说明<textarea v-model="integrationMessage" rows="3" :disabled="integrating || !!integrationPlan || !!integrationAttempt" /></label>
+            <Button v-if="!integrationPlan && !integrationAttempt" variant="secondary" :disabled="integrating || !checkpoints.length" @click="prepareIntegration">集成预检</Button>
+            <template v-else>
+              <template v-if="integrationPlan">
+                <dl><dt>来源</dt><dd><code>{{ integrationPlan.sourceTipSha.slice(0, 12) }}</code>（{{ integrationPlan.sourceRange.length }} 个 Checkpoint）</dd><dt>未选择变更</dt><dd>{{ integrationPlan.sourceDirty ? "存在；保留在来源 Worktree，不进入本次 Squash，状态变化会使审批失效" : "无" }}</dd><dt>目标</dt><dd>{{ integrationPlan.targetRef }} @ <code>{{ integrationPlan.expectedTargetSha.slice(0, 12) }}</code></dd><dt>预计文件</dt><dd><ul><li v-for="file in integrationPlan.expectedFiles" :key="file"><code>{{ file }}</code></li></ul></dd><dt>验证</dt><dd>{{ integrationPlan.validationCommands.length ? integrationPlan.validationCommands.map((item) => item.join(" ")).join("；") : "无已配置命令" }}</dd></dl>
+                <ul class="preflight-checklist" aria-label="集成预检清单"><li>来源 Checkpoint 范围已冻结</li><li>目标引用与 HEAD 已校验</li><li>目标分支未在 Worktree 中检出</li><li>来源未选择变更摘要已绑定审批</li></ul>
+                <label v-if="!integrationAttempt"><input v-model="integrationApproved" type="checkbox" /> 我确认以上 source、target、提交说明与操作摘要</label>
+                <Button v-if="!integrationAttempt" variant="primary" :disabled="!integrationApproved || integrating" @click="startIntegration">{{ integrating ? "正在隔离试合并…" : "开始隔离 Squash" }}</Button>
+              </template>
+              <p v-if="integrationAttempt && !integrationPlan" class="notice">已恢复未完成的集成尝试。</p>
+              <p v-if="integrationAttempt" class="integration-state" role="status">阶段：{{ integrationAttempt.state }}</p>
+              <p v-if="integrationAttempt?.state === 'conflicted'">冲突文件：{{ conflictFiles.join("、") }}<br />临时 Worktree：{{ integrationAttempt.temporaryWorktreePath }}</p>
+              <Button v-if="integrationAttempt?.state === 'conflicted'" variant="secondary" :disabled="integrating" @click="openIntegrationWorktree">打开临时 Worktree 人工处理</Button>
+              <div v-if="validationResults.length"><h4>验证结果</h4><ul><li v-for="result in validationResults" :key="result">{{ result }}</li></ul></div>
+              <p v-if="integrationAttempt?.state === 'completed'">已发布 {{ integrationAttempt.resultCommitSha?.slice(0, 12) }}；来源 Worktree 保留，清理状态 {{ integrationAttempt.cleanupStatus }}。</p>
+              <Button v-if="integrationAttempt?.state === 'ready_to_publish'" variant="primary" :disabled="integrating" @click="publishIntegration">原子发布到目标引用</Button>
+              <Button v-if="integrationAttempt && !['completed','aborted'].includes(integrationAttempt.state)" variant="secondary" :disabled="integrating" @click="abortIntegration">中止并保留恢复包</Button>
+              <Button v-if="integrationAttempt && ['completed','aborted','conflicted','validation_failed','publish_rejected','cleanup_required','staging'].includes(integrationAttempt.state) && integrationAttempt.cleanupStatus !== 'completed'" variant="secondary" :disabled="integrating" @click="cleanupIntegration">清理临时资源</Button>
+              <Button v-if="integrationAttempt?.cleanupStatus === 'completed' && ['publish_rejected','preflight_failed','aborted'].includes(integrationAttempt.state)" variant="secondary" :disabled="integrating" @click="resetIntegration">目标或来源已变化，重新预检</Button>
             </template>
-            <p v-if="integrationAttempt && !integrationPlan" class="notice">已恢复未完成的集成尝试。</p>
-            <p v-if="integrationAttempt" class="integration-state" role="status">阶段：{{ integrationAttempt.state }}</p>
-            <p v-if="integrationAttempt?.state === 'conflicted'">冲突文件：{{ conflictFiles.join("、") }}<br />临时 Worktree：{{ integrationAttempt.temporaryWorktreePath }}</p>
-            <Button v-if="integrationAttempt?.state === 'conflicted'" variant="secondary" :disabled="integrating" @click="openIntegrationWorktree">打开临时 Worktree 人工处理</Button>
-            <div v-if="validationResults.length"><h4>验证结果</h4><ul><li v-for="result in validationResults" :key="result">{{ result }}</li></ul></div>
-            <p v-if="integrationAttempt?.state === 'completed'">已发布 {{ integrationAttempt.resultCommitSha?.slice(0, 12) }}；来源 Worktree 保留，清理状态 {{ integrationAttempt.cleanupStatus }}。</p>
-            <Button v-if="integrationAttempt?.state === 'ready_to_publish'" variant="primary" :disabled="integrating" @click="publishIntegration">原子发布到目标引用</Button>
-            <Button v-if="integrationAttempt && !['completed','aborted'].includes(integrationAttempt.state)" variant="secondary" :disabled="integrating" @click="abortIntegration">中止并保留恢复包</Button>
-            <Button v-if="integrationAttempt && ['completed','aborted','conflicted','validation_failed','publish_rejected','cleanup_required','staging'].includes(integrationAttempt.state) && integrationAttempt.cleanupStatus !== 'completed'" variant="secondary" :disabled="integrating" @click="cleanupIntegration">清理临时资源</Button>
-            <Button v-if="integrationAttempt?.cleanupStatus === 'completed' && ['publish_rejected','preflight_failed','aborted'].includes(integrationAttempt.state)" variant="secondary" :disabled="integrating" @click="resetIntegration">目标或来源已变化，重新预检</Button>
-          </template>
-        </section>
+          </section>
+        </template>
       </aside>
     </div>
   </section>
 </template>
 
 <style scoped>
-.review { display:grid; gap:var(--space-4); min-height:100%; }.review-header { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--space-4); }.review-header h1,.review-header p,.checkpoint h2,.checkpoint h3,.diff h2 { margin:0; }.review-header p,.meta,.checkpoint p,.history { color:var(--ctp-subtext0); }.review-grid { display:grid; grid-template-columns:minmax(220px, 28%) minmax(320px, 1fr) minmax(250px, 28%); min-height:560px; border:1px solid var(--ctp-surface0); border-radius:var(--radius-panel); overflow:hidden; }.files,.checkpoint { padding:var(--space-3); background:var(--ctp-mantle); }.files { border-right:1px solid var(--ctp-surface0); }.checkpoint { display:grid; align-content:start; gap:var(--space-3); border-left:1px solid var(--ctp-surface0); }.files input[type="search"],textarea { box-sizing:border-box; width:100%; color:var(--ctp-text); background:var(--ctp-surface0); border:1px solid var(--ctp-surface1); border-radius:var(--radius-control); padding:var(--space-2); }.files ul,.history ol { margin:var(--space-3) 0 0; padding:0; list-style:none; }.files li { border-radius:var(--radius-control); }.files li.active { background:var(--ctp-surface0); }.files label { display:flex; align-items:flex-start; gap:var(--space-2); padding:var(--space-2); }.files button { min-width:0; padding:0; color:var(--ctp-text); text-align:left; background:transparent; border:0; cursor:pointer; }.path,.meta { display:block; overflow-wrap:anywhere; }.meta { margin-top:var(--space-1); font-size:var(--font-small); }.diff { min-width:0; padding:var(--space-4); overflow:auto; }.diff pre { margin:var(--space-3) 0 0; color:var(--ctp-text); white-space:pre; font-family:var(--font-mono); font-size:var(--font-small); }.notice,.loading,.binary { padding:var(--space-3); border-radius:var(--radius-control); background:var(--ctp-surface0); }.error { color:var(--ctp-red); }.success { color:var(--ctp-green); }.checkpoint label { display:grid; gap:var(--space-2); color:var(--ctp-subtext0); }.history { border-top:1px solid var(--ctp-surface0); padding-top:var(--space-3); }.history li { display:grid; gap:var(--space-1); margin-top:var(--space-2); }.history code { color:var(--ctp-mauve); }@media (max-width:1200px) { .review-grid { grid-template-columns:minmax(220px, 34%) 1fr; }.checkpoint { grid-column:1 / -1; border-top:1px solid var(--ctp-surface0); border-left:0; } }@media (max-width:760px) { .review-grid { display:block; }.files,.checkpoint { border:0; border-bottom:1px solid var(--ctp-surface0); }.diff { min-height:320px; } }
+.review { display:grid; gap:var(--space-4); min-height:100%; }
+.review-header { display:flex; align-items:flex-start; justify-content:space-between; gap:var(--space-4); }
+.review-header h1,.review-header p,.checkpoint h2,.checkpoint h3,.diff h2 { margin:0; }
+.review-header h1 { font-size:var(--heading-page); line-height:var(--leading-tight); font-weight:var(--font-weight-semibold); }
+.back-link { margin:0 0 var(--space-2); padding:0; color:var(--ctp-mauve); cursor:pointer; background:transparent; border:0; font-size:var(--font-small); }
+.checkpoint-heading { display:flex; align-items:center; justify-content:space-between; gap:var(--space-2); }
+.checkpoint h2,.diff h2 { font-size:var(--heading-panel); line-height:var(--leading-tight); }
+.progress { color:var(--ctp-blue); font-size:var(--font-small); }
+.review-header p,.meta,.checkpoint p,.history { color:var(--ctp-subtext0); }
+.review-grid { display:grid; grid-template-columns:minmax(220px, 28%) minmax(320px, 1fr) minmax(250px, 28%); min-height:560px; border:1px solid var(--ctp-surface0); border-radius:var(--radius-panel); overflow:hidden; }
+.files,.checkpoint { padding:var(--space-3); background:var(--ctp-mantle); }
+.files { border-right:1px solid var(--ctp-surface0); }
+.checkpoint { display:grid; align-content:start; gap:var(--space-3); border-left:1px solid var(--ctp-surface0); }
+.files textarea { box-sizing:border-box; width:100%; color:var(--ctp-text); background:var(--ctp-surface0); border:1px solid var(--ctp-surface1); border-radius:var(--radius-control); padding:var(--space-2); }
+.files ul,.history ol { margin:var(--space-3) 0 0; padding:0; list-style:none; }
+.files li { border-radius:var(--radius-control); }
+.files li.active { background:var(--ctp-surface0); }
+.files label { display:flex; align-items:flex-start; gap:var(--space-2); padding:var(--space-2); }
+.files button { min-width:0; padding:0; color:var(--ctp-text); text-align:left; background:transparent; border:0; cursor:pointer; }
+.path,.meta { display:block; overflow-wrap:anywhere; }
+.meta { margin-top:var(--space-1); font-size:var(--font-small); }
+.diff { min-width:0; padding:var(--space-4); overflow:auto; }
+.diff pre { margin:var(--space-3) 0 0; color:var(--ctp-text); white-space:pre; font-family:var(--font-mono); font-size:var(--font-small); }
+.notice,.loading,.binary { padding:var(--space-3); border-radius:var(--radius-control); background:var(--ctp-surface0); }
+.error { color:var(--ctp-red); }
+.success { color:var(--ctp-green); }
+.checkpoint label { display:grid; gap:var(--space-2); color:var(--ctp-subtext0); }
+.history { border-top:1px solid var(--ctp-surface0); padding-top:var(--space-3); }
+.history li { display:grid; gap:var(--space-1); margin-top:var(--space-2); }
+.history code { color:var(--ctp-mauve); }
+@media (max-width:1100px) {
+  .review-grid { grid-template-columns:minmax(220px, 34%) 1fr; grid-template-rows:1fr auto; }
+  .checkpoint { grid-column:1 / -1; border-top:1px solid var(--ctp-surface0); border-left:0; max-height:42vh; overflow:auto; }
+  .checkpoint.collapsed { max-height:none; }
+}
+@media (max-width:760px) { .review-grid { display:block; }.files,.checkpoint { border:0; border-bottom:1px solid var(--ctp-surface0); }.diff { min-height:320px; } }
 </style>

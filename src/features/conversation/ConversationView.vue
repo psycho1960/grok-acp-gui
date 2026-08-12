@@ -286,7 +286,7 @@ function onOpenArtifact(artifactId: string): void {
   margin: 0;
   padding: var(--space-2) var(--space-3);
   color: var(--ctp-yellow);
-  background: color-mix(in srgb, var(--ctp-yellow) 10%, var(--ctp-base));
+  background: var(--overlay-warning);
   border-bottom: 1px solid var(--ctp-surface0);
   font-size: var(--font-small);
 }

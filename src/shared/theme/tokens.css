@@ -1,24 +1,94 @@
 /* Colour variables are injected from tokens.ts. CSS only consumes semantic tokens. */
 :root {
+  /* Typography scale */
   --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Cascadia Code", Consolas, monospace;
-  --font-body: 14px;
+  --font-mono: "Cascadia Code", "Cascadia Mono", "Fira Code", Consolas, "Courier New", monospace;
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 20px;
+  --text-3xl: 24px;
+  --text-4xl: 28px;
+  /* Semantic headings — prefer these over raw text-* in features */
+  --heading-page: var(--text-3xl);
+  --heading-section: var(--text-xl);
+  --heading-panel: var(--text-lg);
+  --heading-card: var(--text-base);
+  --heading-dialog: var(--text-2xl);
+  /* Legacy aliases (keep existing consumers working) */
+  --font-body: var(--text-base);
   --line-body: 20px;
-  --font-small: 12px;
+  --font-small: var(--text-sm);
   --line-small: 16px;
+  --leading-tight: 1.25;
+  --leading-normal: 1.43;
+  --leading-relaxed: 1.6;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* Spacing (4px base) */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
+  --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* Radii */
   --radius-control: 6px;
   --radius-card: 8px;
+  --radius-panel: 8px;
   --radius-dialog: 12px;
+
+  /* Controls */
   --control-min-size: 32px;
   --button-height: 36px;
+
+  /* Motion */
   --motion-fast: 120ms;
   --motion-normal: 180ms;
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 12px 40px rgb(0 0 0 / 0.5);
+  --shadow-xl: 0 24px 64px rgb(0 0 0 / 0.55);
+  --elevation-menu: var(--shadow-md);
+  --elevation-drawer: var(--shadow-lg);
+  --elevation-modal: var(--shadow-xl);
+
+  /* Overlays & backdrop — prefer these over ad-hoc color-mix percentages */
+  --backdrop-alpha: 72%;
+  --overlay-hover: color-mix(in srgb, var(--ctp-surface1) 40%, transparent);
+  --overlay-active: color-mix(in srgb, var(--ctp-mauve) 16%, transparent);
+  --overlay-info: color-mix(in srgb, var(--ctp-blue) 12%, transparent);
+  --overlay-info-solid: color-mix(in srgb, var(--ctp-blue) 12%, var(--ctp-base));
+  --overlay-success: color-mix(in srgb, var(--ctp-green) 12%, transparent);
+  --overlay-danger: color-mix(in srgb, var(--ctp-red) 14%, transparent);
+  --overlay-warning: color-mix(in srgb, var(--ctp-yellow) 16%, var(--ctp-mantle));
+  --overlay-menu-active: color-mix(in srgb, var(--ctp-blue) 18%, var(--ctp-surface0));
+  --border-tone-info: color-mix(in srgb, var(--ctp-blue) 40%, var(--ctp-surface1));
+  --border-tone-success: color-mix(in srgb, var(--ctp-green) 40%, var(--ctp-surface1));
+  --border-tone-warning: color-mix(in srgb, var(--ctp-yellow) 50%, var(--ctp-surface1));
+  --border-tone-danger: color-mix(in srgb, var(--ctp-red) 55%, var(--ctp-surface1));
+
+  /*
+   * Breakpoints (documented for parity with useResponsive / matchMedia).
+   * CSS custom properties are not valid in @media queries — use the numeric
+   * values from shared/composables/breakpoints.ts when writing media rules.
+   */
+  --bp-xl: 1200px;
+  --bp-lg: 1080px;
+  --bp-md: 900px;
+  --bp-sm: 720px;
+  --bp-xs: 640px;
 }
 
 :root,
@@ -28,6 +98,27 @@ html, body, #app { min-width: 320px; min-height: 100%; margin: 0; }
 body { min-height: 100vh; color: var(--ctp-text); background: var(--ctp-base); font-size: var(--font-body); line-height: var(--line-body); }
 button, input, textarea, select { font: inherit; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--ctp-mauve); outline-offset: 2px; }
-.eyebrow { margin: 0 0 3px; color: var(--ctp-subtext0); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+.eyebrow { margin: 0 0 3px; color: var(--ctp-subtext0); font-size: var(--text-xs); letter-spacing: .08em; text-transform: uppercase; }
 .surface-card { background: var(--ctp-mantle); border: 1px solid var(--ctp-surface0); border-radius: var(--radius-card); }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; } }
+.heading-page { margin: 0; font-size: var(--heading-page); line-height: var(--leading-tight); font-weight: var(--font-weight-semibold); }
+.heading-section { margin: 0; font-size: var(--heading-section); line-height: var(--leading-tight); font-weight: var(--font-weight-semibold); }
+.heading-panel { margin: 0; font-size: var(--heading-panel); line-height: var(--leading-tight); font-weight: var(--font-weight-semibold); }
+.heading-display { margin: 0; font-size: var(--text-4xl); line-height: var(--leading-tight); font-weight: var(--font-weight-semibold); }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+  /* Kill active-press scale when motion is reduced */
+  button:active { transform: none !important; }
+}
+
+/* Global print fallback for pages outside AppShell */
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+}

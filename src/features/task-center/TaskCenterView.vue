@@ -22,6 +22,9 @@ import { useTaskCenterStore } from "./task-center-store";
 import type { TaskGroupId, UpdatedWithin } from "./types";
 import { TASK_GROUP_LABELS } from "./types";
 import VirtualList from "./VirtualList.vue";
+import NamedIcon from "../../shared/ui/NamedIcon.vue";
+import { toast } from "../../shared/ui/toast";
+import { mapErrorMessage } from "../../shared/ui/error-map";
 
 const props = defineProps<{
   bridge: DesktopBridge;
@@ -37,6 +40,8 @@ const openProjectOpen = ref(false);
 const createTaskOpen = ref(false);
 const createAfterProjectSelection = ref(false);
 const nonGitNotice = ref<string | null>(null);
+const filtersOpen = ref(false);
+const projectMenuOpen = ref(false);
 
 /** Fixed row height for headers + cards (allows localError line without clipping). */
 const ITEM_HEIGHT = 120;
@@ -121,11 +126,21 @@ function onGroup(value: string): void {
   }
 }
 
-function focusGroup(group: TaskGroupId | "all"): void {
-  store.setFilters({ group });
-  if (props.syncHash !== false) {
-    applyTaskCenterHash(store.selectedTaskId, group === "all" ? null : group);
-  }
+const activeFilterCount = computed(() => {
+  let n = 0;
+  if (store.filters.status !== "all") n += 1;
+  if (store.filters.projectId !== "all") n += 1;
+  if (store.filters.updatedWithin !== "any") n += 1;
+  if (store.filters.group !== "all") n += 1;
+  return n;
+});
+
+function toggleFilters(): void {
+  filtersOpen.value = !filtersOpen.value;
+}
+
+function toggleProjectMenu(): void {
+  projectMenuOpen.value = !projectMenuOpen.value;
 }
 
 async function openTask(taskId: string): Promise<void> {
@@ -202,8 +217,18 @@ async function onOpenProject(path: string): Promise<void> {
     const shouldCreate = createAfterProjectSelection.value;
     openProjectOpen.value = false;
     createAfterProjectSelection.value = false;
-    if (result.message) nonGitNotice.value = result.message;
+    if (result.message) {
+      nonGitNotice.value = result.message;
+      toast.warning("项目已打开", { description: result.message });
+    } else {
+      toast.success("项目已打开");
+    }
     if (shouldCreate) createTaskOpen.value = true;
+  } else {
+    const friendly = mapErrorMessage(result.message || "请检查路径后重试", "打开项目失败");
+    toast.error(friendly.title, {
+      description: [friendly.summary, friendly.suggestion].filter(Boolean).join(" "),
+    });
   }
 }
 
@@ -223,13 +248,24 @@ async function onCreateTask(payload: {
   const result = await store.createTask(payload);
   if (result.ok && result.taskId) {
     createTaskOpen.value = false;
+    toast.success("任务已创建");
     openConversation(result.taskId);
+  } else if (!result.ok) {
+    const friendly = mapErrorMessage(
+      result.message || store.createTaskError || "创建任务失败",
+      "创建任务失败",
+    );
+    toast.error(friendly.title, {
+      description: [friendly.summary, friendly.suggestion].filter(Boolean).join(" "),
+    });
   }
 }
 
 function onClearProject(): void {
   store.clearActiveProject();
   nonGitNotice.value = null;
+  projectMenuOpen.value = false;
+  toast.info("已取消项目选择");
 }
 
 function applyRouteFromHash(): void {
@@ -298,7 +334,7 @@ watch(
             data-testid="header-open-project"
             @click="showOpenProject"
           >
-            选择项目 / 打开文件夹
+            打开项目
           </Button>
           <Button
             variant="primary"
@@ -307,28 +343,39 @@ watch(
           >
             新建任务
           </Button>
-          <template v-if="store.hasActiveProject">
+          <div v-if="store.hasActiveProject" class="project-menu">
             <Button
               variant="ghost"
-              data-testid="header-switch-project"
-              @click="showOpenProject"
+              data-testid="header-project-menu"
+              :aria-expanded="projectMenuOpen"
+              @click="toggleProjectMenu"
             >
-              切换项目
+              项目
+              <NamedIcon name="chevronDown" :size="14" />
             </Button>
-            <Button
-              variant="ghost"
-              data-testid="header-clear-project"
-              @click="onClearProject"
+            <div
+              v-if="projectMenuOpen"
+              class="project-menu-panel"
+              role="menu"
+              data-testid="header-project-menu-panel"
             >
-              取消选择
-            </Button>
-          </template>
-          <div class="counts" aria-label="任务计数">
-            <Badge tone="warning">等待 {{ store.counts.needs_attention }}</Badge>
-            <Badge tone="info">运行 {{ store.counts.running }}</Badge>
-            <Badge tone="success">完成 {{ store.counts.completed }}</Badge>
-            <Badge tone="danger">中断 {{ store.counts.failed_interrupted }}</Badge>
-            <span class="count-total">共 {{ totalCount }} · 显示 {{ visibleCount }}</span>
+              <button
+                type="button"
+                role="menuitem"
+                data-testid="header-switch-project"
+                @click="projectMenuOpen = false; showOpenProject()"
+              >
+                切换项目
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                data-testid="header-clear-project"
+                @click="onClearProject"
+              >
+                取消选择
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -342,14 +389,36 @@ watch(
         {{ nonGitNotice }}
       </div>
 
-      <div class="filters" role="search">
-        <Input
-          :model-value="store.filters.query"
-          label="搜索任务"
-          placeholder="标题、项目、分支…"
-          data-testid="task-search"
-          @update:model-value="onQuery"
-        />
+      <div class="toolbar" role="search">
+        <div class="toolbar-search">
+          <Input
+            :model-value="store.filters.query"
+            label="搜索任务"
+            placeholder="标题、项目、分支…"
+            data-testid="task-search"
+            @update:model-value="onQuery"
+          />
+        </div>
+        <Button
+          :variant="filtersOpen || activeFilterCount > 0 ? 'secondary' : 'ghost'"
+          data-testid="toggle-filters"
+          :aria-expanded="filtersOpen"
+          @click="toggleFilters"
+        >
+          <NamedIcon name="filter" :size="14" />
+          筛选
+          <Badge v-if="activeFilterCount > 0" tone="info">{{ activeFilterCount }}</Badge>
+        </Button>
+        <p class="counts-compact" aria-label="任务计数">
+          等待 {{ store.counts.needs_attention }}
+          · 运行 {{ store.counts.running }}
+          · 完成 {{ store.counts.completed }}
+          · 中断 {{ store.counts.failed_interrupted }}
+          · 共 {{ totalCount }} · 显示 {{ visibleCount }}
+        </p>
+      </div>
+
+      <div v-if="filtersOpen" class="filters" data-testid="task-filters-panel">
         <Select
           :model-value="store.filters.status"
           label="状态"
@@ -379,31 +448,11 @@ watch(
           @update:model-value="onGroup"
         />
       </div>
-
-      <div class="group-chips" role="toolbar" aria-label="任务分组">
-        <Button
-          :variant="store.filters.group === 'all' ? 'primary' : 'ghost'"
-          data-testid="group-chip-all"
-          @click="focusGroup('all')"
-        >
-          全部
-        </Button>
-        <Button
-          v-for="(label, id) in TASK_GROUP_LABELS"
-          :key="id"
-          :variant="store.filters.group === id ? 'primary' : 'ghost'"
-          :data-group="id"
-          :data-testid="`group-chip-${id}`"
-          @click="focusGroup(id as TaskGroupId)"
-        >
-          {{ label }} ({{ store.counts[id as TaskGroupId] }})
-        </Button>
-      </div>
     </header>
 
     <div
       v-if="isStale"
-      class="banner banner-stale"
+      class="banner banner-warn"
       role="status"
       data-testid="task-stale-banner"
     >
@@ -425,6 +474,7 @@ watch(
         v-else-if="isError"
         title="无法加载任务"
         :detail="store.errorMessage || '未知错误'"
+        :friendly="true"
         data-testid="task-error"
       >
         <Button variant="primary" data-testid="task-retry" @click="store.refresh()">
@@ -595,8 +645,9 @@ watch(
 }
 .title-block h1 {
   margin: 0;
-  font-size: 20px;
-  line-height: 28px;
+  font-size: var(--heading-page);
+  line-height: var(--leading-tight);
+  font-weight: var(--font-weight-semibold);
 }
 .active-project {
   margin: var(--space-1) 0 0;
@@ -613,30 +664,65 @@ watch(
   align-items: center;
   justify-content: flex-end;
 }
-.counts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  align-items: center;
+.project-menu {
+  position: relative;
+}
+.project-menu-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  min-width: 140px;
+  padding: var(--space-1);
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--radius-control);
+  box-shadow: var(--elevation-menu);
+}
+.project-menu-panel button {
+  padding: var(--space-2) var(--space-3);
+  color: var(--ctp-text);
+  text-align: left;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+}
+.project-menu-panel button:hover {
+  background: var(--ctp-surface0);
 }
 .banner-warn {
   color: var(--ctp-text);
-  background: color-mix(in srgb, var(--ctp-yellow) 16%, var(--ctp-mantle));
+  background: var(--overlay-warning);
   border: 1px solid var(--ctp-yellow);
 }
-.count-total {
-  color: var(--ctp-subtext0);
-  font-size: var(--font-small);
-}
-.filters {
-  display: grid;
-  grid-template-columns: minmax(160px, 2fr) repeat(4, minmax(120px, 1fr));
-  gap: var(--space-3);
-}
-.group-chips {
+.toolbar {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+  align-items: end;
+}
+.toolbar-search {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+.counts-compact {
+  margin: 0;
+  flex: 1 1 200px;
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
+  line-height: var(--leading-normal);
+}
+.filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: var(--space-3);
+}
+@media (max-width: 1000px) {
+  .filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 .banner {
   display: flex;
@@ -646,11 +732,6 @@ watch(
   justify-content: space-between;
   padding: var(--space-3);
   border-radius: var(--radius-card);
-}
-.banner-stale {
-  color: var(--ctp-text);
-  background: color-mix(in srgb, var(--ctp-yellow) 16%, var(--ctp-mantle));
-  border: 1px solid var(--ctp-yellow);
 }
 .task-center-body {
   min-height: 0;

@@ -13,8 +13,51 @@ const trigger = computed(() => {
 });
 const RenderVNode = defineComponent({
   props: { node: { type: Object as PropType<VNode>, required: true } },
-  setup(renderProps) { return () => renderProps.node; },
+  setup(renderProps) {
+    return () => renderProps.node;
+  },
 });
 </script>
-<template><span class="tooltip"><RenderVNode v-if="trigger" :node="trigger" /><span :id="tooltipId" class="tip" role="tooltip">{{ props.text }}</span></span></template>
-<style scoped>.tooltip { position:relative; display:inline-flex; }.tip { position:absolute; z-index:5; bottom:calc(100% + 6px); left:50%; width:max-content; max-width:220px; padding:4px 8px; color:var(--ctp-text); pointer-events:none; visibility:hidden; background:var(--ctp-crust); border:1px solid var(--ctp-surface1); border-radius:var(--radius-control); font-size:var(--font-small); transform:translateX(-50%); }.tooltip:hover .tip, .tooltip:focus-within .tip { visibility:visible; }</style>
+
+<template>
+  <span class="tooltip">
+    <RenderVNode v-if="trigger" :node="trigger" />
+    <span :id="tooltipId" class="tip" role="tooltip">{{ props.text }}</span>
+  </span>
+</template>
+
+<style scoped>
+.tooltip {
+  position: relative;
+  display: inline-flex;
+}
+.tip {
+  position: absolute;
+  z-index: 5;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  width: max-content;
+  max-width: 220px;
+  padding: 4px 8px;
+  color: var(--ctp-text);
+  pointer-events: none;
+  visibility: hidden;
+  opacity: 0;
+  background: var(--ctp-crust);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--radius-control);
+  font-size: var(--font-small);
+  transform: translateX(-50%);
+  transition:
+    opacity var(--motion-fast) ease,
+    visibility 0s linear var(--motion-fast);
+  transition-delay: 0ms, 0ms;
+}
+/* Delay show ~300ms so tooltips don't flash while moving the pointer. */
+.tooltip:hover .tip,
+.tooltip:focus-within .tip {
+  visibility: visible;
+  opacity: 1;
+  transition-delay: 300ms, 300ms;
+}
+</style>

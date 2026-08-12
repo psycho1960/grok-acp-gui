@@ -87,7 +87,7 @@ describe("GAG-012 ReviewView", () => {
     await wrapper.findAll(".files button")[1].trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("二进制文件 · 2048 字节");
-    await wrapper.get('input[type="search"]').setValue("alpha");
+    await wrapper.get('[data-testid="review-file-search"] input').setValue("alpha");
     expect(wrapper.findAll(".files li")).toHaveLength(1);
   });
 

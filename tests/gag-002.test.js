@@ -20,14 +20,14 @@ test("GAG-002 keeps the exact Catppuccin Mocha palette in one TypeScript source"
 });
 
 test("GAG-002 supplies the required accessible primitive component set", async () => {
-  for (const component of ["Button.vue", "IconButton.vue", "Input.vue", "Textarea.vue", "Select.vue", "Dialog.vue", "Drawer.vue", "Tooltip.vue", "Badge.vue", "StatusIcon.vue", "EmptyState.vue", "ErrorState.vue", "Skeleton.vue"]) assert.equal(uiDirectory.includes(component), true, component);
+  for (const component of ["Button.vue", "IconButton.vue", "Input.vue", "Textarea.vue", "Select.vue", "Dialog.vue", "Drawer.vue", "Tooltip.vue", "Badge.vue", "StatusIcon.vue", "EmptyState.vue", "ErrorState.vue", "Skeleton.vue", "ToastHost.vue", "Icon.vue", "NamedIcon.vue"]) assert.equal(uiDirectory.includes(component), true, component);
   assert.match(await readFile("src/shared/ui/Dialog.vue", "utf8"), /aria-modal="true"/);
   assert.match(await readFile("src/shared/ui/Dialog.vue", "utf8"), /Escape/);
   assert.match(await readFile("src/shared/ui/Drawer.vue", "utf8"), /Escape/);
 });
 
 test("GAG-002 AppShell retains the specified slots, resizing bounds, and responsive fallback", () => {
-  for (const text of ["export type AppShellProps", "left: VNode", "main: VNode", "inspectorOpen: boolean", "Math.min(360, Math.max(220", "minmax(520px, 1fr)", "max-width: 1200px", "min-resolution: 1.75dppx"]) assert.match(shellSource, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  for (const text of ["export type AppShellProps", "left: VNode", "main: VNode", "inspectorOpen: boolean", "Math.min(360, Math.max(220", "minmax(520px, 1fr)", "BREAKPOINTS.xl", "min-resolution: 1.75dppx"]) assert.match(shellSource, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("GAG-002 lint gate rejects Mocha palette hex outside the theme source", async () => {
