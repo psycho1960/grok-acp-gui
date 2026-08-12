@@ -196,7 +196,10 @@ describe("GAG-007 TaskCenterView", () => {
       attachTo: document.body,
     });
     await flushPromises();
-    await wrapper.get('[data-testid="group-chip-failed_interrupted"]').trigger("click");
+    await wrapper.get('[data-testid="toggle-filters"]').trigger("click");
+    await nextTick();
+    const groupSelect = wrapper.get('[data-testid="task-filter-group"] select');
+    await groupSelect.setValue("failed_interrupted");
     await nextTick();
     expect(wrapper.findAll("[data-task-id]").map((n) => n.attributes("data-task-id"))).toEqual([
       "task-int-1",

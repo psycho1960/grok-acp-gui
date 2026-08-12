@@ -91,6 +91,7 @@ defineExpose({
     class="virtual-list"
     role="list"
     :aria-label="ariaLabel"
+    :aria-rowcount="items.length"
     data-testid="virtual-list"
     @scroll="onScroll"
   >
@@ -105,6 +106,8 @@ defineExpose({
         class="virtual-list-row"
         role="listitem"
         :data-index="row.index"
+        :aria-posinset="row.index + 1"
+        :aria-setsize="items.length"
         :style="{
           height: `${itemHeight}px`,
           transform: `translateY(${row.top}px)`,

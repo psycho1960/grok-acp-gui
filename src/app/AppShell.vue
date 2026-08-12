@@ -2,6 +2,9 @@
 import { computed, defineComponent, onBeforeUnmount, onMounted, ref, type PropType, type VNode } from "vue";
 import Drawer from "../shared/ui/Drawer.vue";
 import IconButton from "../shared/ui/IconButton.vue";
+import NamedIcon from "../shared/ui/NamedIcon.vue";
+import Tooltip from "../shared/ui/Tooltip.vue";
+import { BREAKPOINTS } from "../shared/composables/breakpoints";
 
 export type AppShellProps = {
   left: VNode;
@@ -90,9 +93,9 @@ function toggleInspector(): void {
 function toggleNavigation(): void { navigationOpen.value = !navigationOpen.value; }
 
 onMounted(() => {
-  drawerQuery = window.matchMedia("(max-width: 1200px), (min-resolution: 1.75dppx)");
-  compactQuery = window.matchMedia("(max-width: 1023px), (min-resolution: 1.75dppx)");
-  fixedLeftQuery = window.matchMedia("(max-width: 1080px)");
+  drawerQuery = window.matchMedia(`(max-width: ${BREAKPOINTS.xl}px), (min-resolution: 1.75dppx)`);
+  compactQuery = window.matchMedia(`(max-width: ${BREAKPOINTS.compact}px), (min-resolution: 1.75dppx)`);
+  fixedLeftQuery = window.matchMedia(`(max-width: ${BREAKPOINTS.lg}px)`);
   updateLayoutMode();
   drawerQuery.addEventListener("change", updateLayoutMode);
   compactQuery.addEventListener("change", updateLayoutMode);
@@ -109,20 +112,53 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="app-shell" :style="shellStyle" @pointermove="resize" @pointerup="stopResize" @pointercancel="stopResize">
+    <a class="skip-link" href="#main-content" data-testid="skip-to-content">跳到主内容</a>
     <header class="shell-topbar">
+      <IconButton v-if="compactLayout" label="打开任务导航" :aria-expanded="navigationOpen" data-testid="open-nav" @click="toggleNavigation">
+        <NamedIcon name="menu" :size="18" />
+      </IconButton>
       <slot name="topbar">
-        <IconButton v-if="compactLayout" label="打开任务导航" :aria-expanded="navigationOpen" @click="toggleNavigation">☰</IconButton>
         <span class="project-name" data-testid="topbar-project" :title="projectLabel">{{ projectLabel }}</span>
         <span class="branch" data-testid="topbar-workspace" :title="workspaceLabel">{{ workspaceLabel }}</span>
         <span class="topbar-spacer" />
-        <IconButton v-if="inspector" label="打开检查器" :aria-expanded="drawerLayout ? inspectorDrawerOpen : inspectorOpen" @click="toggleInspector">☷</IconButton>
       </slot>
+      <IconButton v-if="inspector" label="打开检查器" :aria-expanded="drawerLayout ? inspectorDrawerOpen : inspectorOpen" data-testid="open-inspector" @click="toggleInspector">
+        <NamedIcon name="panels" :size="18" />
+      </IconButton>
     </header>
     <div class="shell-columns" :class="columnsClass">
       <aside v-if="showLeftPanel" class="shell-left" aria-label="任务导航"><RenderVNode :node="left" /></aside>
-      <div v-if="showLeftResizer" class="resizer left-resizer" role="separator" aria-orientation="vertical" aria-label="调整左侧栏宽度" :aria-valuemin="220" :aria-valuemax="360" :aria-valuenow="leftWidth" tabindex="0" @pointerdown.prevent="startResize('left')" @keydown="resizeLeftWithKeyboard" />
-      <main class="shell-main" aria-label="主内容"><RenderVNode :node="main" /></main>
-      <div v-if="showInspectorPanel" class="resizer right-resizer" role="separator" aria-orientation="vertical" aria-label="调整检查器宽度" :aria-valuemin="320" :aria-valuemax="600" :aria-valuenow="rightWidth" tabindex="0" @pointerdown.prevent="startResize('right')" @keydown="resizeRightWithKeyboard" />
+      <Tooltip v-if="showLeftResizer" text="← → 调整左侧栏宽度">
+        <div
+          class="resizer left-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整左侧栏宽度。使用左右方向键调整。"
+          :aria-valuemin="220"
+          :aria-valuemax="360"
+          :aria-valuenow="leftWidth"
+          tabindex="0"
+          data-testid="left-resizer"
+          @pointerdown.prevent="startResize('left')"
+          @keydown="resizeLeftWithKeyboard"
+        />
+      </Tooltip>
+      <main id="main-content" class="shell-main" aria-label="主内容" tabindex="-1"><RenderVNode :node="main" /></main>
+      <Tooltip v-if="showInspectorPanel" text="← → 调整检查器宽度">
+        <div
+          class="resizer right-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整检查器宽度。使用左右方向键调整。"
+          :aria-valuemin="320"
+          :aria-valuemax="600"
+          :aria-valuenow="rightWidth"
+          tabindex="0"
+          data-testid="right-resizer"
+          @pointerdown.prevent="startResize('right')"
+          @keydown="resizeRightWithKeyboard"
+        />
+      </Tooltip>
       <aside v-if="showInspectorPanel" class="shell-inspector" aria-label="检查器"><RenderVNode :node="inspector!" /></aside>
     </div>
     <footer class="shell-statusbar"><slot name="statusbar"><RenderVNode v-if="statusBar" :node="statusBar" /></slot></footer>
@@ -133,15 +169,82 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app-shell { display:grid; grid-template-rows:48px minmax(0, 1fr) 28px; height:100vh; min-height:680px; overflow:hidden; background:var(--ctp-base); }
+.skip-link {
+  position: absolute;
+  top: 0;
+  left: var(--space-3);
+  z-index: 50;
+  padding: var(--space-2) var(--space-3);
+  color: var(--ctp-crust);
+  background: var(--ctp-mauve);
+  border-radius: 0 0 var(--radius-control) var(--radius-control);
+  transform: translateY(-120%);
+  transition: transform var(--motion-fast) ease;
+}
+.skip-link:focus {
+  transform: translateY(0);
+  outline: 2px solid var(--ctp-text);
+  outline-offset: 2px;
+}
 .shell-topbar, .shell-statusbar { display:flex; align-items:center; gap:var(--space-3); padding:0 var(--space-4); background:var(--ctp-crust); border-color:var(--ctp-surface0); }
 .shell-topbar { border-bottom:1px solid var(--ctp-surface0); }.shell-statusbar { color:var(--ctp-subtext0); border-top:1px solid var(--ctp-surface0); font-size:var(--font-small); }
-.project-name, .branch { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.project-name { max-width:220px; color:var(--ctp-text); font-weight:650; }.branch { max-width:360px; color:var(--ctp-subtext0); font-size:var(--font-small); }.topbar-spacer { flex:1; }
+.project-name, .branch { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.project-name { max-width:220px; color:var(--ctp-text); font-weight:var(--font-weight-semibold); }.branch { max-width:360px; color:var(--ctp-subtext0); font-size:var(--font-small); }.topbar-spacer { flex:1; }
 .shell-columns { display:grid; grid-template-columns:var(--left-width) minmax(520px, 1fr); min-width:0; }
 .shell-columns.has-left-resizer { grid-template-columns:var(--left-width) 4px minmax(520px, 1fr); }
 .shell-columns.has-inspector { grid-template-columns:var(--left-width) minmax(520px, 1fr) 4px var(--right-width); }
 .shell-columns.has-left-resizer.has-inspector { grid-template-columns:var(--left-width) 4px minmax(520px, 1fr) 4px var(--right-width); }
 .shell-left, .shell-inspector { min-width:0; overflow:auto; padding:var(--space-4); background:var(--ctp-mantle); }.shell-left { border-right:1px solid var(--ctp-surface0); }.shell-inspector { border-left:1px solid var(--ctp-surface0); }
-.shell-main { min-width:0; overflow:auto; padding:var(--space-6); }.resizer { cursor:col-resize; background:var(--ctp-surface0); }.resizer:hover, .resizer:focus-visible { background:var(--ctp-mauve); outline:none; }
-@media (max-width: 1080px) { .shell-main { padding:var(--space-4); } }
-@media (max-width: 1023px), (min-resolution: 1.75dppx) { .app-shell { min-height:0; }.shell-columns, .shell-columns.has-left-resizer, .shell-columns.has-inspector, .shell-columns.has-left-resizer.has-inspector { grid-template-columns:minmax(0, 1fr); }.shell-main { min-width:0; }.shell-topbar { min-height:48px; }.shell-statusbar { min-height:28px; } }
+.shell-main { min-width:0; overflow:auto; padding:var(--space-6); }
+.shell-main:focus { outline: none; }
+.shell-main:focus-visible { outline: 2px solid var(--ctp-mauve); outline-offset: -2px; }
+.resizer { width: 100%; height: 100%; min-height: 100%; cursor:col-resize; background:var(--ctp-surface0); }
+.resizer:hover, .resizer:focus-visible { background:var(--ctp-mauve); outline:none; }
+/* Tooltip wraps resizer so the shell grid still gets a 4px column. */
+:deep(.tooltip) { display: block; width: 4px; height: 100%; min-height: 100%; align-self: stretch; }
+@media (max-width: 1080px) { .shell-main { padding:var(--space-4); } /* BREAKPOINTS.lg */ }
+@media (max-width: 1023px), (min-resolution: 1.75dppx) { .app-shell { min-height:0; }.shell-columns, .shell-columns.has-left-resizer, .shell-columns.has-inspector, .shell-columns.has-left-resizer.has-inspector { grid-template-columns:minmax(0, 1fr); }.shell-main { min-width:0; }.shell-topbar { min-height:48px; }.shell-statusbar { min-height:28px; } /* BREAKPOINTS.compact */ }
+/* High-DPI / fractional scale: keep topbar hit area and resizer readable at 150%+.
+   Status bar stays on the 28px grid track — do not raise its min-height or it clips. */
+@media (min-resolution: 1.5dppx) {
+  .shell-topbar { min-height: 48px; }
+  .resizer { width: 5px; }
+}
+@media print {
+  .skip-link,
+  .shell-topbar,
+  .shell-statusbar,
+  .shell-left,
+  .shell-inspector,
+  .resizer,
+  :deep(.composer),
+  :deep(.jump-bottom) {
+    display: none !important;
+  }
+  .app-shell {
+    display: block;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+    background: white;
+    color: black;
+  }
+  .shell-columns,
+  .shell-columns.has-left-resizer,
+  .shell-columns.has-inspector,
+  .shell-columns.has-left-resizer.has-inspector {
+    display: block;
+  }
+  .shell-main {
+    overflow: visible;
+    padding: 0;
+    color: black;
+    background: white;
+  }
+  :deep(pre),
+  :deep(code) {
+    color: black !important;
+    background: #f4f4f5 !important;
+    border: 1px solid #ccc;
+  }
+}
 </style>

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 test.describe("GAG-007 first-use closed loop (shell)", () => {
   test("empty shell offers open project, then create task, then conversation", async ({

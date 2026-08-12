@@ -89,7 +89,7 @@ describe("GAG-014 Recovery Center", () => {
     const wrapper = mount(RecoveryCenter, { props: { bridge: bridge(commands) } });
     await flushPromises();
     await wrapper.findAll(".issue-row").find((item) => item.text().includes("wt-1"))!.trigger("click");
-    await wrapper.findAll("button").find((item) => item.text() === "验证后清理")!.trigger("click");
+    await wrapper.findAll("button").find((item) => item.text() === "验证并清理")!.trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("C:/managed/repo/task-1");
     expect(wrapper.text()).toContain("bundle-record-1");

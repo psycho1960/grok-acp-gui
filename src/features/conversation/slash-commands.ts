@@ -57,19 +57,34 @@ export function filterSlashCommands(
   );
 }
 
+export type InsertSlashMode = "replace-slash-line" | "insert-at-cursor";
+
 /**
- * Replace the current "/..." line with the selected command text.
- * Returns the new full text and the new caret position.
+ * Insert a slash command into `text`.
+ * - `replace-slash-line` (default): replace the current "/..." token (typing flow).
+ * - `insert-at-cursor`: insert at the caret without wiping the rest of the line
+ *   (command palette / help button when the line is not a slash draft).
  */
 export function insertSlashCommand(
   text: string,
   cursor: number,
   commandName: string,
+  mode: InsertSlashMode = "replace-slash-line",
 ): { text: string; cursor: number } {
+  const commandText = `/${commandName}`;
   const state = slashMenuState(text, cursor);
+
+  if (mode === "insert-at-cursor" || !state.open) {
+    const before = text.slice(0, cursor);
+    const after = text.slice(cursor);
+    const needsSpace =
+      before.length > 0 && !/\s$/.test(before) && !before.endsWith("\n");
+    const insert = `${needsSpace ? " " : ""}${commandText}`;
+    return { text: before + insert + after, cursor: before.length + insert.length };
+  }
+
   const lineEnd = text.indexOf("\n", cursor);
   const end = lineEnd < 0 ? text.length : lineEnd;
-  const commandText = `/${commandName}`;
   const next = text.slice(0, state.lineStart) + commandText + text.slice(end);
   return { text: next, cursor: state.lineStart + commandText.length };
 }

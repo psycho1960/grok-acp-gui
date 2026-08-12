@@ -87,7 +87,7 @@ describe("GAG-012 ReviewView", () => {
     await wrapper.findAll(".files button")[1].trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("二进制文件 · 2048 字节");
-    await wrapper.get('input[type="search"]').setValue("alpha");
+    await wrapper.get('[data-testid="review-file-search"] input').setValue("alpha");
     expect(wrapper.findAll(".files li")).toHaveLength(1);
   });
 
@@ -106,5 +106,18 @@ describe("GAG-012 ReviewView", () => {
       type: "review.validate",
       payload: { taskId, selection: [{ path: "src/alpha.ts", fingerprint: "fp-alpha" }] },
     });
+  });
+
+  it("styles checkpoint textareas under .checkpoint (not .files)", async () => {
+    const commands: DesktopCommand[] = [];
+    const wrapper = mount(ReviewView, { props: { bridge: bridge(commands), taskId } });
+    await flushPromises();
+    const textareas = wrapper.findAll("textarea");
+    expect(textareas.length).toBeGreaterThanOrEqual(2);
+    for (const ta of textareas) {
+      expect(ta.element.closest(".checkpoint")).not.toBeNull();
+      expect(ta.element.closest(".files")).toBeNull();
+      expect(ta.element.matches(".checkpoint textarea")).toBe(true);
+    }
   });
 });

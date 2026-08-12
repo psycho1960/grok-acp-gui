@@ -348,10 +348,15 @@ defineExpose({
       </div>
     </div>
     <button
-      v-if="!anchor.stickToBottom"
       type="button"
       class="jump-bottom"
+      :class="{
+        visible: !anchor.stickToBottom,
+        'has-unread': anchor.unreadCount > 0,
+      }"
       data-testid="jump-to-bottom"
+      :aria-hidden="anchor.stickToBottom ? 'true' : undefined"
+      :tabindex="anchor.stickToBottom ? -1 : 0"
       @click="scrollToBottom(true)"
     >
       回到底部
@@ -399,7 +404,29 @@ defineExpose({
   border: none;
   border-radius: 999px;
   cursor: pointer;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition:
+    opacity var(--motion-fast) ease,
+    transform var(--motion-fast) ease,
+    visibility 0s linear var(--motion-fast);
+}
+.jump-bottom.visible {
+  opacity: 0.92;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+.jump-bottom.has-unread {
+  opacity: 1;
+}
+.jump-bottom.visible:hover,
+.jump-bottom.visible:focus-visible {
+  opacity: 1;
 }
 .unread {
   min-width: 20px;

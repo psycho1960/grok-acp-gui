@@ -177,10 +177,16 @@ describe("slash-commands", () => {
     const inserted = insertSlashCommand("/pl", 3, "plan");
     expect(inserted.text).toBe("/plan");
     expect(inserted.cursor).toBe(5);
-    // Replaces the whole line, keeping other lines intact.
+    // Replaces the whole slash line, keeping other lines intact.
     const multi = insertSlashCommand("first\n/sha", 9, "share");
     expect(multi.text).toBe("first\n/share");
     expect(multi.cursor).toBe(12);
+  });
+
+  it("insert-at-cursor preserves non-slash draft text", () => {
+    const kept = insertSlashCommand("实现登录", 4, "plan", "insert-at-cursor");
+    expect(kept.text).toBe("实现登录 /plan");
+    expect(kept.cursor).toBe("实现登录 /plan".length);
   });
 });
 
@@ -382,6 +388,21 @@ describe("composer slash command menu", () => {
     await typeIn(input, wrapper, "/zzz");
     expect(wrapper.find('[data-testid="slash-menu"]').exists()).toBe(true);
     expect(wrapper.text()).toContain("没有匹配的快捷指令");
+    wrapper.unmount();
+  });
+
+  it("slash help button inserts without wiping existing draft", async () => {
+    const wrapper = mountComposer(SEED_COMMANDS);
+    await wrapper.setProps({ modelValue: "草稿内容" });
+    await wrapper.vm.$nextTick();
+    await wrapper.get('[data-testid="composer-slash-help"]').trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="slash-menu"]').exists()).toBe(true);
+    await wrapper.findAll('[data-testid="slash-menu-item"]')[0].trigger("click");
+    await wrapper.vm.$nextTick();
+    const emitted = wrapper.emitted("update:modelValue")?.at(-1)?.[0] as string;
+    expect(emitted).toContain("草稿内容");
+    expect(emitted).toMatch(/\/\w+/);
     wrapper.unmount();
   });
 });

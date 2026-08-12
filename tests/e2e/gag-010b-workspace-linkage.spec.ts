@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "./fixtures";
+import type { Page } from "@playwright/test";
 
 // GAG-010B / goal: mode ↔ workspace strategy linkage driven through the real
 // fixture route (#conversation).

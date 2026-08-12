@@ -213,7 +213,8 @@ describe("GAG-008 components", () => {
     await Promise.resolve();
 
     expect(root.scrollTop).toBe(500);
-    expect(w.find('[data-testid="jump-to-bottom"]').exists()).toBe(false);
+    // Button stays mounted for transition; hidden while stick-to-bottom.
+    expect(w.get('[data-testid="jump-to-bottom"]').classes()).not.toContain("visible");
     w.unmount();
   });
 

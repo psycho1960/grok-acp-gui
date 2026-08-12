@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures";
 
 type FixtureWindow = Window & {
   __taskCenterPushState?: (taskId: string, status: string, seq?: number) => void;

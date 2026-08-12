@@ -98,8 +98,8 @@ describe("GAG-002 accessible controls", () => {
 describe("GAG-002 AppShell responsive behavior", () => {
   it("adjusts both side panels by keyboard and removes the Inspector column when collapsed", async () => {
     const wrapper = mountShell({ width: 1440 });
-    const left = wrapper.get('[aria-label="调整左侧栏宽度"]');
-    const right = wrapper.get('[aria-label="调整检查器宽度"]');
+    const left = wrapper.get('[data-testid="left-resizer"]');
+    const right = wrapper.get('[data-testid="right-resizer"]');
     await left.trigger("keydown", { key: "ArrowRight" });
     await right.trigger("keydown", { key: "ArrowLeft" });
     expect(left.attributes("aria-valuenow")).toBe("272");
