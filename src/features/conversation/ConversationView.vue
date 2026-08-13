@@ -14,6 +14,7 @@ import TimelineVirtualList from "./TimelineVirtualList.vue";
 import ArtifactPanel from "./ArtifactPanel.vue";
 import type { SessionTimelineSnapshot } from "./types";
 import { conversationThemeStyle } from "../../shared/theme/tokens";
+import { applyTaskCenterHash } from "../task-center/hash-route";
 
 const conversationTheme = conversationThemeStyle();
 
@@ -176,6 +177,10 @@ function onOpenArtifact(artifactId: string): void {
   artifactPanel.value?.openArtifact(artifactId);
 }
 
+function onBack(): void {
+  applyTaskCenterHash(null, null);
+}
+
 const TIME_GAP_MS = 5 * 60 * 1000;
 
 function shouldShowRelativeTime(item: { id: string; timestamp: string }): boolean {
@@ -217,6 +222,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       :selected-model="store.selectedModel"
       :selected-reasoning="store.selectedReasoning"
       :settings-disabled="store.sendPending || store.settingsPending || store.isRunning"
+      @back="onBack"
       @cancel="onCancel"
       @refresh="props.taskId && store.openTask(props.taskId as TaskId)"
       @resume="onResume"

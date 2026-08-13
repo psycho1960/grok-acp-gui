@@ -347,10 +347,7 @@ const breadcrumbTrail = computed(() => {
       label: `审查：${selectedTask.value?.title || reviewTaskId.value || "任务"}`,
     });
   } else if (showConversation.value) {
-    crumbs.push({ label: "任务中心", onClick: () => goTaskCenter() });
-    crumbs.push({
-      label: `对话：${selectedTask.value?.title || conversationRoute.value.taskId || "任务"}`,
-    });
+    crumbs.push({ label: "对话" });
   } else {
     crumbs.push({ label: "任务中心" });
   }

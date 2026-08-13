@@ -32,6 +32,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  back: [];
   cancel: [];
   refresh: [];
   resume: [];
@@ -74,13 +75,21 @@ function statusLabel(s: ConversationRunStatus): string {
   return map[s];
 }
 
-const tone = () => {
-  if (props.status === "error" || props.status === "offline") return "danger" as const;
-  if (props.status === "running") return "info" as const;
-  if (props.status === "waiting_permission" || props.status === "waiting_plan")
-    return "warning" as const;
-  return "neutral" as const;
-};
+const settingsLocked = computed(() => Boolean(props.settingsDisabled));
+
+const lockReason = computed(() => {
+  switch (props.status) {
+    case "running":
+      return "运行中无法切换会话身份";
+    case "cancelling":
+      return "停止中无法切换会话身份";
+    case "waiting_permission":
+    case "waiting_plan":
+      return "等待审批时无法切换会话身份";
+    default:
+      return "发送或保存中无法切换会话身份";
+  }
+});
 
 const modelOptions = computed(() => [
   { value: "", label: "使用运行时默认模型" },
@@ -137,43 +146,88 @@ function onReasoningChange(value: string): void {
     emit("update:reasoning", value);
   }
 }
+
+const modeLabel = computed(() => {
+  const selected = props.selectedMode ?? "";
+  return modeOptions.value.find((option) => option.value === selected)?.label ?? "使用会话默认模式";
+});
+
+const workspaceLabel = computed(() => {
+  const selected = props.selectedWorkspaceStrategy ?? "";
+  if (selected === "") return "使用创建时的策略";
+  return WORKSPACE_STRATEGY_OPTIONS.find((option) => option.value === selected)?.label ?? selected;
+});
 </script>
 
 <template>
   <header class="conv-header" data-testid="conversation-header">
     <div class="left">
+      <IconButton label="返回任务中心" data-testid="conversation-back" @click="emit('back')">
+        <NamedIcon name="chevronLeft" :size="16" />
+      </IconButton>
       <h1 class="title">{{ title }}</h1>
-      <StatusIcon :status="statusIcon(status)" :label="statusLabel(status)" />
-      <Badge :tone="tone()">{{ statusLabel(status) }}</Badge>
-      <Badge v-if="attempt" tone="neutral">第 {{ attempt }} 次尝试</Badge>
+      <StatusIcon
+        data-testid="conversation-status"
+        :status="statusIcon(status)"
+        :label="statusLabel(status)"
+      />
+      <Badge v-if="attempt && attempt > 1" tone="neutral">第 {{ attempt }} 次尝试</Badge>
     </div>
     <div class="right">
       <div class="settings" aria-label="对话设置">
         <div class="mode-field">
-          <Select
-            class="settings-select"
+          <div
+            class="session-badge"
+            :class="{ locked: settingsLocked }"
             data-testid="conversation-mode-select"
-            label="模式"
-            :model-value="selectedMode ?? ''"
-            :options="modeOptions"
-            :disabled="settingsDisabled"
-            @update:model-value="onModeChange"
-          />
+            :title="settingsLocked ? lockReason : undefined"
+          >
+            <span v-if="settingsLocked" class="locked-label">{{ modeLabel }}</span>
+            <Select
+              class="settings-select"
+              :class="{ 'is-visually-hidden': settingsLocked }"
+              label="模式"
+              :model-value="selectedMode ?? ''"
+              :options="modeOptions"
+              :disabled="settingsLocked"
+              @update:model-value="onModeChange"
+            />
+            <NamedIcon
+              v-if="!settingsLocked"
+              name="chevronDown"
+              :size="12"
+              data-testid="mode-chevron"
+            />
+          </div>
           <Tooltip :text="modeHelpFor(selectedMode)">
             <IconButton label="模式说明" data-testid="conversation-mode-help">
               <NamedIcon name="help" :size="14" />
             </IconButton>
           </Tooltip>
         </div>
-        <Select
-          class="settings-select"
+        <div
+          class="session-badge"
+          :class="{ locked: settingsLocked }"
           data-testid="conversation-workspace-select"
-          label="工作区策略"
-          :model-value="selectedWorkspaceStrategy ?? ''"
-          :options="[{ value: '', label: '使用创建时的策略' }, ...WORKSPACE_STRATEGY_OPTIONS]"
-          :disabled="settingsDisabled"
-          @update:model-value="onWorkspaceStrategyChange"
-        />
+          :title="settingsLocked ? lockReason : undefined"
+        >
+          <span v-if="settingsLocked" class="locked-label">{{ workspaceLabel }}</span>
+          <Select
+            class="settings-select"
+            :class="{ 'is-visually-hidden': settingsLocked }"
+            label="工作区策略"
+            :model-value="selectedWorkspaceStrategy ?? ''"
+            :options="[{ value: '', label: '使用创建时的策略' }, ...WORKSPACE_STRATEGY_OPTIONS]"
+            :disabled="settingsLocked"
+            @update:model-value="onWorkspaceStrategyChange"
+          />
+          <NamedIcon
+            v-if="!settingsLocked"
+            name="chevronDown"
+            :size="12"
+            data-testid="workspace-chevron"
+          />
+        </div>
         <Select
           class="settings-select"
           data-testid="conversation-model-select"
@@ -259,5 +313,42 @@ function onReasoningChange(value: string): void {
 }
 .settings-select {
   min-width: 132px;
+}
+.session-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-min-size);
+  padding: 0 var(--space-2);
+  color: var(--ctp-text);
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 999px;
+}
+.session-badge.locked {
+  color: var(--ctp-subtext0);
+  cursor: default;
+}
+.session-badge :deep(.field > span) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+.session-badge :deep(select) {
+  min-height: 28px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  appearance: none;
+}
+.session-badge .is-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
 }
 </style>
