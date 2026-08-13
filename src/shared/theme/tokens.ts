@@ -6,9 +6,57 @@ export const mochaPalette = {
   yellow: "#f9e2af", red: "#f38ba8", peach: "#fab387",
 } as const;
 
+/** Official Rose Pine Moon. Conversation surface only; other pages stay Mocha. */
+export const rosePineMoonPalette = {
+  base: "#232136",
+  surface: "#2a273f",
+  overlay: "#393552",
+  muted: "#6e6a86",
+  subtle: "#908caa",
+  text: "#e0def4",
+  iris: "#c4a7e7",
+  love: "#eb6f92",
+  foam: "#9ccfd8",
+  gold: "#f6c177",
+  pine: "#3e8fb0",
+  rose: "#ea9a97",
+  highlightMed: "#44415a",
+  highlightHigh: "#56526e",
+} as const;
+
 export type MochaToken = keyof typeof mochaPalette;
+export type RosePineMoonToken = keyof typeof rosePineMoonPalette;
 
 export const cssTokenName = (token: MochaToken): string => `--ctp-${token}`;
+
+/** Existing `--ctp-*` slots remapped so conversation CSS keeps one token language. */
+export const conversationSurfaceTokens: Record<MochaToken, string> = {
+  crust: rosePineMoonPalette.base,
+  mantle: rosePineMoonPalette.surface,
+  base: rosePineMoonPalette.base,
+  surface0: rosePineMoonPalette.overlay,
+  surface1: rosePineMoonPalette.highlightMed,
+  surface2: rosePineMoonPalette.highlightHigh,
+  overlay0: rosePineMoonPalette.muted,
+  subtext0: rosePineMoonPalette.subtle,
+  text: rosePineMoonPalette.text,
+  mauve: rosePineMoonPalette.iris,
+  blue: rosePineMoonPalette.foam,
+  green: rosePineMoonPalette.pine,
+  yellow: rosePineMoonPalette.gold,
+  red: rosePineMoonPalette.love,
+  peach: rosePineMoonPalette.rose,
+};
+
+export function conversationThemeStyle(): Record<string, string> {
+  const style: Record<string, string> = {};
+  for (const [token, value] of Object.entries(conversationSurfaceTokens) as [MochaToken, string][]) {
+    style[cssTokenName(token)] = value;
+  }
+  // Pre-existing conversation CSS references --ctp-overlay1, which Mocha never defined.
+  style["--ctp-overlay1"] = rosePineMoonPalette.muted;
+  return style;
+}
 
 export function applyThemeTokens(target: CSSStyleDeclaration): void {
   for (const [token, value] of Object.entries(mochaPalette) as [MochaToken, string][]) {

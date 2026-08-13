@@ -9,7 +9,7 @@
     "check:theme": "node scripts/check-theme-tokens.mjs",
     "check:contrast": "node scripts/check-contrast.mjs",
     "lint": "npm run check:theme && npm run check:contrast && eslint . --max-warnings 0",
-    "test:node": "node --experimental-strip-types --test tests/gag-001.test.js tests/gag-002.test.js tests/gag-007.test.js tests/gag-008.test.js tests/gag-015.test.js tests/gag-016.test.js tests/gag-017.test.js",
+    "test:node": "node --experimental-strip-types --test tests/gag-001.test.js tests/gag-002.test.js tests/gag-007.test.js tests/gag-008.test.js tests/gag-015.test.js tests/gag-016.test.js tests/gag-017.test.js tests/gag-021.test.js",
     "test:ui": "vitest run",
     "test:e2e": "playwright test",
     "test:security": "node scripts/gag-015-static-gate.mjs",

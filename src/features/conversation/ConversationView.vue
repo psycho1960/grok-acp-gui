@@ -14,6 +14,9 @@ import TimelineItemView from "./TimelineItemView.vue";
 import TimelineVirtualList from "./TimelineVirtualList.vue";
 import ArtifactPanel from "./ArtifactPanel.vue";
 import type { SessionTimelineSnapshot } from "./types";
+import { conversationThemeStyle } from "../../shared/theme/tokens";
+
+const conversationTheme = conversationThemeStyle();
 
 const props = defineProps<{
   bridge: DesktopBridge;
@@ -176,7 +179,12 @@ function onOpenArtifact(artifactId: string): void {
 </script>
 
 <template>
-  <section class="conversation" data-testid="conversation-view" aria-label="对话与工具时间线">
+  <section
+    class="conversation"
+    data-testid="conversation-view"
+    aria-label="对话与工具时间线"
+    :style="conversationTheme"
+  >
     <ConversationHeader
       :title="store.title"
       :status="store.status"
@@ -280,7 +288,21 @@ function onOpenArtifact(artifactId: string): void {
   grid-template-rows: auto auto 1fr auto;
   height: 100%;
   min-height: 0;
+  color: var(--ctp-text);
   background: var(--ctp-base);
+  /* Recompute overlays against remapped --ctp-* so they are not leftover Mocha mixes. */
+  --overlay-hover: color-mix(in srgb, var(--ctp-surface1) 40%, transparent);
+  --overlay-active: color-mix(in srgb, var(--ctp-mauve) 16%, transparent);
+  --overlay-info: color-mix(in srgb, var(--ctp-blue) 12%, transparent);
+  --overlay-info-solid: color-mix(in srgb, var(--ctp-blue) 12%, var(--ctp-base));
+  --overlay-success: color-mix(in srgb, var(--ctp-green) 12%, transparent);
+  --overlay-danger: color-mix(in srgb, var(--ctp-red) 14%, transparent);
+  --overlay-warning: color-mix(in srgb, var(--ctp-yellow) 16%, var(--ctp-mantle));
+  --overlay-menu-active: color-mix(in srgb, var(--ctp-blue) 18%, var(--ctp-surface0));
+  --border-tone-info: color-mix(in srgb, var(--ctp-blue) 40%, var(--ctp-surface1));
+  --border-tone-success: color-mix(in srgb, var(--ctp-green) 40%, var(--ctp-surface1));
+  --border-tone-warning: color-mix(in srgb, var(--ctp-yellow) 50%, var(--ctp-surface1));
+  --border-tone-danger: color-mix(in srgb, var(--ctp-red) 55%, var(--ctp-surface1));
 }
 .workspace-notice {
   margin: 0;
