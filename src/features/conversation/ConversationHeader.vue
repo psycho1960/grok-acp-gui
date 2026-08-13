@@ -8,7 +8,7 @@ import Select from "../../shared/ui/Select.vue";
 import StatusIcon from "../../shared/ui/StatusIcon.vue";
 import Tooltip from "../../shared/ui/Tooltip.vue";
 import { modeHelpFor } from "../../shared/ui/mode-help";
-import type { ModeInfo, ModelInfo, ReasoningEffort } from "../../bridge/types";
+import type { ModeInfo } from "../../bridge/types";
 import {
   WORKSPACE_STRATEGY_OPTIONS,
   workspaceStrategyForMode,
@@ -20,26 +20,19 @@ const props = defineProps<{
   title: string;
   status: ConversationRunStatus;
   attempt?: number;
-  canCancel?: boolean;
   needsRefresh?: boolean;
   modes?: ModeInfo[];
-  models?: ModelInfo[];
   selectedMode?: string | null;
   selectedWorkspaceStrategy?: WorkspaceStrategy | null;
-  selectedModel?: string | null;
-  selectedReasoning?: ReasoningEffort | null;
   settingsDisabled?: boolean;
 }>();
 
 const emit = defineEmits<{
   back: [];
-  cancel: [];
   refresh: [];
   resume: [];
   "update:mode": [mode: string | null, strategy: WorkspaceStrategy | null];
   "update:workspaceStrategy": [strategy: WorkspaceStrategy];
-  "update:model": [model: string | null];
-  "update:reasoning": [reasoning: ReasoningEffort];
 }>();
 
 function statusIcon(
@@ -91,16 +84,6 @@ const lockReason = computed(() => {
   }
 });
 
-const modelOptions = computed(() => [
-  { value: "", label: "使用运行时默认模型" },
-  ...(props.models ?? [])
-    .filter((model) => model.modelId.trim().length > 0)
-    .map((model) => ({
-      value: model.modelId,
-      label: model.name || model.modelId,
-    })),
-]);
-
 /** 中文模式标签：capability 名称优先，应用自有词汇兜底。 */
 const MODE_LABEL_FALLBACK: Record<string, string> = {
   agent: "智能体",
@@ -118,13 +101,6 @@ const modeOptions = computed(() => [
     })),
 ]);
 
-const reasoningOptions = computed(() => [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-  { value: "max", label: "最高" },
-]);
-
 function onModeChange(value: string): void {
   const mode = value === "" ? null : value;
   // One event becomes one atomic session.configure call in the store.
@@ -134,16 +110,6 @@ function onModeChange(value: string): void {
 function onWorkspaceStrategyChange(value: string): void {
   if (value === "worktree" || value === "readonly" || value === "direct") {
     emit("update:workspaceStrategy", value);
-  }
-}
-
-function onModelChange(value: string): void {
-  emit("update:model", value === "" ? null : value);
-}
-
-function onReasoningChange(value: string): void {
-  if (value === "low" || value === "medium" || value === "high" || value === "max") {
-    emit("update:reasoning", value);
   }
 }
 
@@ -228,24 +194,6 @@ const workspaceLabel = computed(() => {
             data-testid="workspace-chevron"
           />
         </div>
-        <Select
-          class="settings-select"
-          data-testid="conversation-model-select"
-          label="模型"
-          :model-value="selectedModel ?? ''"
-          :options="modelOptions"
-          :disabled="settingsDisabled"
-          @update:model-value="onModelChange"
-        />
-        <Select
-          class="settings-select"
-          data-testid="conversation-reasoning-select"
-          label="推理强度"
-          :model-value="selectedReasoning ?? 'medium'"
-          :options="reasoningOptions"
-          :disabled="settingsDisabled"
-          @update:model-value="onReasoningChange"
-        />
       </div>
       <Button
         v-if="status === 'error' || status === 'disconnected'"
@@ -262,14 +210,6 @@ const workspaceLabel = computed(() => {
         @click="emit('refresh')"
       >
         刷新快照
-      </Button>
-      <Button
-        v-if="canCancel"
-        variant="danger"
-        data-testid="header-stop"
-        @click="emit('cancel')"
-      >
-        停止
       </Button>
     </div>
   </header>
