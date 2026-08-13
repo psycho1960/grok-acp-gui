@@ -282,7 +282,7 @@ function applyActivity(
       sessionId: event.sessionId,
       timestamp: event.timestamp,
       eventKey: eventKey(event.sessionId, event.seq),
-      summary: detail || "Thinking…",
+      summary: detail || "",
       expanded: false,
     };
     return upsertItem(next, thinking);
@@ -915,6 +915,18 @@ export function setRunStatus(
   return next;
 }
 
+/** Heartbeats, snapshots, and stop rows stay off the visible timeline. */
+export function isOffTimelineStatus(item: TimelineItem): boolean {
+  if (item.kind === "system") {
+    return item.message === "已停止" || item.message === "任务已中断";
+  }
+  if (item.kind === "activity") {
+    const kind = item.activityKind.toLowerCase();
+    return kind === "heartbeat" || kind === "snapshot" || kind === "status";
+  }
+  return false;
+}
+
 /** Fold consecutive read-only explore tools for display (UI layer helper). */
 export function foldExploreTools(items: TimelineItem[]): TimelineItem[] {
   const out: TimelineItem[] = [];
@@ -934,10 +946,9 @@ export function foldExploreTools(items: TimelineItem[]): TimelineItem[] {
       );
       out.push({
         ...first,
-        id: `fold-${first.id}`,
         tool: {
           ...first.tool,
-          title: `Explored ${batch.length} items`,
+          title: `已查看 ${batch.length} 项`,
           kind: "explore_batch",
           phase: allDone ? "completed" : "running",
           result: {

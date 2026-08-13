@@ -32,6 +32,7 @@ import {
   appendUserMessage,
   createEmptyConversationState,
   foldExploreTools,
+  isOffTimelineStatus,
   markUserMessageConfirmed,
   markUserMessageFailed,
   setRunStatus,
@@ -110,7 +111,8 @@ export const useConversationStore = defineStore("conversation", () => {
 
   const items = computed<TimelineItem[]>(() => {
     const raw = timeline.value.items;
-    return foldExplores.value ? foldExploreTools(raw) : raw;
+    const folded = foldExplores.value ? foldExploreTools(raw) : raw;
+    return folded.filter((item) => !isOffTimelineStatus(item));
   });
 
   const status = computed(() => timeline.value.status);

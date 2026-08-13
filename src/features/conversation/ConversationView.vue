@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import EmptyState from "../../shared/ui/EmptyState.vue";
 import ErrorState from "../../shared/ui/ErrorState.vue";
 import Skeleton from "../../shared/ui/Skeleton.vue";
 import type { DesktopBridge, TaskId } from "../../bridge/types";
@@ -176,6 +175,26 @@ async function onDropAttachments(paths: string[]): Promise<void> {
 function onOpenArtifact(artifactId: string): void {
   artifactPanel.value?.openArtifact(artifactId);
 }
+
+const TIME_GAP_MS = 5 * 60 * 1000;
+
+function shouldShowRelativeTime(item: { id: string; timestamp: string }): boolean {
+  const items = store.items;
+  const index = items.findIndex((candidate) => candidate.id === item.id);
+  if (index <= 0) return true;
+  const previous = items[index - 1];
+  if (!previous) return true;
+  const delta = Date.parse(item.timestamp) - Date.parse(previous.timestamp);
+  return Number.isFinite(delta) && delta >= TIME_GAP_MS;
+}
+
+function isThinkingDone(item: { id: string; kind: string; durationMs?: number }): boolean {
+  if (item.kind !== "thinking") return false;
+  if (item.durationMs != null) return true;
+  const index = store.items.findIndex((candidate) => candidate.id === item.id);
+  if (index < 0) return false;
+  return store.items.slice(index + 1).some((candidate) => candidate.kind !== "thinking");
+}
 </script>
 
 <template>
@@ -227,11 +246,15 @@ function onOpenArtifact(artifactId: string): void {
           title="会话加载失败"
           :detail="store.errorMessage ?? '未知错误'"
         />
-        <EmptyState
+        <div
           v-else-if="store.items.length === 0"
-          title="还没有消息"
-          detail="在下方输入并发送，开始与智能体对话。"
-        />
+          class="empty-conversation"
+          data-testid="empty-conversation"
+          role="status"
+        >
+          <h2>把目标发给智能体</h2>
+          <p>下方输入；需要时用 / 看快捷指令，或点回形针加图</p>
+        </div>
         <TimelineVirtualList
           v-else
           ref="listRef"
@@ -244,6 +267,8 @@ function onOpenArtifact(artifactId: string): void {
             <TimelineItemView
               :item="item"
               :focused="item.id === focusedId"
+              :show-time="shouldShowRelativeTime(item)"
+              :thinking-done="isThinkingDone(item)"
               @toggle-tool="store.toggleTool"
               @toggle-thinking="store.toggleThinking"
               @resolve-permission="store.resolvePermission"
@@ -321,6 +346,20 @@ function onOpenArtifact(artifactId: string): void {
   display: grid;
   gap: var(--space-2);
   padding: var(--space-4);
+}
+.empty-conversation {
+  max-width: 36rem;
+  padding: var(--space-6) var(--space-4);
+  color: var(--ctp-subtext0);
+}
+.empty-conversation h2 {
+  margin: 0 0 var(--space-2);
+  color: var(--ctp-text);
+  font-size: var(--heading-panel);
+  font-weight: var(--font-weight-semibold);
+}
+.empty-conversation p {
+  margin: 0;
 }
 @media (max-width: 860px) { .content-layout { grid-template-columns: 1fr; grid-template-rows: minmax(220px, 1fr) auto; } }
 </style>

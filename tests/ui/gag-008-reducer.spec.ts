@@ -379,7 +379,7 @@ describe("GAG-008 conversation reducer", () => {
     const folded = foldExploreTools(state.items);
     expect(folded[0].kind).toBe("tool");
     if (folded[0].kind === "tool") {
-      expect(folded[0].tool.title).toBe("Explored 2 items");
+      expect(folded[0].tool.title).toBe("已查看 2 项");
     }
     expect(folded[1].kind).toBe("tool");
     if (folded[1].kind === "tool") {
