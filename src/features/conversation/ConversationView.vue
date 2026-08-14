@@ -14,6 +14,7 @@ import ConversationHeader from "./ConversationHeader.vue";
 import TimelineItemView from "./TimelineItemView.vue";
 import TimelineVirtualList from "./TimelineVirtualList.vue";
 import ArtifactPanel from "./ArtifactPanel.vue";
+import WorktreePanel from "../worktrees/WorktreePanel.vue";
 import type { SessionTimelineSnapshot } from "./types";
 import { conversationThemeStyle } from "../../shared/theme/tokens";
 import { applyTaskCenterHash } from "../task-center/hash-route";
@@ -31,6 +32,20 @@ const props = defineProps<{
 const store = useConversationStore();
 const listRef = ref<InstanceType<typeof TimelineVirtualList> | null>(null);
 const artifactPanel = ref<InstanceType<typeof ArtifactPanel> | null>(null);
+const railForced = ref(false);
+const focusedArtifactId = ref<string | null>(null);
+const railTab = ref<"artifacts" | "workspace">("artifacts");
+
+const railOpen = computed(() => store.railNeeded || railForced.value);
+
+watch(
+  () => [store.hasArtifacts, store.workspaceAttention] as const,
+  ([hasArtifacts, attention]) => {
+    if (hasArtifacts) railTab.value = "artifacts";
+    else if (attention) railTab.value = "workspace";
+  },
+  { immediate: true },
+);
 const composerRegion = ref<HTMLElement | null>(null);
 const nativeDropActive = ref(false);
 let unsubscribeImageDrops: (() => void) | null = null;
@@ -54,6 +69,7 @@ onMounted(async () => {
   } else if (props.taskId) {
     await store.openTask(props.taskId as TaskId);
   }
+  await store.refreshRailContext();
   if (props.focusSeq != null) {
     store.setFocusEventSeq(props.focusSeq);
   }
@@ -98,6 +114,8 @@ function focusPendingApproval(event: KeyboardEvent): void {
 watch(
   () => props.taskId,
   async (id) => {
+    railForced.value = false;
+    focusedArtifactId.value = null;
     if (!id) return;
     if (props.snapshot && props.snapshot.taskId === id) {
       store.openFromSnapshot(props.snapshot);
@@ -110,6 +128,8 @@ watch(
 watch(
   () => props.snapshot,
   (snap) => {
+    railForced.value = false;
+    focusedArtifactId.value = null;
     if (snap) store.openFromSnapshot(snap);
   },
 );
@@ -176,7 +196,10 @@ async function onDropAttachments(paths: string[]): Promise<void> {
 }
 
 function onOpenArtifact(artifactId: string): void {
-  artifactPanel.value?.openArtifact(artifactId);
+  railForced.value = true;
+  focusedArtifactId.value = artifactId;
+  railTab.value = "artifacts";
+  void Promise.resolve().then(() => artifactPanel.value?.openArtifact(artifactId));
 }
 
 function onBack(): void {
@@ -236,7 +259,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       {{ store.workspaceNotice }}
     </p>
 
-    <div class="content-layout">
+    <div class="content-layout" :class="{ 'has-rail': railOpen }">
       <div class="body">
         <div v-if="store.loadState === 'loading'" class="state-pad">
           <Skeleton />
@@ -279,12 +302,48 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
           </template>
         </TimelineVirtualList>
       </div>
-      <ArtifactPanel
-        ref="artifactPanel"
-        :bridge="props.bridge"
-        :task-id="store.taskId"
-        :refresh-key="store.artifactRevision"
-      />
+      <aside
+        v-if="railOpen"
+        class="conversation-rail"
+        data-testid="conversation-rail"
+        aria-label="对话侧栏"
+      >
+        <div class="rail-tabs" role="tablist" aria-label="侧栏内容">
+          <button
+            type="button"
+            role="tab"
+            data-testid="rail-tab-artifacts"
+            :aria-selected="railTab === 'artifacts'"
+            :class="{ on: railTab === 'artifacts' }"
+            @click="railTab = 'artifacts'"
+          >
+            图片与结果
+          </button>
+          <button
+            type="button"
+            role="tab"
+            data-testid="rail-tab-workspace"
+            :aria-selected="railTab === 'workspace'"
+            :class="{ on: railTab === 'workspace' }"
+            @click="railTab = 'workspace'"
+          >
+            工作区
+          </button>
+        </div>
+        <ArtifactPanel
+          v-show="railTab === 'artifacts'"
+          ref="artifactPanel"
+          :bridge="props.bridge"
+          :task-id="store.taskId"
+          :refresh-key="store.artifactRevision"
+          :focus-artifact-id="focusedArtifactId"
+        />
+        <WorktreePanel
+          v-if="store.taskId && railTab === 'workspace'"
+          :bridge="props.bridge"
+          :task-id="store.taskId"
+        />
+      </aside>
     </div>
 
     <div v-if="store.queuedFollowUps.length" class="queue-bar" data-testid="queue-bar">
@@ -366,7 +425,34 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
   border-bottom: 1px solid var(--ctp-surface0);
   font-size: var(--font-small);
 }
-.content-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); min-height: 0; overflow: hidden; }
+.content-layout { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; overflow: hidden; }
+.content-layout.has-rail { grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); }
+.conversation-rail {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-width: 0;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--ctp-mauve) 6%, var(--ctp-mantle));
+  border-left: 1px solid var(--ctp-surface0);
+}
+.rail-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--ctp-surface0);
+}
+.rail-tabs button {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  color: var(--ctp-subtext0);
+  background: transparent;
+  cursor: pointer;
+}
+.rail-tabs button.on {
+  color: var(--ctp-text);
+  background: color-mix(in srgb, var(--ctp-mauve) 18%, transparent);
+}
 .body {
   min-height: 0;
   overflow: hidden;
@@ -417,5 +503,8 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
   flex-shrink: 0;
   gap: var(--space-1);
 }
-@media (max-width: 860px) { .content-layout { grid-template-columns: 1fr; grid-template-rows: minmax(220px, 1fr) auto; } }
+@media (max-width: 860px) {
+  .content-layout,
+  .content-layout.has-rail { grid-template-columns: 1fr; grid-template-rows: minmax(220px, 1fr) auto; }
+}
 </style>

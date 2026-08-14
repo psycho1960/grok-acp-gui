@@ -1,9 +1,9 @@
 import { createPinia, setActivePinia } from "pinia";
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
-import { FIX_TASK, fixtureSessionSnapshot } from "../../src/features/conversation/fixtures";
+import { FIX_TASK, fixtureArtifact, fixtureSessionSnapshot } from "../../src/features/conversation/fixtures";
 import TaskCenterView from "../../src/features/task-center/TaskCenterView.vue";
 import { createTaskCenterSeedSnapshot } from "../../src/features/task-center/seed";
 import { applyThemeTokens } from "../../src/shared/theme/tokens";
@@ -35,17 +35,16 @@ describe("GAG-021 conversation Rose Pine Moon", () => {
       props: {
         bridge: createFakeDesktopBridge(),
         taskId: FIX_TASK,
-        snapshot: fixtureSessionSnapshot(),
+        snapshot: fixtureSessionSnapshot({ events: [fixtureArtifact(1)] }),
       },
       attachTo: document.body,
     });
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushPromises();
 
     const canvas = w.get('[data-testid="conversation-view"]').element;
     const header = w.get('[data-testid="conversation-header"]').element;
     const composer = w.get('[data-testid="composer"]').element;
-    const rail = w.get('[data-testid="artifact-panel"]').element;
+    const rail = w.get('[data-testid="conversation-rail"]').element;
 
     for (const surface of [canvas, header, composer, rail]) {
       expect(tokenOn(surface, "--ctp-base")).toBe("#232136");

@@ -270,6 +270,7 @@ const main = computed(() => {
 });
 
 const inspector = computed(() => {
+  if (showConversation.value) return undefined;
   if (showRecovery.value) {
     return h("section", { class: "inspector-content" }, [
       h("h2", "恢复说明"),

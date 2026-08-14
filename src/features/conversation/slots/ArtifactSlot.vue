@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import Badge from "../../../shared/ui/Badge.vue";
 import type { ArtifactSlotView } from "../types";
 
 const props = defineProps<{ slotData: ArtifactSlotView }>();
@@ -7,41 +6,45 @@ const emit = defineEmits<{ open: [artifactId: string] }>();
 </script>
 
 <template>
-  <section
-    class="artifact-slot surface-card"
-    data-testid="artifact-slot"
-    aria-label="制品插槽"
+  <button
+    type="button"
+    class="artifact-chip"
+    data-testid="artifact-chip"
+    :disabled="slotData.state !== 'ready'"
+    :aria-label="slotData.displayName"
+    @click="emit('open', props.slotData.artifactId)"
   >
-    <header>
-      <Badge tone="success">制品</Badge>
-      <span class="name">{{ slotData.displayName }}</span>
-    </header>
-    <p class="meta">{{ slotData.mimeType }} · {{ slotData.artifactId }}</p>
-    <p v-if="slotData.state !== 'ready'" class="hint warning">该制品已隔离或不可用，不能预览。</p>
-    <button v-else type="button" class="open" @click="emit('open', props.slotData.artifactId)">在右侧查看</button>
-  </section>
+    <span class="name">{{ slotData.displayName }}</span>
+    <span v-if="slotData.state !== 'ready'" class="hint">不可用</span>
+  </button>
 </template>
 
 <style scoped>
-.artifact-slot {
-  padding: var(--space-3);
-  display: grid;
-  gap: var(--space-1);
-}
-header {
-  display: flex;
+.artifact-chip {
+  display: inline-flex;
+  max-width: 100%;
   gap: var(--space-2);
   align-items: center;
+  min-height: 32px;
+  padding: 0 var(--space-2);
+  color: var(--ctp-text);
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.artifact-chip:disabled {
+  cursor: default;
+  color: var(--ctp-subtext0);
 }
 .name {
-  font-weight: 600;
+  overflow: hidden;
+  font-size: var(--font-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.meta,
 .hint {
-  margin: 0;
-  color: var(--ctp-subtext0);
+  color: var(--ctp-red);
   font-size: var(--font-small);
 }
-.warning { color: var(--ctp-red); }
-.open { justify-self: start; min-height: var(--control-min-size); padding: 0 var(--space-2); color: var(--ctp-text); background: var(--ctp-surface0); border: 1px solid var(--ctp-surface1); border-radius: var(--radius-control); cursor: pointer; }
 </style>

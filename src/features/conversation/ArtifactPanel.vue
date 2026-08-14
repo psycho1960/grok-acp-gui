@@ -9,6 +9,7 @@ const props = defineProps<{
   bridge: DesktopBridge;
   taskId: TaskId | null;
   refreshKey: number;
+  focusArtifactId?: string | null;
 }>();
 
 const facade = createConversationFacade(props.bridge);
@@ -171,10 +172,28 @@ async function revealSaved(): Promise<void> {
 
 function openArtifact(artifactId: string): void {
   const artifact = artifacts.value.find((candidate) => candidate.artifactId === artifactId);
-  if (artifact) void preview(artifact);
+  if (artifact) {
+    void preview(artifact);
+    return;
+  }
+  void preview({
+    artifactId,
+    displayName: artifactId,
+    mimeType: "image/*",
+    bytes: 0,
+    state: "ready",
+    previewCapability: "inline",
+  });
 }
 
 watch(() => [props.taskId, props.refreshKey], () => void refresh(), { immediate: true });
+
+watch(
+  () => props.focusArtifactId,
+  (artifactId) => {
+    if (artifactId) openArtifact(artifactId);
+  },
+);
 
 defineExpose({ openArtifact, refresh });
 </script>
@@ -197,7 +216,7 @@ defineExpose({ openArtifact, refresh });
     </div>
     <p v-else-if="loading" class="empty">正在加载…</p>
     <p v-else-if="!artifacts.length" class="empty">此任务尚无可用制品。</p>
-    <ul v-else class="artifact-list">
+    <ul v-else class="artifact-list" data-testid="artifact-gallery">
       <li v-for="artifact in artifacts" :key="artifact.artifactId" class="artifact-card">
         <div class="metadata">
           <strong>{{ artifact.displayName }}</strong>
@@ -209,6 +228,7 @@ defineExpose({ openArtifact, refresh });
           :src="urls[artifact.artifactId]"
           :alt="artifact.displayName"
           class="preview"
+          :data-testid="artifact.artifactId === focusArtifactId ? 'focused-artifact-preview' : undefined"
         >
         <div class="actions">
           <Button
@@ -252,7 +272,7 @@ defineExpose({ openArtifact, refresh });
 </template>
 
 <style scoped>
-.artifact-panel { min-width: 0; overflow: auto; padding: var(--space-3); border-left: 1px solid var(--ctp-surface0); background: var(--ctp-mantle); }
+.artifact-panel { min-width: 0; overflow: auto; padding: var(--space-3); background: transparent; }
 header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-2); }
 h2, p { margin: 0; } h2 { font-size: var(--font-body); } header p, .empty { margin-top: var(--space-1); color: var(--ctp-subtext0); font-size: var(--font-small); }
 .artifact-list { display: grid; gap: var(--space-2); padding: 0; margin: var(--space-3) 0 0; list-style: none; }

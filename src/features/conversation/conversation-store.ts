@@ -13,6 +13,7 @@ import type {
   TaskOpenResult,
   TaskId,
   TypedDesktopEvent,
+  WorktreeRecord,
 } from "../../bridge/types";
 import {
   createConversationFacade,
@@ -80,6 +81,9 @@ export const useConversationStore = defineStore("conversation", () => {
   let queueDrainPending = false;
   let interruptFollowUp: QueuedFollowUp | null = null;
   const artifactRevision = ref(0);
+  const listedArtifacts = ref<ArtifactDescriptor[]>([]);
+  const worktreeRecord = ref<WorktreeRecord | null>(null);
+  const lifecycleStatus = ref<string | null>(null);
   const cancelPending = ref(false);
   const bridgeOnline = ref(true);
   const focusEventSeq = ref<number | null>(null);
@@ -144,6 +148,64 @@ export const useConversationStore = defineStore("conversation", () => {
     }
     return null;
   });
+
+  const hasArtifacts = computed(
+    () =>
+      listedArtifacts.value.length > 0 ||
+      items.value.some((item) => item.kind === "artifact"),
+  );
+
+  const workspaceAttention = computed(() => {
+    if (lifecycleStatus.value === "conflicted") return "conflicted";
+    if (workspaceStrategy.value === "worktree" && workspaceAvailable.value === false) {
+      return "not-created";
+    }
+    const state = worktreeRecord.value?.state;
+    if (state === "missing" || state === "creation_failed" || state === "allocating") {
+      return "not-created";
+    }
+    if (worktreeRecord.value?.ownership === "external") {
+      return "external-awaiting-adoption";
+    }
+    if (state === "orphaned" || state === "quarantined") {
+      return "cleanup-recovery-pending";
+    }
+    return null;
+  });
+
+  const railNeeded = computed(
+    () => hasArtifacts.value || workspaceAttention.value != null,
+  );
+
+  function clearRailContext(): void {
+    listedArtifacts.value = [];
+    worktreeRecord.value = null;
+    lifecycleStatus.value = null;
+  }
+
+  async function refreshRailContext(): Promise<void> {
+    const current = facade;
+    const id = taskId.value;
+    if (!current || !id) {
+      listedArtifacts.value = [];
+      worktreeRecord.value = null;
+      return;
+    }
+    try {
+      const listed = await current.listArtifacts(id);
+      listedArtifacts.value =
+        listed.success === "true" ? (listed.data?.artifacts ?? []) : [];
+    } catch {
+      listedArtifacts.value = [];
+    }
+    try {
+      const inspected = await current.inspectWorktree(id);
+      worktreeRecord.value =
+        inspected.success === "true" ? (inspected.data?.worktree ?? null) : null;
+    } catch {
+      worktreeRecord.value = null;
+    }
+  }
 
   const composerCapabilities = computed<ComposerCapabilities>(() => {
     if (!bridgeOnline.value) {
@@ -253,7 +315,10 @@ export const useConversationStore = defineStore("conversation", () => {
         bridgeOnline.value = true;
       }
     }
-    if (event.type === "artifact.available") artifactRevision.value += 1;
+    if (event.type === "artifact.available") {
+      artifactRevision.value += 1;
+      void refreshRailContext();
+    }
     if (event.type === "session.commands.updated") {
       const commands = event.payload.commands;
       if (Array.isArray(commands)) slashCommands.value = commands;
@@ -328,6 +393,7 @@ export const useConversationStore = defineStore("conversation", () => {
     selectedModel.value = null;
     selectedReasoning.value = null;
     settingsPending.value = false;
+    clearRailContext();
     queuedFollowUps.value = [];
     interruptFollowUp = null;
     queueDrainPending = false;
@@ -358,6 +424,7 @@ export const useConversationStore = defineStore("conversation", () => {
     if (snapshot.reasoning !== undefined) {
       selectedReasoning.value = normalizeReasoning(snapshot.reasoning);
     }
+    lifecycleStatus.value = snapshot.taskStatus ?? null;
   }
 
   function openFromSnapshot(snapshot: SessionTimelineSnapshot): void {
@@ -386,6 +453,7 @@ export const useConversationStore = defineStore("conversation", () => {
     selectedMode.value = null;
     workspaceStrategy.value = null;
     workspaceAvailable.value = null;
+    lifecycleStatus.value = null;
     selectedModel.value = null;
     selectedReasoning.value = null;
 
@@ -428,6 +496,7 @@ export const useConversationStore = defineStore("conversation", () => {
         if (data.reasoning !== undefined) {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
         }
+        lifecycleStatus.value = data.status ?? null;
         commitSnapshot({
           taskId: data.taskId,
           sessionId: data.sessionId,
@@ -441,6 +510,7 @@ export const useConversationStore = defineStore("conversation", () => {
           workspaceAvailable: data.workspaceAvailable,
           model: data.model,
           reasoning: data.reasoning,
+          taskStatus: data.status,
         });
       } else if (data?.title) {
         if (data.mode !== undefined) selectedMode.value = data.mode ?? null;
@@ -456,6 +526,7 @@ export const useConversationStore = defineStore("conversation", () => {
         if (data.reasoning !== undefined) {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
         }
+        lifecycleStatus.value = data.status ?? null;
         commit({
           ...timeline.value,
           title: data.title,
@@ -470,6 +541,7 @@ export const useConversationStore = defineStore("conversation", () => {
         });
       }
       loadState.value = "ready";
+      await refreshRailContext();
     } catch (error) {
       if (version !== openVersion || disposed) return;
       errorMessage.value =
@@ -984,6 +1056,9 @@ export const useConversationStore = defineStore("conversation", () => {
     workspaceStrategy,
     workspaceAvailable,
     workspaceNotice,
+    hasArtifacts,
+    workspaceAttention,
+    railNeeded,
     selectedModel,
     selectedReasoning,
     settingsPending,
@@ -991,6 +1066,7 @@ export const useConversationStore = defineStore("conversation", () => {
     isRunning,
     attach,
     detach,
+    refreshRailContext,
     openFromSnapshot,
     openTask,
     setDraft,

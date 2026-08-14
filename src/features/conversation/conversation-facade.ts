@@ -11,6 +11,7 @@ import type {
   DesktopBridge,
   DesktopResult,
   TaskId,
+  WorktreeRecord,
   TurnSendResult,
   TypedDesktopEvent,
   Unsubscribe,
@@ -40,6 +41,7 @@ export interface ConversationFacade {
     blobs: ArtifactBlobInput[],
   ): Promise<DesktopResult<ArtifactImportResult>>;
   listArtifacts(taskId: TaskId): Promise<DesktopResult<ArtifactListResult>>;
+  inspectWorktree(taskId: TaskId): Promise<DesktopResult<{ worktree: WorktreeRecord }>>;
   previewArtifact(taskId: TaskId, artifactId: string): Promise<DesktopResult<ArtifactPreviewResult>>;
   revealArtifact(taskId: TaskId, artifactId: string): Promise<DesktopResult>;
   saveArtifact(
@@ -109,6 +111,13 @@ export function createConversationFacade(
 
     async listArtifacts(taskId) {
       return bridge.execute({ type: "artifact.list", payload: { taskId } }) as Promise<DesktopResult<ArtifactListResult>>;
+    },
+
+    async inspectWorktree(taskId) {
+      return bridge.execute({
+        type: "worktree.inspect",
+        payload: { taskId },
+      }) as Promise<DesktopResult<{ worktree: WorktreeRecord }>>;
     },
 
     async previewArtifact(taskId, artifactId) {
