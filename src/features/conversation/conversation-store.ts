@@ -867,18 +867,17 @@ export const useConversationStore = defineStore("conversation", () => {
       else queuedFollowUps.value = queuedFollowUps.value.filter((entry) => entry.id !== next.id);
       draft.value = next.text;
       attachments.value = next.attachments.map((attachment) => ({ ...attachment }));
-      const sent = await sendMessage();
-      if (sent) {
-        draft.value = preservedDraft;
-        attachments.value = preservedAttachments;
-        if (timeline.value.taskId) saveDraft(timeline.value.taskId, preservedDraft);
-      }
+      await sendMessage();
+      draft.value = preservedDraft;
+      attachments.value = preservedAttachments;
+      if (timeline.value.taskId) saveDraft(timeline.value.taskId, preservedDraft);
     } finally {
       queueDrainPending = false;
     }
   }
 
   async function sendFollowUpNow(id: string): Promise<boolean> {
+    if (interruptFollowUp || cancelPending.value) return false;
     const item = queuedFollowUps.value.find((entry) => entry.id === id);
     if (!item) return false;
     queuedFollowUps.value = queuedFollowUps.value.filter((entry) => entry.id !== id);
@@ -1044,6 +1043,7 @@ export const useConversationStore = defineStore("conversation", () => {
     attachmentPending,
     attachments,
     queuedFollowUps,
+    queueInterruptPending: computed(() => interruptFollowUp != null || cancelPending.value),
     artifactRevision,
     cancelPending,
     bridgeOnline,

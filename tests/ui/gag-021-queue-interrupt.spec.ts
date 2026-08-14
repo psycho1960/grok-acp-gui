@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
+import { createFakeDesktopBridge, fakeError } from "../../src/bridge/fake-bridge";
 import type { DesktopCommand } from "../../src/bridge/types";
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
 import {
@@ -154,6 +154,78 @@ describe("GAG-021 queue and interrupt", () => {
       "reject-1",
     ]);
     expect(slot.find("[data-safe-default='true']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("keeps the first send-now item when a second send-now is clicked mid-cancel", async () => {
+    let releaseCancel: (() => void) | undefined;
+    const cancelGate = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const { wrapper, commands } = await mountRunningConversation(async (command) => {
+      if (command.type === "turn.cancel") await cancelGate;
+      return undefined;
+    });
+    const store = useConversationStore();
+    store.setDraft("follow-up A");
+    await flushPromises();
+    await wrapper.get('[data-testid="composer-input"]').trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+    });
+    store.setDraft("follow-up B");
+    await flushPromises();
+    await wrapper.get('[data-testid="composer-input"]').trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+    });
+    await flushPromises();
+    expect(store.queuedFollowUps.map((item) => item.text)).toEqual([
+      "follow-up A",
+      "follow-up B",
+    ]);
+
+    const first = store.sendFollowUpNow(store.queuedFollowUps[0]!.id);
+    await flushPromises();
+    expect(wrapper.get('[data-testid="queue-send-now"]').attributes("disabled")).toBeDefined();
+    const secondId = store.queuedFollowUps[0]!.id;
+    const second = await store.sendFollowUpNow(secondId);
+    expect(second).toBe(false);
+    expect(store.queuedFollowUps.map((item) => item.text)).toEqual(["follow-up B"]);
+
+    releaseCancel?.();
+    await first;
+    store.injectEventForTest(fixtureTaskState(1, "idle"));
+    await flushPromises();
+    const sent = commands.filter((command) => command.type === "turn.send");
+    expect(sent).toHaveLength(1);
+    expect(sent[0] && "payload" in sent[0] ? sent[0].payload : null).toMatchObject({
+      message: "follow-up A",
+    });
+    expect(store.queuedFollowUps.map((item) => item.text)).toEqual(["follow-up B"]);
+    wrapper.unmount();
+  });
+
+  it("restores the composer draft when a flushed queued send fails", async () => {
+    const { wrapper } = await mountRunningConversation((command) => {
+      if (command.type === "turn.send") {
+        return { success: "false", error: fakeError({ message: "发送被拒绝" }) };
+      }
+      return undefined;
+    });
+    const store = useConversationStore();
+    store.setDraft("queued body");
+    await flushPromises();
+    await wrapper.get('[data-testid="composer-input"]').trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+    });
+    store.setDraft("composer draft");
+    await flushPromises();
+    store.injectEventForTest(fixtureTaskState(1, "idle"));
+    await flushPromises();
+    expect(store.draft).toBe("composer draft");
+    expect(store.sendError).toContain("发送被拒绝");
     wrapper.unmount();
   });
 });

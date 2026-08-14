@@ -440,7 +440,12 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
           <IconButton label="编辑" data-testid="queue-edit" @click="store.editFollowUp(item.id)">
             <NamedIcon name="pencil" :size="14" />
           </IconButton>
-          <IconButton label="立即发送" data-testid="queue-send-now" @click="void store.sendFollowUpNow(item.id)">
+          <IconButton
+            label="立即发送"
+            data-testid="queue-send-now"
+            :disabled="store.queueInterruptPending"
+            @click="void store.sendFollowUpNow(item.id)"
+          >
             <NamedIcon name="play" :size="14" />
           </IconButton>
           <IconButton label="删除" data-testid="queue-delete" @click="store.deleteFollowUp(item.id)">
