@@ -22,6 +22,11 @@ export const rosePineMoonPalette = {
   rose: "#ea9a97",
   highlightMed: "#44415a",
   highlightHigh: "#56526e",
+  /**
+   * Subtle mixed toward text so secondary copy stays 4.5:1 on overlay cards.
+   * Official muted/subtle stay in the palette; conversation remaps to this.
+   */
+  readableMuted: "#b4b1cb",
 } as const;
 
 export type MochaToken = keyof typeof mochaPalette;
@@ -37,8 +42,8 @@ export const conversationSurfaceTokens: Record<MochaToken, string> = {
   surface0: rosePineMoonPalette.overlay,
   surface1: rosePineMoonPalette.highlightMed,
   surface2: rosePineMoonPalette.highlightHigh,
-  overlay0: rosePineMoonPalette.muted,
-  subtext0: rosePineMoonPalette.subtle,
+  overlay0: rosePineMoonPalette.readableMuted,
+  subtext0: rosePineMoonPalette.readableMuted,
   text: rosePineMoonPalette.text,
   mauve: rosePineMoonPalette.iris,
   blue: rosePineMoonPalette.foam,
@@ -54,7 +59,7 @@ export function conversationThemeStyle(): Record<string, string> {
     style[cssTokenName(token)] = value;
   }
   // Pre-existing conversation CSS references --ctp-overlay1, which Mocha never defined.
-  style["--ctp-overlay1"] = rosePineMoonPalette.muted;
+  style["--ctp-overlay1"] = rosePineMoonPalette.readableMuted;
   return style;
 }
 

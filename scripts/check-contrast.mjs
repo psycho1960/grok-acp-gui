@@ -28,6 +28,7 @@ const rosePineMoonPalette = {
   foam: "#9ccfd8",
   gold: "#f6c177",
   pine: "#3e8fb0",
+  readableMuted: "#b4b1cb",
 };
 
 function hexToRgb(hex) {
@@ -70,9 +71,9 @@ const pairs = [
   [rosePineMoonPalette.text, rosePineMoonPalette.base, 4.5, "conversation body on base"],
   [rosePineMoonPalette.text, rosePineMoonPalette.surface, 4.5, "conversation body on surface"],
   [rosePineMoonPalette.text, rosePineMoonPalette.overlay, 4.5, "conversation body on overlay"],
-  [rosePineMoonPalette.subtle, rosePineMoonPalette.base, 3, "conversation secondary on base"],
-  [rosePineMoonPalette.subtle, rosePineMoonPalette.surface, 3, "conversation secondary on surface"],
-  [rosePineMoonPalette.subtle, rosePineMoonPalette.overlay, 3, "conversation secondary on overlay"],
+  [rosePineMoonPalette.readableMuted, rosePineMoonPalette.base, 4.5, "conversation secondary on base"],
+  [rosePineMoonPalette.readableMuted, rosePineMoonPalette.surface, 4.5, "conversation secondary on surface"],
+  [rosePineMoonPalette.readableMuted, rosePineMoonPalette.overlay, 4.5, "conversation secondary on overlay"],
   [rosePineMoonPalette.iris, rosePineMoonPalette.base, 3, "conversation iris on base"],
   [rosePineMoonPalette.love, rosePineMoonPalette.base, 3, "conversation love on base"],
   [rosePineMoonPalette.foam, rosePineMoonPalette.base, 3, "conversation foam on base"],

@@ -1,23 +1,9 @@
-import { expect, test } from "./fixtures";
+import { expect, test, waitForConversationIdle } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 // GAG-010A / goal: clipboard screenshot paste, in-conversation model &
 // reasoning switching, and the "/" quick-command menu — driven through the
 // real fixture route (#conversation) with the stateful fake bridge.
-
-/** Stop the autoplay fixture turn so the composer becomes usable. */
-async function stopAutoplay(page: Page): Promise<void> {
-  const stop = page.getByTestId("composer-stop");
-  if (await stop.isVisible().catch(() => false)) {
-    await stop.click();
-    await expect(
-      page
-        .getByTestId("conversation-header")
-        .locator(".badge")
-        .filter({ hasText: /^空闲$/ }),
-    ).toBeVisible({ timeout: 10_000 });
-  }
-}
 
 /** Paste a tiny PNG through a real ClipboardEvent with a DataTransfer. */
 async function pasteClipboardImage(page: Page, fileName = "image.png"): Promise<void> {
@@ -50,7 +36,7 @@ async function openConversationFixture(page: Page): Promise<void> {
   await expect(page.getByTestId("conversation-view")).toBeVisible({
     timeout: 15_000,
   });
-  await stopAutoplay(page);
+  await waitForConversationIdle(page);
 }
 
 test("clipboard paste, slash commands, and model switching work together", async ({
