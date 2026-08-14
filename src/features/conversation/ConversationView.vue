@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import ErrorState from "../../shared/ui/ErrorState.vue";
+import IconButton from "../../shared/ui/IconButton.vue";
+import NamedIcon from "../../shared/ui/NamedIcon.vue";
 import Skeleton from "../../shared/ui/Skeleton.vue";
 import type { DesktopBridge, TaskId } from "../../bridge/types";
 import { pickImages } from "../../bridge/image-picker";
@@ -285,6 +287,27 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       />
     </div>
 
+    <div v-if="store.queuedFollowUps.length" class="queue-bar" data-testid="queue-bar">
+      <article
+        v-for="item in store.queuedFollowUps"
+        :key="item.id"
+        class="queue-item"
+        data-testid="queue-item"
+      >
+        <p class="queue-text">{{ item.text || "（图片附件）" }}</p>
+        <div class="queue-actions">
+          <IconButton label="编辑" data-testid="queue-edit" @click="store.editFollowUp(item.id)">
+            <NamedIcon name="pencil" :size="14" />
+          </IconButton>
+          <IconButton label="立即发送" data-testid="queue-send-now" @click="void store.sendFollowUpNow(item.id)">
+            <NamedIcon name="play" :size="14" />
+          </IconButton>
+          <IconButton label="删除" data-testid="queue-delete" @click="store.deleteFollowUp(item.id)">
+            <NamedIcon name="x" :size="14" />
+          </IconButton>
+        </div>
+      </article>
+    </div>
     <Composer
       ref="composerRegion"
       :model-value="store.draft"
@@ -303,6 +326,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       @update:model="(model: string | null) => void store.configureModel(model)"
       @update:reasoning="(reasoning) => void store.configureReasoning(reasoning)"
       @send="onSend"
+      @queue="store.enqueueFollowUp"
       @cancel="onCancel"
       @add-attachments="onAddAttachments"
       @drop-attachments="onDropAttachments"
@@ -315,7 +339,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
 <style scoped>
 .conversation {
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto 1fr auto auto;
   height: 100%;
   min-height: 0;
   color: var(--ctp-text);
@@ -365,6 +389,33 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
 }
 .empty-conversation p {
   margin: 0;
+}
+.queue-bar {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) 0;
+}
+.queue-item {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2);
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface0);
+  border-radius: var(--radius-control);
+}
+.queue-text {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--space-1);
 }
 @media (max-width: 860px) { .content-layout { grid-template-columns: 1fr; grid-template-rows: minmax(220px, 1fr) auto; } }
 </style>

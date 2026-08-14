@@ -32,6 +32,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   send: [];
+  queue: [];
   cancel: [];
   addAttachments: [];
   dropAttachments: [paths: string[]];
@@ -191,6 +192,10 @@ function onKeydown(event: KeyboardEvent): void {
     event.preventDefault();
     if (props.capabilities.canSend && hasContent.value) {
       emit("send");
+      return;
+    }
+    if (!props.capabilities.canSend && props.capabilities.canCancel && hasContent.value) {
+      emit("queue");
     }
   }
 }

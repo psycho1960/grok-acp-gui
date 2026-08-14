@@ -229,6 +229,12 @@ export interface ComposerAttachment {
   previewCapability: string;
 }
 
+export interface QueuedFollowUp {
+  id: string;
+  text: string;
+  attachments: ComposerAttachment[];
+}
+
 export interface ComposerView {
   draft: string;
   capabilities: ComposerCapabilities;
