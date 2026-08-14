@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import Badge from "../../shared/ui/Badge.vue";
 import Button from "../../shared/ui/Button.vue";
 import IconButton from "../../shared/ui/IconButton.vue";
@@ -16,6 +16,13 @@ import {
 } from "./mode-workspace";
 import type { ConversationRunStatus } from "./types";
 
+export interface ConversationTurn {
+  id: string;
+  seq: number;
+  firstLine: string;
+  timestamp: string;
+}
+
 const props = defineProps<{
   title: string;
   status: ConversationRunStatus;
@@ -25,6 +32,7 @@ const props = defineProps<{
   selectedMode?: string | null;
   selectedWorkspaceStrategy?: WorkspaceStrategy | null;
   settingsDisabled?: boolean;
+  turns?: ConversationTurn[];
 }>();
 
 const emit = defineEmits<{
@@ -33,6 +41,7 @@ const emit = defineEmits<{
   resume: [];
   "update:mode": [mode: string | null, strategy: WorkspaceStrategy | null];
   "update:workspaceStrategy": [strategy: WorkspaceStrategy];
+  "jump-turn": [seq: number];
 }>();
 
 function statusIcon(
@@ -123,6 +132,56 @@ const workspaceLabel = computed(() => {
   if (selected === "") return "使用创建时的策略";
   return WORKSPACE_STRATEGY_OPTIONS.find((option) => option.value === selected)?.label ?? selected;
 });
+
+const turnListOpen = ref(false);
+const turnHistoryRoot = ref<HTMLElement | null>(null);
+
+const turns = computed(() => props.turns ?? []);
+
+function formatRelativeTime(iso: string): string {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "";
+  const minutes = Math.floor(Math.max(0, Date.now() - then) / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+function toggleTurnList(): void {
+  if (turns.value.length === 0) return;
+  turnListOpen.value = !turnListOpen.value;
+}
+
+function closeTurnList(): void {
+  turnListOpen.value = false;
+}
+
+function onJumpTurn(seq: number): void {
+  turnListOpen.value = false;
+  emit("jump-turn", seq);
+}
+
+function onDocumentPointerDown(event: PointerEvent): void {
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (turnHistoryRoot.value && !turnHistoryRoot.value.contains(target)) closeTurnList();
+}
+
+function onDocumentKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") closeTurnList();
+}
+
+onMounted(() => {
+  window.addEventListener("pointerdown", onDocumentPointerDown);
+  window.addEventListener("keydown", onDocumentKeydown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("pointerdown", onDocumentPointerDown);
+  window.removeEventListener("keydown", onDocumentKeydown);
+});
 </script>
 
 <template>
@@ -138,6 +197,30 @@ const workspaceLabel = computed(() => {
         :label="statusLabel(status)"
       />
       <Badge v-if="attempt && attempt > 1" tone="neutral">第 {{ attempt }} 次尝试</Badge>
+      <div ref="turnHistoryRoot" class="turn-history" data-testid="turn-history-menu">
+        <IconButton
+          label="历史轮次"
+          data-testid="turn-history"
+          :disabled="turns.length === 0"
+          @click="toggleTurnList"
+        >
+          <NamedIcon name="clock" :size="16" />
+        </IconButton>
+        <ul v-if="turnListOpen" class="turn-list" data-testid="turn-list" role="listbox" aria-label="历史轮次">
+          <li v-for="turn in turns" :key="turn.id">
+            <button
+              type="button"
+              class="turn-row"
+              data-testid="turn-row"
+              :data-seq="turn.seq"
+              @click="onJumpTurn(turn.seq)"
+            >
+              <span class="turn-line">{{ turn.firstLine }}</span>
+              <time class="turn-time" :datetime="turn.timestamp">{{ formatRelativeTime(turn.timestamp) }}</time>
+            </button>
+          </li>
+        </ul>
+      </div>
     </div>
     <div class="right">
       <div class="settings" aria-label="对话设置">
@@ -290,5 +373,56 @@ const workspaceLabel = computed(() => {
   height: 1px;
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
+}
+.turn-history {
+  position: relative;
+}
+.turn-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 4;
+  display: grid;
+  gap: 2px;
+  min-width: 220px;
+  max-width: min(360px, 70vw);
+  max-height: 280px;
+  margin: 0;
+  padding: var(--space-1);
+  overflow: auto;
+  list-style: none;
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-md);
+}
+.turn-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 8px;
+  color: var(--ctp-text);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  text-align: left;
+}
+.turn-row:hover,
+.turn-row:focus-visible {
+  background: var(--overlay-hover);
+}
+.turn-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-time {
+  flex-shrink: 0;
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
 }
 </style>

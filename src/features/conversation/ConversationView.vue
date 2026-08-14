@@ -206,6 +206,26 @@ function onBack(): void {
   applyTaskCenterHash(null, null);
 }
 
+function firstLineOf(text: string): string {
+  return text.split(/\r?\n/).find((line) => line.trim())?.trim() ?? "";
+}
+
+const turns = computed(() =>
+  store.items
+    .filter((item) => item.kind === "user")
+    .map((item) => ({
+      id: item.id,
+      seq: item.seq,
+      firstLine: firstLineOf(item.text) || (item.attachments?.length ? "（图片附件）" : "（空消息）"),
+      timestamp: item.timestamp,
+    })),
+);
+
+function onJumpTurn(seq: number): void {
+  store.setFocusEventSeq(seq);
+  listRef.value?.scrollToSeq(seq);
+}
+
 const TIME_GAP_MS = 5 * 60 * 1000;
 
 function shouldShowRelativeTime(item: { id: string; timestamp: string }): boolean {
@@ -243,7 +263,9 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       :selected-mode="store.selectedMode"
       :selected-workspace-strategy="store.workspaceStrategy"
       :settings-disabled="store.sendPending || store.settingsPending || store.isRunning"
+      :turns="turns"
       @back="onBack"
+      @jump-turn="onJumpTurn"
       @refresh="props.taskId && store.openTask(props.taskId as TaskId)"
       @resume="onResume"
       @update:mode="(mode, strategy) => void store.configureMode(mode, strategy)"
