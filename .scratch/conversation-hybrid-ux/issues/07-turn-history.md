@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — 混合时间线
 
-**Status:** ready-for-agent
+**Status:** implemented
 
 **Parent:** `docs/tasks/GAG-021-conversation-hybrid-ux.md`
 
