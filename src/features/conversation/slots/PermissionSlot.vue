@@ -93,13 +93,14 @@ onBeforeUnmount(() => {
     <p class="risk">{{ slotData.operation.risk }}</p>
     <p v-if="slotData.errorMessage" class="error" role="alert">{{ slotData.errorMessage }}</p>
     <p v-if="slotData.decisionState === 'resolved'" class="resolved" role="status">决定已提交</p>
-    <ul class="options">
+    <ul class="options" data-testid="permission-actions" data-align="end">
       <li v-for="opt in orderedOptions" :key="opt.optionId">
         <Button
           :variant="isReject(opt.kind) ? 'secondary' : 'primary'"
           :state="slotData.decisionState === 'submitting' && slotData.selectedOptionId === opt.optionId ? 'loading' : 'default'"
           :disabled="inactive || !isKnown(opt.kind) || optionBlocked(opt)"
           :data-safe-default="isReject(opt.kind) || undefined"
+          data-label-align="center"
           @click="choose(opt.optionId)"
         >
           {{ opt.name }}
@@ -149,8 +150,10 @@ header {
   margin: 0;
   padding: 0;
   list-style: none;
-  display: grid;
-  gap: var(--space-1);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
 .options li {
   display: flex;

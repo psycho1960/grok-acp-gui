@@ -43,6 +43,7 @@ const emit = defineEmits<{
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const modelMenuOpen = ref(false);
 const hoverDropActive = ref(false);
 const slashOpen = ref(false);
 const slashHelpPinned = ref(false);
@@ -250,6 +251,18 @@ function onReasoningChange(value: string): void {
   }
 }
 
+function toggleModelMenu(): void {
+  if (!props.settingsLocked) modelMenuOpen.value = !modelMenuOpen.value;
+}
+
+function pickModel(value: string): void {
+  onModelChange(value);
+}
+
+function pickReasoning(value: string): void {
+  onReasoningChange(value);
+}
+
 defineExpose({ textarea, focus: () => textarea.value?.focus() });
 </script>
 
@@ -349,33 +362,67 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
             :class="{ locked: settingsLocked }"
             data-testid="composer-model-control"
           >
-            <span class="model-summary">{{ modelSummary }}</span>
-            <Select
-              class="settings-select"
-              :class="{ 'is-visually-hidden': settingsLocked }"
-              data-testid="conversation-model-select"
-              label="模型"
-              :model-value="selectedModel ?? ''"
-              :options="modelOptions"
-              :disabled="settingsLocked"
-              @update:model-value="onModelChange"
-            />
-            <Select
-              class="settings-select"
-              :class="{ 'is-visually-hidden': settingsLocked }"
-              data-testid="conversation-reasoning-select"
-              label="推理强度"
-              :model-value="selectedReasoning ?? 'medium'"
-              :options="reasoningOptions"
-              :disabled="settingsLocked"
-              @update:model-value="onReasoningChange"
-            />
-            <NamedIcon
+            <button
               v-if="!settingsLocked"
-              name="chevronDown"
-              :size="12"
-              data-testid="model-chevron"
-            />
+              type="button"
+              class="model-toggle"
+              data-testid="model-reasoning-toggle"
+              @click="toggleModelMenu"
+            >
+              <span class="model-summary">{{ modelSummary }}</span>
+              <NamedIcon name="chevronDown" :size="12" data-testid="model-chevron" />
+            </button>
+            <span v-else class="model-summary">{{ modelSummary }}</span>
+            <div
+              v-if="modelMenuOpen && !settingsLocked"
+              class="model-menu"
+              data-testid="model-reasoning-menu"
+            >
+              <p class="menu-label">模型</p>
+              <button
+                v-for="option in modelOptions"
+                :key="`model-${option.value}`"
+                type="button"
+                class="menu-item"
+                :class="{ on: (selectedModel ?? '') === option.value }"
+                @click="pickModel(option.value)"
+              >
+                {{ option.label }}
+              </button>
+              <p class="menu-label">推理</p>
+              <button
+                v-for="option in reasoningOptions"
+                :key="`reason-${option.value}`"
+                type="button"
+                class="menu-item"
+                :class="{ on: (selectedReasoning ?? 'medium') === option.value }"
+                @click="pickReasoning(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <div class="is-visually-hidden" aria-hidden="true">
+              <Select
+                class="settings-select"
+                data-testid="conversation-model-select"
+                label="模型"
+                :model-value="selectedModel ?? ''"
+                :options="modelOptions"
+                :disabled="settingsLocked"
+                tabindex="-1"
+                @update:model-value="onModelChange"
+              />
+              <Select
+                class="settings-select"
+                data-testid="conversation-reasoning-select"
+                label="推理强度"
+                :model-value="selectedReasoning ?? 'medium'"
+                :options="reasoningOptions"
+                :disabled="settingsLocked"
+                tabindex="-1"
+                @update:model-value="onReasoningChange"
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -505,6 +552,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
   font-weight: var(--font-weight-semibold);
 }
 .model-control {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
@@ -512,6 +560,48 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
   padding: 0 var(--space-2);
   border: 1px solid var(--ctp-surface1);
   border-radius: 999px;
+}
+.model-toggle {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.model-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  min-width: 180px;
+  padding: var(--space-1);
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-md);
+}
+.menu-label {
+  margin: var(--space-1) var(--space-2) 0;
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
+}
+.menu-item {
+  padding: 6px 8px;
+  color: var(--ctp-text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.menu-item.on,
+.menu-item:hover {
+  background: var(--overlay-hover);
 }
 .model-control.locked {
   color: var(--ctp-subtext0);

@@ -79,6 +79,11 @@ describe("GAG-021 composer dock", () => {
     expect(idle.get('[data-testid="composer-model-control"]').text()).toMatch(/高/);
     expect(idle.find('[data-testid="model-chevron"]').exists()).toBe(true);
     expect(idle.find('[data-testid="conversation-model-select"] select').exists()).toBe(true);
+    expect(idle.find('[data-testid="model-reasoning-menu"]').exists()).toBe(false);
+    await idle.get('[data-testid="model-reasoning-toggle"]').trigger("click");
+    const menu = idle.get('[data-testid="model-reasoning-menu"]');
+    expect(menu.text()).toContain("grok-4.5");
+    expect(menu.text()).toContain("高");
     idle.unmount();
 
     const locked = mount(Composer, {

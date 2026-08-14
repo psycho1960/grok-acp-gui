@@ -2,6 +2,7 @@ import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
+import type { DesktopCommand } from "../../src/bridge/types";
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
 import {
   FIX_SESSION,
@@ -28,10 +29,17 @@ function itemBase(kind: TimelineItem["kind"], seq: number, extra: object): Timel
 
 async function mountConversation(
   snapshot: Partial<SessionTimelineSnapshot> = {},
+  onExecute?: (command: DesktopCommand) => unknown,
 ) {
   const w = mount(ConversationView, {
     props: {
-      bridge: createFakeDesktopBridge(),
+      bridge: createFakeDesktopBridge({
+        onExecute(command) {
+          const extra = onExecute?.(command);
+          if (extra) return extra;
+          return { success: "true", data: { acknowledged: command.type } };
+        },
+      }),
       taskId: FIX_TASK,
       snapshot: fixtureSessionSnapshot(snapshot),
     },
@@ -93,29 +101,93 @@ describe("GAG-021 hybrid timeline", () => {
   });
 
   it("shows sent images as 72 by 72 thumbnails inside the user bubble", async () => {
+    const w = await mountConversation(
+      {
+        cursor: 1,
+        events: [],
+        items: [
+          itemBase("user", 1, {
+            text: "看这张图",
+            attachments: [
+              {
+                artifactId: "art-img-1",
+                displayName: "shot.png",
+                mimeType: "image/png",
+                bytes: 2048,
+                state: "ready",
+                previewCapability: "inline",
+              },
+            ],
+          }),
+        ],
+      },
+      (command) => {
+        if (command.type === "artifact.preview") {
+          return {
+            success: "true",
+            data: {
+              artifact: {
+                artifactId: "art-img-1",
+                displayName: "shot.png",
+                mimeType: "image/png",
+                bytes: 2048,
+                state: "ready",
+                previewCapability: "inline",
+              },
+              url: "asset://preview/art-img-1",
+            },
+          };
+        }
+        return undefined;
+      },
+    );
+    const thumb = w.get('[data-testid="user-thumb"]');
+    expect(thumb.attributes("width")).toBe("72");
+    expect(thumb.attributes("height")).toBe("72");
+    expect(thumb.attributes("src")).toBe("asset://preview/art-img-1");
+    expect(w.get('[data-testid="user-message"]').text()).toContain("看这张图");
+    w.unmount();
+  });
+
+  it("shows a placeholder and explanation when the image cache is missing", async () => {
     const w = await mountConversation({
       cursor: 1,
       events: [],
       items: [
         itemBase("user", 1, {
-          text: "看这张图",
+          text: "缺图",
           attachments: [
             {
-              artifactId: "art-img-1",
-              displayName: "shot.png",
+              artifactId: "art-missing",
+              displayName: "gone.png",
               mimeType: "image/png",
-              bytes: 2048,
-              state: "ready",
+              bytes: 1024,
+              state: "missing",
               previewCapability: "inline",
             },
           ],
         }),
       ],
     });
-    const thumb = w.get('[data-testid="user-thumb"]');
-    expect(thumb.attributes("width")).toBe("72");
-    expect(thumb.attributes("height")).toBe("72");
-    expect(w.get('[data-testid="user-message"]').text()).toContain("看这张图");
+    expect(w.find('[data-testid="user-thumb"]').exists()).toBe(false);
+    const placeholder = w.get('[data-testid="user-thumb-missing"]');
+    expect(placeholder.text()).toMatch(/缓存|找不到|不可用/);
+    expect(w.get('[data-testid="user-message"]').text()).toContain("gone.png");
+    w.unmount();
+  });
+
+  it("keeps a pending user bubble the same shape at reduced opacity with 发送中", async () => {
+    const w = await mountConversation({
+      cursor: 1,
+      events: [],
+      items: [itemBase("user", 1, { text: "正在发出", pending: true })],
+    });
+    const bubble = w.get('[data-testid="user-message"]');
+    expect(bubble.text()).toContain("正在发出");
+    expect(bubble.text()).toContain("发送中");
+    expect(bubble.text()).not.toContain("发送中…");
+    expect(bubble.attributes("data-pending")).toBe("true");
+    expect(bubble.attributes("style") ?? "").toMatch(/opacity/);
     w.unmount();
   });
 

@@ -4,15 +4,33 @@ import ToolCard from "./ToolCard.vue";
 import ArtifactSlot from "./slots/ArtifactSlot.vue";
 import PermissionSlot from "./slots/PermissionSlot.vue";
 import PlanSlot from "./slots/PlanSlot.vue";
+import { ref } from "vue";
 import { formatDuration } from "./tool-normalize";
 import type { TimelineItem } from "./types";
 
-defineProps<{
+const props = defineProps<{
   item: TimelineItem;
   focused?: boolean;
   showTime?: boolean;
   thinkingDone?: boolean;
+  previewUrls?: Record<string, string>;
+  previewMissing?: Record<string, boolean>;
 }>();
+
+const brokenThumbs = ref<Record<string, boolean>>({});
+
+function thumbUrl(artifactId: string): string | undefined {
+  if (brokenThumbs.value[artifactId]) return undefined;
+  return props.previewUrls?.[artifactId];
+}
+
+function thumbMissing(artifactId: string): boolean {
+  return Boolean(brokenThumbs.value[artifactId] || props.previewMissing?.[artifactId]);
+}
+
+function onThumbError(artifactId: string): void {
+  brokenThumbs.value = { ...brokenThumbs.value, [artifactId]: true };
+}
 
 const emit = defineEmits<{
   toggleTool: [id: string];
@@ -69,7 +87,13 @@ function formatRelativeTime(iso: string): string {
     </time>
     <template v-if="item.kind === 'user'">
       <div class="lane user-lane">
-        <div class="bubble user" data-testid="user-message">
+        <div
+          class="bubble user"
+          :class="{ pending: item.pending }"
+          :data-pending="item.pending ? 'true' : undefined"
+          :style="item.pending ? { opacity: 0.55 } : undefined"
+          data-testid="user-message"
+        >
           <p>{{ item.text }}</p>
           <ul v-if="item.attachments?.length" class="message-attachments" aria-label="消息附件">
             <li v-for="attachment in item.attachments" :key="attachment.artifactId">
@@ -81,10 +105,27 @@ function formatRelativeTime(iso: string): string {
                 @click="emit('openArtifact', attachment.artifactId)"
               >
                 <img
+                  v-if="thumbUrl(attachment.artifactId)"
                   data-testid="user-thumb"
                   width="72"
                   height="72"
+                  :src="thumbUrl(attachment.artifactId)"
                   :alt="attachment.displayName"
+                  @error="onThumbError(attachment.artifactId)"
+                />
+                <span
+                  v-else-if="thumbMissing(attachment.artifactId)"
+                  class="user-thumb-missing"
+                  data-testid="user-thumb-missing"
+                >
+                  <span class="missing-name">{{ attachment.displayName }}</span>
+                  <span class="missing-hint">找不到图片缓存</span>
+                </span>
+                <span
+                  v-else
+                  class="user-thumb-missing"
+                  data-testid="user-thumb-loading"
+                  :aria-label="attachment.displayName"
                 />
               </button>
               <template v-else>
@@ -93,7 +134,7 @@ function formatRelativeTime(iso: string): string {
               </template>
             </li>
           </ul>
-          <p v-if="item.pending" class="status-line">发送中…</p>
+          <p v-if="item.pending" class="status-line pending-whisper">发送中</p>
           <p v-if="item.failed" class="status-line error" role="alert">
             {{ item.errorMessage ?? "发送失败" }}
           </p>
@@ -217,6 +258,12 @@ function formatRelativeTime(iso: string): string {
 .bubble.user {
   background: var(--ctp-surface0);
 }
+.bubble.user.pending {
+  opacity: 0.55;
+}
+.pending-whisper {
+  text-align: right;
+}
 .bubble.error {
   border-color: var(--ctp-red);
   color: var(--ctp-red);
@@ -260,13 +307,30 @@ function formatRelativeTime(iso: string): string {
   background: transparent;
   cursor: pointer;
 }
-.user-thumb-btn img {
-  display: block;
+.user-thumb-btn img,
+.user-thumb-missing {
+  display: grid;
   width: 72px;
   height: 72px;
+  place-content: center;
   object-fit: cover;
-  background: var(--ctp-surface0);
+  background: var(--ctp-surface1);
   border-radius: var(--radius-control);
+}
+.user-thumb-missing {
+  gap: 2px;
+  padding: 4px;
+  color: var(--ctp-subtext0);
+  text-align: center;
+}
+.missing-name,
+.missing-hint {
+  display: block;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .attachment-size { color: var(--ctp-subtext0); font-size: var(--font-small); }
 .status-line.error {

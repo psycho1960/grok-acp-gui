@@ -5,6 +5,7 @@ import IconButton from "../../shared/ui/IconButton.vue";
 import NamedIcon from "../../shared/ui/NamedIcon.vue";
 import Skeleton from "../../shared/ui/Skeleton.vue";
 import type { DesktopBridge, TaskId } from "../../bridge/types";
+import { createConversationFacade } from "./conversation-facade";
 import { pickImages } from "../../bridge/image-picker";
 import { subscribeImageDrops } from "../../bridge/image-drop";
 import { imageFileToBlobInput } from "./clipboard-images";
@@ -35,6 +36,57 @@ const artifactPanel = ref<InstanceType<typeof ArtifactPanel> | null>(null);
 const railForced = ref(false);
 const focusedArtifactId = ref<string | null>(null);
 const railTab = ref<"artifacts" | "workspace">("artifacts");
+const previewUrls = ref<Record<string, string>>({});
+const previewMissing = ref<Record<string, boolean>>({});
+const previewRequested = new Set<string>();
+const facade = createConversationFacade(props.bridge);
+
+const imageAttachmentKey = computed(() =>
+  store.items
+    .flatMap((item) => (item.kind === "user" ? (item.attachments ?? []) : []))
+    .filter((attachment) => attachment.mimeType.startsWith("image/"))
+    .map((attachment) => `${attachment.artifactId}:${attachment.state}:${attachment.previewCapability}`)
+    .join("|"),
+);
+
+watch(
+  imageAttachmentKey,
+  async () => {
+    const taskId = (store.taskId ?? props.taskId) as TaskId | null | undefined;
+    if (!taskId) return;
+    for (const item of store.items) {
+      if (item.kind !== "user") continue;
+      for (const attachment of item.attachments ?? []) {
+        if (!attachment.mimeType.startsWith("image/")) continue;
+        if (previewRequested.has(attachment.artifactId)) continue;
+        previewRequested.add(attachment.artifactId);
+        if (
+          attachment.state === "missing" ||
+          attachment.state === "failed" ||
+          attachment.state === "rejected" ||
+          attachment.previewCapability === "none"
+        ) {
+          previewMissing.value = { ...previewMissing.value, [attachment.artifactId]: true };
+          continue;
+        }
+        try {
+          const result = await facade.previewArtifact(taskId, attachment.artifactId);
+          if (result.success === "true" && result.data?.url) {
+            previewUrls.value = {
+              ...previewUrls.value,
+              [attachment.artifactId]: result.data.url,
+            };
+          } else {
+            previewMissing.value = { ...previewMissing.value, [attachment.artifactId]: true };
+          }
+        } catch {
+          previewMissing.value = { ...previewMissing.value, [attachment.artifactId]: true };
+        }
+      }
+    }
+  },
+  { immediate: true },
+);
 
 const railOpen = computed(() => store.railNeeded || railForced.value);
 
@@ -116,6 +168,9 @@ watch(
   async (id) => {
     railForced.value = false;
     focusedArtifactId.value = null;
+    previewUrls.value = {};
+    previewMissing.value = {};
+    previewRequested.clear();
     if (!id) return;
     if (props.snapshot && props.snapshot.taskId === id) {
       store.openFromSnapshot(props.snapshot);
@@ -130,6 +185,9 @@ watch(
   (snap) => {
     railForced.value = false;
     focusedArtifactId.value = null;
+    previewUrls.value = {};
+    previewMissing.value = {};
+    previewRequested.clear();
     if (snap) store.openFromSnapshot(snap);
   },
 );
@@ -315,6 +373,8 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
               :focused="item.id === focusedId"
               :show-time="shouldShowRelativeTime(item)"
               :thinking-done="isThinkingDone(item)"
+              :preview-urls="previewUrls"
+              :preview-missing="previewMissing"
               @toggle-tool="store.toggleTool"
               @toggle-thinking="store.toggleThinking"
               @resolve-permission="store.resolvePermission"
