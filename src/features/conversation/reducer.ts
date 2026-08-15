@@ -767,11 +767,19 @@ export function applySnapshot(
     for (let s = 1; s <= snapshot.cursor; s++) {
       seenKeys.add(eventKey(snapshot.sessionId, s));
     }
+    const itemLastSeq = snapshot.items.reduce(
+      (max, item) => Math.max(max, item.seq),
+      0,
+    );
     next = {
       ...next,
       items: snapshot.items.map((i) =>
         i.kind === "assistant" ? { ...i, streaming: false, frozen: true } : i,
       ),
+      cursor: {
+        lastSeq: Math.max(snapshot.cursor, itemLastSeq),
+        snapshotSeq: snapshot.cursor,
+      },
       seenKeys,
       toolIndex,
       streamingAssistantId: null,
@@ -840,7 +848,7 @@ export function appendUserMessage(
   const item: UserMessageItem = {
     id,
     kind: "user",
-    seq: state.cursor.lastSeq,
+    seq: state.cursor.lastSeq + 1,
     sessionId,
     timestamp,
     eventKey: `user:${id}`,

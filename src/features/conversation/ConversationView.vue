@@ -106,7 +106,10 @@ const sessionKey = computed(
   () => String(store.sessionId ?? store.taskId ?? props.taskId ?? "none"),
 );
 
+const focusedTurnId = ref<string | null>(null);
+
 const focusedId = computed(() => {
+  if (focusedTurnId.value) return focusedTurnId.value;
   if (props.focusSeq == null && store.focusEventSeq == null) return null;
   const seq = props.focusSeq ?? store.focusEventSeq;
   const item = store.items.find((i) => i.seq === seq);
@@ -279,9 +282,11 @@ const turns = computed(() =>
     })),
 );
 
-function onJumpTurn(seq: number): void {
-  store.setFocusEventSeq(seq);
-  listRef.value?.scrollToSeq(seq);
+function onJumpTurn(id: string): void {
+  focusedTurnId.value = id;
+  const item = store.items.find((candidate) => candidate.id === id);
+  if (item) store.setFocusEventSeq(item.seq);
+  listRef.value?.scrollToId(id);
 }
 
 const TIME_GAP_MS = 5 * 60 * 1000;

@@ -228,4 +228,40 @@ describe("GAG-021 queue and interrupt", () => {
     expect(store.sendError).toContain("发送被拒绝");
     wrapper.unmount();
   });
+
+  it("queues Enter while waiting for plan approval instead of sending", async () => {
+    const commands: DesktopCommand[] = [];
+    const wrapper = mount(ConversationView, {
+      props: {
+        bridge: createFakeDesktopBridge({
+          onExecute(command) {
+            commands.push(command);
+            return { success: "true", data: { acknowledged: command.type } };
+          },
+        }),
+        taskId: FIX_TASK,
+        snapshot: fixtureSessionSnapshot({
+          status: "waiting_plan",
+          cursor: 0,
+          events: [],
+          items: [],
+        }),
+      },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    const store = useConversationStore();
+    store.setDraft("follow up during plan approval");
+    await flushPromises();
+    await wrapper.get('[data-testid="composer-input"]').trigger("keydown", {
+      key: "Enter",
+      shiftKey: false,
+    });
+    await flushPromises();
+    expect(commands.some((command) => command.type === "turn.send")).toBe(false);
+    expect(wrapper.get('[data-testid="queue-bar"]').text()).toContain("follow up");
+    expect(wrapper.find('[data-testid="composer-stop"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="composer-send"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
 });

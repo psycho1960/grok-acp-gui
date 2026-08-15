@@ -41,7 +41,7 @@ const emit = defineEmits<{
   resume: [];
   "update:mode": [mode: string | null, strategy: WorkspaceStrategy | null];
   "update:workspaceStrategy": [strategy: WorkspaceStrategy];
-  "jump-turn": [seq: number];
+  "jump-turn": [id: string];
 }>();
 
 function statusIcon(
@@ -158,9 +158,9 @@ function closeTurnList(): void {
   turnListOpen.value = false;
 }
 
-function onJumpTurn(seq: number): void {
+function onJumpTurn(id: string): void {
   turnListOpen.value = false;
-  emit("jump-turn", seq);
+  emit("jump-turn", id);
 }
 
 function onDocumentPointerDown(event: PointerEvent): void {
@@ -213,7 +213,7 @@ onBeforeUnmount(() => {
               class="turn-row"
               data-testid="turn-row"
               :data-seq="turn.seq"
-              @click="onJumpTurn(turn.seq)"
+              @click="onJumpTurn(turn.id)"
             >
               <span class="turn-line">{{ turn.firstLine }}</span>
               <time class="turn-time" :datetime="turn.timestamp">{{ formatRelativeTime(turn.timestamp) }}</time>

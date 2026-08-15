@@ -135,6 +135,32 @@ describe("GAG-021 turn history", () => {
     wrapper.unmount();
   });
 
+  it("jumps to a live second-turn user bubble instead of the previous assistant", async () => {
+    const wrapper = await mountConversation({
+      status: "idle",
+      cursor: 2,
+      events: [],
+      items: [
+        itemBase("user", 1, { text: "第一问" }),
+        itemBase("assistant", 2, { text: "第一答", streaming: false, frozen: true }),
+      ],
+    });
+    const store = useConversationStore();
+    store.setDraft("第二问");
+    await store.sendMessage();
+    await flushPromises();
+    const secondTurn = store.items.filter((item) => item.kind === "user")[1]!;
+    expect(store.items.find((item) => item.seq === secondTurn.seq)?.id).toBe(secondTurn.id);
+
+    await wrapper.get('[data-testid="turn-history"]').trigger("click");
+    const rows = wrapper.findAll('[data-testid="turn-row"]');
+    await rows[1]!.trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[data-item-id="user-1"]').classes()).not.toContain("focused");
+    expect(wrapper.get(`[data-item-id="${secondTurn.id}"]`).classes()).toContain("focused");
+    wrapper.unmount();
+  });
+
   it("keeps an empty conversation's turn list empty or disabled, without fixture copy", async () => {
     const wrapper = await mountConversation({
       title: "对话演示",

@@ -258,18 +258,18 @@ export const useConversationStore = defineStore("conversation", () => {
         bridgeOnline: true,
       };
     }
-    if (st === "waiting_permission") {
+    if (st === "waiting_permission" || st === "waiting_plan") {
       return {
         canSend: false,
         canCancel: true,
-        disabledReason: "等待权限审批",
+        disabledReason: st === "waiting_plan" ? "等待计划审批" : "等待权限审批",
         bridgeOnline: true,
       };
     }
-    // idle | error | waiting_plan — allow compose (plan approval is separate slot)
+    // idle | error — allow compose
     return {
       canSend: true,
-      canCancel: st === "waiting_plan",
+      canCancel: false,
       bridgeOnline: true,
     };
   });
