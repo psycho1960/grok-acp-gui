@@ -75,11 +75,48 @@ const BASE_ENV_ALLOWLIST: &[&str] = &[
 
 /// The arguments passed to `grok` to start ACP stdio mode.
 const GROK_AGENT_ARGS: &[&str] = &["--no-auto-update", "agent", "stdio"];
+const DEFAULT_GROK_OIDC_ISSUER: &str = "https://auth.x.ai";
+const OIDC_DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
 
 fn build_login_args(method: LoginMethod) -> [&'static str; 2] {
     match method {
         LoginMethod::Oauth => ["login", "--oauth"],
         LoginMethod::DeviceAuth => ["login", "--device-auth"],
+    }
+}
+
+fn authentication_discovery_url() -> String {
+    let issuer = std::env::var("GROK_OIDC_ISSUER")
+        .ok()
+        .filter(|value| value.starts_with("https://"))
+        .unwrap_or_else(|| DEFAULT_GROK_OIDC_ISSUER.to_string());
+    format!("{}{}", issuer.trim_end_matches('/'), OIDC_DISCOVERY_PATH)
+}
+
+async fn preflight_authentication_service() -> Result<(), TransportError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(4))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|_| TransportError::AuthenticationServiceUnavailable)?;
+
+    preflight_authentication_service_with(&client, &authentication_discovery_url()).await
+}
+
+async fn preflight_authentication_service_with(
+    client: &reqwest::Client,
+    discovery_url: &str,
+) -> Result<(), TransportError> {
+    let response = client
+        .get(discovery_url)
+        .send()
+        .await
+        .map_err(|_| TransportError::AuthenticationServiceUnavailable)?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(TransportError::AuthenticationServiceUnavailable)
     }
 }
 
@@ -340,6 +377,7 @@ impl AcpTransport for GrokAcpAdapter {
                 message: "login called before successful executable probe".into(),
             }
         })?;
+        preflight_authentication_service().await?;
         let mut command = Command::new(&exe);
         command.args(build_login_args(method));
         command
@@ -546,8 +584,123 @@ fn select_child_env_from(
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProxyEnvironment {
+    http_proxy: String,
+    https_proxy: String,
+    no_proxy: String,
+}
+
+fn apply_system_proxy_fallback(
+    environment: &mut Vec<(String, String)>,
+    system_proxy: Option<ProxyEnvironment>,
+) {
+    let has_explicit_proxy = environment.iter().any(|(key, _)| {
+        ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]
+            .iter()
+            .any(|proxy_key| env_key_eq(key, proxy_key))
+    });
+    if has_explicit_proxy {
+        return;
+    }
+
+    let Some(system_proxy) = system_proxy else {
+        return;
+    };
+    environment.push(("HTTP_PROXY".into(), system_proxy.http_proxy));
+    environment.push(("HTTPS_PROXY".into(), system_proxy.https_proxy));
+    if !environment
+        .iter()
+        .any(|(key, _)| env_key_eq(key, "NO_PROXY"))
+    {
+        environment.push(("NO_PROXY".into(), system_proxy.no_proxy));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_proxy_endpoint(endpoint: &str, scheme: &str) -> Option<String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        return None;
+    }
+    let candidate = if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("{scheme}://{endpoint}")
+    };
+    let parsed = reqwest::Url::parse(&candidate).ok()?;
+    match parsed.scheme() {
+        "http" | "https" | "socks5" | "socks5h" if parsed.host().is_some() => Some(candidate),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_proxy_server(raw: &str) -> Option<ProxyEnvironment> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut all = None;
+    let mut http = None;
+    let mut https = None;
+    let mut socks = None;
+    if raw.contains('=') {
+        for entry in raw.split(';') {
+            let Some((kind, endpoint)) = entry.split_once('=') else {
+                continue;
+            };
+            match kind.trim().to_ascii_lowercase().as_str() {
+                "http" => http = normalize_windows_proxy_endpoint(endpoint, "http"),
+                "https" => https = normalize_windows_proxy_endpoint(endpoint, "http"),
+                "socks" => socks = normalize_windows_proxy_endpoint(endpoint, "socks5"),
+                _ => {}
+            }
+        }
+    } else {
+        all = normalize_windows_proxy_endpoint(raw, "http");
+    }
+
+    let http_proxy = http
+        .clone()
+        .or_else(|| https.clone())
+        .or_else(|| all.clone())
+        .or_else(|| socks.clone())?;
+    let https_proxy = https.or(http).or(all).or(socks)?;
+    Some(ProxyEnvironment {
+        http_proxy,
+        https_proxy,
+        no_proxy: "localhost,127.0.0.1,::1".into(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_proxy_environment() -> Option<ProxyEnvironment> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let settings = current_user
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+        .ok()?;
+    let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
+    if enabled == 0 {
+        return None;
+    }
+    let proxy_server: String = settings.get_value("ProxyServer").ok()?;
+    parse_windows_proxy_server(&proxy_server)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_system_proxy_environment() -> Option<ProxyEnvironment> {
+    None
+}
+
 fn filter_env(selected_model_env_key: Option<&str>) -> Vec<(String, String)> {
-    select_child_env_from(std::env::vars(), selected_model_env_key)
+    let mut environment = select_child_env_from(std::env::vars(), selected_model_env_key);
+    apply_system_proxy_fallback(&mut environment, windows_system_proxy_environment());
+    environment
 }
 
 fn valid_env_key(key: &str) -> bool {
@@ -710,6 +863,89 @@ mod tests {
             build_login_args(LoginMethod::DeviceAuth),
             ["login", "--device-auth"]
         );
+    }
+
+    #[test]
+    fn windows_system_proxy_is_exported_when_parent_has_no_proxy_environment() {
+        let mut filtered = select_child_env_from(
+            [("PATH".to_string(), "C:\\Windows\\System32".to_string())],
+            None,
+        );
+
+        apply_system_proxy_fallback(
+            &mut filtered,
+            Some(ProxyEnvironment {
+                http_proxy: "http://127.0.0.1:7897".into(),
+                https_proxy: "http://127.0.0.1:7897".into(),
+                no_proxy: "localhost,127.0.0.1,::1".into(),
+            }),
+        );
+
+        assert!(filtered.contains(&("HTTP_PROXY".into(), "http://127.0.0.1:7897".into())));
+        assert!(filtered.contains(&("HTTPS_PROXY".into(), "http://127.0.0.1:7897".into())));
+        assert!(filtered.contains(&("NO_PROXY".into(), "localhost,127.0.0.1,::1".into())));
+    }
+
+    #[test]
+    fn explicit_proxy_environment_takes_precedence_over_windows_system_proxy() {
+        let mut filtered = select_child_env_from(parent_env_fixture(), None);
+
+        apply_system_proxy_fallback(
+            &mut filtered,
+            Some(ProxyEnvironment {
+                http_proxy: "http://system-proxy.invalid".into(),
+                https_proxy: "http://system-proxy.invalid".into(),
+                no_proxy: "localhost".into(),
+            }),
+        );
+
+        assert!(filtered.contains(&("HTTPS_PROXY".into(), "http://proxy.invalid".into())));
+        assert!(!filtered
+            .iter()
+            .any(|(_, value)| value.contains("system-proxy")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_proxy_server_parser_supports_single_and_per_protocol_values() {
+        let single = parse_windows_proxy_server("127.0.0.1:7897").expect("single proxy");
+        assert_eq!(single.http_proxy, "http://127.0.0.1:7897");
+        assert_eq!(single.https_proxy, "http://127.0.0.1:7897");
+
+        let split = parse_windows_proxy_server(
+            "http=proxy.example.test:8080;https=secure.example.test:8443",
+        )
+        .expect("per-protocol proxy");
+        assert_eq!(split.http_proxy, "http://proxy.example.test:8080");
+        assert_eq!(split.https_proxy, "http://secure.example.test:8443");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_proxy_server_parser_rejects_empty_or_unsupported_values() {
+        assert!(parse_windows_proxy_server("").is_none());
+        assert!(parse_windows_proxy_server("file=C:\\proxy.txt").is_none());
+    }
+
+    #[tokio::test]
+    async fn login_preflight_rejects_an_unreachable_authentication_service() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .expect("test client");
+
+        let error = preflight_authentication_service_with(
+            &client,
+            "http://127.0.0.1:9/.well-known/openid-configuration",
+        )
+        .await
+        .expect_err("an unreachable discovery endpoint must fail before login is spawned");
+
+        assert!(matches!(
+            error,
+            TransportError::AuthenticationServiceUnavailable
+        ));
     }
 
     #[test]
