@@ -98,6 +98,7 @@ function syncSlashMenu(): void {
   if (!el) return;
   const state = slashMenuState(el.value, el.selectionStart);
   slashOpen.value = state.open;
+  if (state.open) modelMenuOpen.value = false;
   slashQuery.value = state.query;
   slashLineStart.value = state.lineStart;
   if (slashIndex.value >= filteredCommands.value.length) {
@@ -114,6 +115,7 @@ function closeSlashMenu(): void {
 }
 
 function openSlashHelp(): void {
+  modelMenuOpen.value = false;
   slashHelpPinned.value = true;
   slashOpen.value = true;
   slashQuery.value = "";
@@ -252,7 +254,10 @@ function onReasoningChange(value: string): void {
 }
 
 function toggleModelMenu(): void {
-  if (!props.settingsLocked) modelMenuOpen.value = !modelMenuOpen.value;
+  if (props.settingsLocked) return;
+  const opening = !modelMenuOpen.value;
+  modelMenuOpen.value = opening;
+  if (opening) closeSlashMenu();
 }
 
 function pickModel(value: string): void {

@@ -95,6 +95,8 @@ export const useConversationStore = defineStore("conversation", () => {
   const modes = ref<ModeInfo[]>([]);
   /** Slash commands discovered from ACP `available_commands`. */
   const slashCommands = ref<SlashCommandInfo[]>([]);
+  /** Runtime capability baseline used when a session has not published an override. */
+  const bootstrapSlashCommands = ref<SlashCommandInfo[]>([]);
   /** Per-task session mode selection persisted via session.configure. */
   const selectedMode = ref<string | null>(null);
   /** Per-task workspace strategy persisted via session.configure. */
@@ -328,6 +330,8 @@ export const useConversationStore = defineStore("conversation", () => {
 
   async function attach(bridge: DesktopBridge): Promise<void> {
     disposed = false;
+    bootstrapSlashCommands.value = [];
+    slashCommands.value = [];
     facade = createConversationFacade(bridge);
     if (unsubscribe) {
       unsubscribe();
@@ -353,9 +357,10 @@ export const useConversationStore = defineStore("conversation", () => {
         modes.value = Array.isArray(snapshot.capabilities?.modes)
           ? snapshot.capabilities.modes
           : [];
-        slashCommands.value = Array.isArray(snapshot.capabilities?.slashCommands)
+        bootstrapSlashCommands.value = Array.isArray(snapshot.capabilities?.slashCommands)
           ? snapshot.capabilities.slashCommands
           : [];
+        slashCommands.value = bootstrapSlashCommands.value;
         if (snapshot.capabilities?.modelState?.currentModelId) {
           selectedModel.value = snapshot.capabilities.modelState.currentModelId;
         }
@@ -403,6 +408,19 @@ export const useConversationStore = defineStore("conversation", () => {
     loadState.value = "loading";
     const next = applySnapshot(createEmptyConversationState(snapshot.taskId), snapshot);
     commit(next);
+    const latestCommands = [...snapshot.events]
+      .reverse()
+      .find(
+        (event): event is Extract<
+          TypedDesktopEvent,
+          { type: "session.commands.updated" }
+        > =>
+          event.type === "session.commands.updated" &&
+          event.sessionId === snapshot.sessionId,
+      );
+    slashCommands.value = Array.isArray(latestCommands?.payload.commands)
+      ? latestCommands.payload.commands
+      : bootstrapSlashCommands.value;
     draft.value = loadDraft(snapshot.taskId);
     attachments.value = [];
     queuedFollowUps.value = [];
