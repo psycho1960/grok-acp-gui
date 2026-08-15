@@ -14,7 +14,7 @@
 //! - Event sequence numbering per session
 
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::{timeout, Duration};
@@ -572,6 +572,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                     .await?;
 
                 let reader_acp_session_id = handshake_info.acp_session_id.clone();
+                let mut handshake_messages = handshake_info.pending_messages;
                 let available_mode_ids = handshake_info
                     .modes
                     .iter()
@@ -618,11 +619,14 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                 }
                 let reader_task = tokio::spawn(async move {
                     loop {
-                        let msg = tokio::select! {
-                            _ = &mut reader_shutdown_rx => break,
-                            message = inbound.recv() => match message {
-                                Some(message) => message,
-                                None => break,
+                        let msg = match handshake_messages.pop_front() {
+                            Some(message) => message,
+                            None => tokio::select! {
+                                _ = &mut reader_shutdown_rx => break,
+                                message = inbound.recv() => match message {
+                                    Some(message) => message,
+                                    None => break,
+                                },
                             },
                         };
                         if let AcpMessage::Response(response) = &msg {
@@ -1357,6 +1361,7 @@ struct HandshakeInfo {
     agent_version: String,
     acp_session_id: String,
     modes: Vec<ModeDescriptor>,
+    pending_messages: VecDeque<AcpMessage>,
 }
 
 /// Perform the ACP handshake: send `initialize` and wait for the response.
@@ -1432,6 +1437,7 @@ async fn perform_handshake(
     cwd: &std::path::Path,
     selected_model_env_key: Option<&str>,
 ) -> Result<HandshakeInfo, String> {
+    let mut pending_messages = VecDeque::new();
     let init_params = serde_json::json!({
         "protocolVersion": 1,
         "clientCapabilities": {
@@ -1509,6 +1515,7 @@ async fn perform_handshake(
                         request_response(
                             outbound,
                             inbound,
+                            &mut pending_messages,
                             2,
                             "authenticate",
                             serde_json::json!({
@@ -1521,6 +1528,7 @@ async fn perform_handshake(
                         let session = request_response(
                             outbound,
                             inbound,
+                            &mut pending_messages,
                             3,
                             "session/new",
                             serde_json::json!({
@@ -1561,16 +1569,18 @@ async fn perform_handshake(
                             agent_version,
                             acp_session_id,
                             modes,
+                            pending_messages,
                         });
                     }
                     AcpMessage::Unknown(_) => {
                         // Non-JSON line (e.g. blank line) — skip and continue.
                         continue;
                     }
-                    AcpMessage::Request(_) | AcpMessage::Notification(_) => {
+                    message @ (AcpMessage::Request(_) | AcpMessage::Notification(_)) => {
                         // The agent sent a request/notification before the
-                        // initialize response.  This is unusual but not
-                        // necessarily fatal — continue waiting.
+                        // initialize response. Preserve it for the reader so
+                        // early capability updates are not lost.
+                        pending_messages.push_back(message);
                         continue;
                     }
                 }
@@ -1589,6 +1599,7 @@ async fn perform_handshake(
 async fn request_response(
     outbound: &mpsc::Sender<String>,
     inbound: &mut mpsc::Receiver<AcpMessage>,
+    pending_messages: &mut VecDeque<AcpMessage>,
     id: u64,
     method: &str,
     params: serde_json::Value,
@@ -1614,10 +1625,76 @@ async fn request_response(
                 }
                 return Ok(response.result.unwrap_or(serde_json::Value::Null));
             }
-            Ok(Some(_)) => continue,
+            Ok(Some(message)) => {
+                pending_messages.push_back(message);
+                continue;
+            }
             Ok(None) => return Err(format!("process closed stdout while waiting for {method}")),
             Err(_) => return Err(format!("{method} timed out")),
         }
+    }
+}
+
+#[cfg(test)]
+mod handshake_message_tests {
+    use super::*;
+    use crate::adapters::grok_acp::codec::{AcpNotification, AcpResponse};
+
+    #[tokio::test]
+    async fn request_response_preserves_notification_received_before_response() {
+        let (outbound, mut outbound_rx) = mpsc::channel::<String>(1);
+        let (inbound_tx, mut inbound) = mpsc::channel::<AcpMessage>(2);
+        let producer = tokio::spawn(async move {
+            let request = outbound_rx.recv().await.expect("request frame");
+            assert!(request.contains("session/new"));
+            inbound_tx
+                .send(AcpMessage::Notification(AcpNotification {
+                    jsonrpc: "2.0".into(),
+                    method: "session/update".into(),
+                    params: serde_json::json!({
+                        "sessionId": "acp-session",
+                        "update": {
+                            "sessionUpdate": "available_commands_update",
+                            "availableCommands": [{
+                                "name": "session",
+                                "description": "Manage the current session"
+                            }]
+                        }
+                    }),
+                }))
+                .await
+                .expect("notification");
+            inbound_tx
+                .send(AcpMessage::Response(AcpResponse {
+                    jsonrpc: "2.0".into(),
+                    id: serde_json::json!(3),
+                    result: Some(serde_json::json!({"sessionId": "acp-session"})),
+                    error: None,
+                }))
+                .await
+                .expect("response");
+        });
+        let mut pending_messages = VecDeque::new();
+
+        let result = request_response(
+            &outbound,
+            &mut inbound,
+            &mut pending_messages,
+            3,
+            "session/new",
+            serde_json::json!({"cwd": "C:/workspace", "mcpServers": []}),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("session response");
+        producer.await.expect("producer");
+
+        assert_eq!(result["sessionId"], "acp-session");
+        assert!(matches!(
+            pending_messages.front(),
+            Some(AcpMessage::Notification(notification))
+                if notification.method == "session/update"
+        ));
     }
 }
 

@@ -149,18 +149,9 @@ function handleSessionNew(id, params) {
     return;
   }
   activeSessionId = `fake-session-${++requestCounter}`;
-  sendResponse(id, {
-    sessionId: activeSessionId,
-    modes: {
-      currentModeId: activeMode,
-      availableModes: [
-        { id: 'default', name: 'Default' },
-        { id: 'plan', name: 'Plan' },
-        { id: 'code', name: 'Code' },
-        { id: 'ask', name: 'Ask' },
-      ],
-    },
-  });
+  // Grok Build may advertise commands before acknowledging session/new.
+  // Keep this scenario interleaved so the Runtime must preserve handshake
+  // notifications until its normal reader loop is running.
   if (SCENARIO === 'available-commands') {
     sendNotification('session/update', {
       sessionId: activeSessionId,
@@ -173,6 +164,18 @@ function handleSessionNew(id, params) {
       },
     });
   }
+  sendResponse(id, {
+    sessionId: activeSessionId,
+    modes: {
+      currentModeId: activeMode,
+      availableModes: [
+        { id: 'default', name: 'Default' },
+        { id: 'plan', name: 'Plan' },
+        { id: 'code', name: 'Code' },
+        { id: 'ask', name: 'Ask' },
+      ],
+    },
+  });
 }
 
 function handleSetMode(id, params) {
