@@ -70,8 +70,66 @@ describe("UI-ONBOARD-001", () => {
     const wrapper = mount(OnboardingView, { props: { bridge: runtimeBridge } });
     await flushPromises();
 
+    const grokCheck = wrapper.get('[data-check-id="grok"]');
+    await grokCheck.get('[data-testid="runtime-check-resolve-grok"]').trigger("click");
+    const remediation = wrapper.get('[data-remediation-id="grok"]');
+    expect(remediation.text()).toContain("安装 Grok CLI");
     expect(wrapper.get('[data-testid="grok-install-link"]').attributes("href")).toContain("docs.x.ai");
     await wrapper.get('[data-testid="runtime-refresh"]').trigger("click");
+    expect(runtimeBridge.execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders contextual remediation actions inside failed check rows", async () => {
+    const handshakeFailure = readiness({
+      authenticated: undefined,
+      ready: false,
+      checks: readiness().checks.map((check) => {
+        if (check.id === "authentication") {
+          return {
+            ...check,
+            status: "warning",
+            detail: "ACP 握手失败，无法确认认证状态。",
+            action: "先重试；如仍失败，请复制脱敏诊断。",
+          };
+        }
+        if (check.id === "acp") {
+          return {
+            ...check,
+            status: "error",
+            detail: "ACP 握手或会话初始化失败。",
+            code: "ACP_HANDSHAKE_FAILED",
+            action: "重新检测；如仍失败，请更新 Grok 并复制脱敏诊断。",
+          };
+        }
+        return check;
+      }),
+      actionableError: {
+        code: "ACP_HANDSHAKE_FAILED",
+        message: "ACP 握手或会话初始化失败。",
+        action: "重新检测。",
+        diagnostic: "[ACP_HANDSHAKE_FAILED] ACP 握手或会话初始化失败。",
+      },
+    });
+    const runtimeBridge = bridge(() => ({ success: "true", data: handshakeFailure }));
+    const wrapper = mount(OnboardingView, { props: { bridge: runtimeBridge } });
+    await flushPromises();
+
+    const authCheck = wrapper.get('[data-check-id="authentication"]');
+    const acpCheck = wrapper.get('[data-check-id="acp"]');
+    expect(authCheck.get('[data-testid="runtime-check-resolve-authentication"]').text()).toBe("立即修复");
+    expect(acpCheck.get('[data-testid="runtime-check-resolve-acp"]').text()).toBe("立即修复");
+
+    await authCheck.get('[data-testid="runtime-check-resolve-authentication"]').trigger("click");
+    expect(wrapper.get('[data-testid="runtime-login"]').text()).toBe("重新登录并修复认证");
+    expect(wrapper.text()).not.toContain("复制诊断");
+    await wrapper.get('[aria-label="关闭对话框"]').trigger("click");
+
+    await acpCheck.get('[data-testid="runtime-check-resolve-acp"]').trigger("click");
+    expect(wrapper.get('[data-remediation-id="acp"]').text()).toContain("ACP_HANDSHAKE_FAILED");
+    expect(wrapper.get('[data-testid="grok-help-link"]').attributes("href")).toContain("docs.x.ai");
+    expect(wrapper.get('[data-testid="runtime-remediation-retry-acp"]').text()).toBe("重启 ACP 并复检");
+    await wrapper.get('[data-testid="runtime-remediation-retry-acp"]').trigger("click");
+    await flushPromises();
     expect(runtimeBridge.execute).toHaveBeenCalledTimes(2);
   });
 
@@ -105,6 +163,7 @@ describe("UI-ONBOARD-001", () => {
     });
     const wrapper = mount(OnboardingView, { props: { bridge: runtimeBridge } });
     await flushPromises();
+    await wrapper.get('[data-testid="runtime-check-resolve-authentication"]').trigger("click");
     await wrapper.get('[data-testid="runtime-login"]').trigger("click");
     await flushPromises();
     expect(wrapper.get('[data-testid="runtime-login-cancel"]').exists()).toBe(true);

@@ -291,7 +291,7 @@ fn login_result(state: LoginProcessState) -> RuntimeLoginResult {
         LoginProcessState::Running => RuntimeLoginResult {
             status: "running".into(),
             exit_code: None,
-            message: Some("Grok login is in progress in your browser.".into()),
+            message: Some("Grok 登录进程已启动，正在等待官方登录完成。".into()),
             retryable: false,
         },
         LoginProcessState::Succeeded => RuntimeLoginResult {
@@ -332,9 +332,11 @@ fn safe_login_error(error: &TransportError) -> String {
         TransportError::NotAuthenticated => {
             "Grok is not authenticated. Start the official login flow again.".into()
         }
+        TransportError::AuthenticationServiceUnavailable => {
+            "无法连接 Grok 认证服务（默认域名 auth.x.ai）。请检查网络或代理是否允许访问该域名，然后点击“立即修复”重试。".into()
+        }
         TransportError::SpawnFailed { .. } | TransportError::ProbeError { .. } => {
-            "Unable to start the official Grok login flow. Retry or copy the redacted diagnostic."
-                .into()
+            "无法启动 Grok 官方登录流程，请稍后重试。".into()
         }
     }
 }
@@ -398,7 +400,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                 RuntimeLoginResult {
                     status: "running".into(),
                     exit_code: None,
-                    message: Some("Grok login is in progress in your browser.".into()),
+                    message: Some("Grok 登录进程已启动，正在等待官方登录完成。".into()),
                     retryable: false,
                 }
             }
@@ -1635,5 +1637,15 @@ mod login_error_tests {
         assert!(!not_found.contains("private"));
         assert!(!spawn_failed.contains("XAI_API_KEY"));
         assert!(!spawn_failed.contains("synthetic-secret"));
+    }
+
+    #[test]
+    fn authentication_service_error_is_actionable_without_claiming_browser_opened() {
+        let message = safe_login_error(&TransportError::AuthenticationServiceUnavailable);
+
+        assert!(message.contains("auth.x.ai"));
+        assert!(message.contains("网络或代理"));
+        assert!(!message.contains("浏览器"));
+        assert!(!message.contains("复制"));
     }
 }

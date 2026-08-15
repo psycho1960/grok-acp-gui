@@ -141,6 +141,9 @@ pub enum TransportError {
     SpawnFailed { message: String },
     /// Not authenticated.
     NotAuthenticated,
+    /// The official OIDC discovery service could not be reached. Login must
+    /// not be reported as browser-ready until this precondition succeeds.
+    AuthenticationServiceUnavailable,
     /// Generic probe error.
     ProbeError { message: String },
 }
@@ -158,6 +161,9 @@ impl std::fmt::Display for TransportError {
                 write!(f, "spawn failed: {}", message)
             }
             TransportError::NotAuthenticated => write!(f, "not authenticated"),
+            TransportError::AuthenticationServiceUnavailable => {
+                write!(f, "authentication service unavailable")
+            }
             TransportError::ProbeError { message } => write!(f, "probe error: {}", message),
         }
     }
