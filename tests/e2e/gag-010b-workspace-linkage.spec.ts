@@ -1,22 +1,8 @@
-import { expect, test } from "./fixtures";
+import { expect, test, waitForConversationIdle } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 // GAG-010B / goal: mode ↔ workspace strategy linkage driven through the real
 // fixture route (#conversation).
-
-/** Stop the autoplay fixture turn so the composer becomes usable. */
-async function stopAutoplay(page: Page): Promise<void> {
-  const stop = page.getByTestId("composer-stop");
-  if (await stop.isVisible().catch(() => false)) {
-    await stop.click();
-    await expect(
-      page
-        .getByTestId("conversation-header")
-        .locator(".badge")
-        .filter({ hasText: /^空闲$/ }),
-    ).toBeVisible({ timeout: 10_000 });
-  }
-}
 
 async function openConversationFixture(page: Page): Promise<void> {
   await page.setViewportSize({ width: 1600, height: 900 });
@@ -24,7 +10,7 @@ async function openConversationFixture(page: Page): Promise<void> {
   await expect(page.getByTestId("conversation-view")).toBeVisible({
     timeout: 15_000,
   });
-  await stopAutoplay(page);
+  await waitForConversationIdle(page);
 }
 
 test("mode switch links the workspace strategy, echoes it, and survives reopen", async ({

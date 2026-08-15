@@ -33,7 +33,7 @@ onMounted(() => {
       <li v-for="step in slotData.steps" :key="step">{{ step }}</li>
     </ol>
     <p v-if="slotData.errorMessage" class="error" role="alert">{{ slotData.errorMessage }}</p>
-    <div class="actions">
+    <div class="actions" data-testid="plan-actions" data-align="end">
       <Button
         v-for="option in slotData.options"
         :key="option.optionId"
@@ -41,6 +41,7 @@ onMounted(() => {
         :state="slotData.decisionState === 'submitting' && slotData.selectedOptionId === option.optionId ? 'loading' : 'default'"
         :disabled="inactive || !isKnown(option.kind)"
         :data-safe-default="isSafe(option.kind) || undefined"
+        data-label-align="center"
         @click="emit('resolve', option.optionId)"
       >
         {{ option.name }}
@@ -79,6 +80,6 @@ header {
   font-size: var(--font-small);
 }
 .steps { margin: 0; padding-left: var(--space-5); display: grid; gap: var(--space-1); }
-.actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 .error { margin: 0; color: var(--ctp-red); }
 </style>

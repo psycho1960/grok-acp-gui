@@ -1,16 +1,36 @@
 <script setup lang="ts">
-import Badge from "../../shared/ui/Badge.vue";
 import SafeMarkdown from "./SafeMarkdown.vue";
 import ToolCard from "./ToolCard.vue";
 import ArtifactSlot from "./slots/ArtifactSlot.vue";
 import PermissionSlot from "./slots/PermissionSlot.vue";
 import PlanSlot from "./slots/PlanSlot.vue";
+import { ref } from "vue";
+import { formatDuration } from "./tool-normalize";
 import type { TimelineItem } from "./types";
 
-defineProps<{
+const props = defineProps<{
   item: TimelineItem;
   focused?: boolean;
+  showTime?: boolean;
+  thinkingDone?: boolean;
+  previewUrls?: Record<string, string>;
+  previewMissing?: Record<string, boolean>;
 }>();
+
+const brokenThumbs = ref<Record<string, boolean>>({});
+
+function thumbUrl(artifactId: string): string | undefined {
+  if (brokenThumbs.value[artifactId]) return undefined;
+  return props.previewUrls?.[artifactId];
+}
+
+function thumbMissing(artifactId: string): boolean {
+  return Boolean(brokenThumbs.value[artifactId] || props.previewMissing?.[artifactId]);
+}
+
+function onThumbError(artifactId: string): void {
+  brokenThumbs.value = { ...brokenThumbs.value, [artifactId]: true };
+}
 
 const emit = defineEmits<{
   toggleTool: [id: string];
@@ -22,33 +42,26 @@ const emit = defineEmits<{
 
 function formatTime(iso: string): string {
   try {
-    return new Date(iso).toLocaleTimeString(undefined, {
+    return new Date(iso).toLocaleString(undefined, {
+      month: "numeric",
+      day: "numeric",
       hour: "2-digit",
       minute: "2-digit",
-      second: "2-digit",
     });
   } catch {
     return "";
   }
 }
 
-/** 中文类型标签：时间线徽章必须是中文（全中文界面要求）。 */
-const KIND_LABELS: Record<string, string> = {
-  user: "用户",
-  assistant: "助手",
-  thinking: "思考",
-  tool: "工具",
-  activity: "活动",
-  error: "错误",
-  system: "系统",
-  permission: "权限",
-  plan: "计划",
-  artifact: "制品",
-  unknown: "未知",
-};
-
-function kindLabel(kind: string): string {
-  return KIND_LABELS[kind] ?? kind;
+function formatRelativeTime(iso: string): string {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "";
+  const minutes = Math.floor(Math.max(0, Date.now() - then) / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
 }
 </script>
 
@@ -57,48 +70,80 @@ function kindLabel(kind: string): string {
     class="timeline-item"
     :class="[`kind-${item.kind}`, { focused }]"
     :data-testid="`timeline-item-${item.kind}`"
+    :data-align="item.kind === 'user' ? 'end' : 'start'"
     :data-item-id="item.id"
     :data-seq="item.seq"
     :data-event-key="item.eventKey"
     role="listitem"
   >
-    <div class="meta-row">
-      <Badge
-        :tone="
-          item.kind === 'user'
-            ? 'info'
-            : item.kind === 'error'
-              ? 'danger'
-              : item.kind === 'assistant'
-                ? 'neutral'
-                : 'neutral'
-        "
-      >
-        {{ kindLabel(item.kind) }}
-      </Badge>
-      <time :datetime="item.timestamp">{{ formatTime(item.timestamp) }}</time>
-      <span class="seq">#{{ item.seq }}</span>
-    </div>
-
+    <time
+      v-if="showTime"
+      class="relative-time"
+      data-testid="relative-time"
+      :datetime="item.timestamp"
+      :title="formatTime(item.timestamp)"
+    >
+      {{ formatRelativeTime(item.timestamp) }}
+    </time>
     <template v-if="item.kind === 'user'">
-      <div class="bubble user" data-testid="user-message">
-        <p>{{ item.text }}</p>
-        <ul v-if="item.attachments?.length" class="message-attachments" aria-label="消息附件">
-          <li v-for="attachment in item.attachments" :key="attachment.artifactId">
-            <span aria-hidden="true">▧</span>
-            <span>{{ attachment.displayName }}</span>
-            <span class="attachment-size">{{ Math.ceil(attachment.bytes / 1024) }} KiB</span>
-          </li>
-        </ul>
-        <p v-if="item.pending" class="status-line">发送中…</p>
-        <p v-if="item.failed" class="status-line error" role="alert">
-          {{ item.errorMessage ?? "发送失败" }}
-        </p>
+      <div class="lane user-lane">
+        <div
+          class="bubble user"
+          :class="{ pending: item.pending }"
+          :data-pending="item.pending ? 'true' : undefined"
+          :style="item.pending ? { opacity: 0.55 } : undefined"
+          data-testid="user-message"
+        >
+          <p>{{ item.text }}</p>
+          <ul v-if="item.attachments?.length" class="message-attachments" aria-label="消息附件">
+            <li v-for="attachment in item.attachments" :key="attachment.artifactId">
+              <button
+                v-if="attachment.mimeType.startsWith('image/')"
+                type="button"
+                class="user-thumb-btn"
+                :aria-label="attachment.displayName"
+                @click="emit('openArtifact', attachment.artifactId)"
+              >
+                <img
+                  v-if="thumbUrl(attachment.artifactId)"
+                  data-testid="user-thumb"
+                  width="72"
+                  height="72"
+                  :src="thumbUrl(attachment.artifactId)"
+                  :alt="attachment.displayName"
+                  @error="onThumbError(attachment.artifactId)"
+                />
+                <span
+                  v-else-if="thumbMissing(attachment.artifactId)"
+                  class="user-thumb-missing"
+                  data-testid="user-thumb-missing"
+                >
+                  <span class="missing-name">{{ attachment.displayName }}</span>
+                  <span class="missing-hint">找不到图片缓存</span>
+                </span>
+                <span
+                  v-else
+                  class="user-thumb-missing"
+                  data-testid="user-thumb-loading"
+                  :aria-label="attachment.displayName"
+                />
+              </button>
+              <template v-else>
+                <span>{{ attachment.displayName }}</span>
+                <span class="attachment-size">{{ Math.ceil(attachment.bytes / 1024) }} KiB</span>
+              </template>
+            </li>
+          </ul>
+          <p v-if="item.pending" class="status-line pending-whisper">发送中</p>
+          <p v-if="item.failed" class="status-line error" role="alert">
+            {{ item.errorMessage ?? "发送失败" }}
+          </p>
+        </div>
       </div>
     </template>
 
     <template v-else-if="item.kind === 'assistant'">
-      <div class="bubble assistant" data-testid="assistant-message">
+      <div class="prose assistant" data-chrome="prose" data-testid="assistant-message">
         <SafeMarkdown :source="item.text" :streaming="item.streaming" />
       </div>
     </template>
@@ -111,10 +156,10 @@ function kindLabel(kind: string): string {
         :aria-expanded="item.expanded"
         @click="emit('toggleThinking', item.id)"
       >
-        Thinking…
-        <span v-if="item.durationMs != null" class="dur">{{ item.durationMs }}ms</span>
+        {{ thinkingDone ? "已思考" : "思考中" }}
+        <span v-if="item.durationMs != null" class="dur">{{ formatDuration(item.durationMs) }}</span>
       </button>
-      <p v-if="item.expanded" class="thinking-body">{{ item.summary }}</p>
+      <p v-if="item.expanded && item.summary" class="thinking-body" data-testid="thinking-body">{{ item.summary }}</p>
     </template>
 
     <template v-else-if="item.kind === 'tool'">
@@ -144,9 +189,13 @@ function kindLabel(kind: string): string {
       </div>
     </template>
 
+    <template v-else-if="item.kind === 'activity' && item.activityKind === 'changes'">
+      <p class="change-whisper" data-testid="change-whisper">{{ item.detail }}</p>
+    </template>
+
     <template v-else-if="item.kind === 'activity' || item.kind === 'system'">
       <p class="system-line" data-testid="system-item">
-        <template v-if="item.kind === 'activity'">{{ item.activityKind }}: {{ item.detail }}</template>
+        <template v-if="item.kind === 'activity'">{{ item.detail }}</template>
         <template v-else>{{ item.message }}</template>
       </p>
     </template>
@@ -165,6 +214,25 @@ function kindLabel(kind: string): string {
 .timeline-item {
   padding: var(--space-2) var(--space-3);
   border-left: 2px solid transparent;
+}
+.relative-time {
+  display: block;
+  margin-bottom: var(--space-1);
+  color: var(--ctp-overlay0);
+  font-size: var(--font-small);
+}
+.timeline-item[data-align="end"] .user-lane {
+  display: flex;
+  justify-content: flex-end;
+}
+.user-lane .bubble {
+  max-width: min(72ch, 86%);
+}
+.prose.assistant {
+  max-width: 72ch;
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 .timeline-item.focused {
   border-left-color: var(--ctp-mauve);
@@ -190,6 +258,12 @@ function kindLabel(kind: string): string {
 .bubble.user {
   background: var(--ctp-surface0);
 }
+.bubble.user.pending {
+  opacity: 0.55;
+}
+.pending-whisper {
+  text-align: right;
+}
 .bubble.error {
   border-color: var(--ctp-red);
   color: var(--ctp-red);
@@ -202,7 +276,8 @@ function kindLabel(kind: string): string {
 .bubble.unknown {
   border-style: dashed;
 }
-.bubble p {
+.bubble p,
+.prose p {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -224,13 +299,38 @@ function kindLabel(kind: string): string {
   display: inline-flex;
   max-width: 100%;
   gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
+  align-items: center;
+}
+.user-thumb-btn {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.user-thumb-btn img,
+.user-thumb-missing {
+  display: grid;
+  width: 72px;
+  height: 72px;
+  place-content: center;
+  object-fit: cover;
+  background: var(--ctp-surface1);
+  border-radius: var(--radius-control);
+}
+.user-thumb-missing {
+  gap: 2px;
+  padding: 4px;
+  color: var(--ctp-subtext0);
+  text-align: center;
+}
+.missing-name,
+.missing-hint {
+  display: block;
   overflow: hidden;
+  font-size: 10px;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
-  background: var(--ctp-mantle);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--radius-control);
 }
 .attachment-size { color: var(--ctp-subtext0); font-size: var(--font-small); }
 .status-line.error {
@@ -238,11 +338,10 @@ function kindLabel(kind: string): string {
 }
 .thinking {
   min-height: 32px;
-  padding: 0 var(--space-2);
-  color: var(--ctp-subtext0);
-  background: var(--ctp-surface0);
-  border: 1px solid var(--ctp-surface1);
-  border-radius: var(--radius-control);
+  padding: 0;
+  color: var(--ctp-overlay0);
+  background: transparent;
+  border: 0;
   cursor: pointer;
 }
 .thinking-body {
@@ -250,9 +349,10 @@ function kindLabel(kind: string): string {
   color: var(--ctp-overlay1);
   font-size: var(--font-small);
 }
-.system-line {
+.system-line,
+.change-whisper {
   margin: 0;
-  color: var(--ctp-overlay1);
+  color: var(--ctp-overlay0);
   font-size: var(--font-small);
 }
 .unknown .type {

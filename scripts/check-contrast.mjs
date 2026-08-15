@@ -1,6 +1,6 @@
 /**
- * WCAG contrast gate for Catppuccin Mocha semantic pairs used in UI.
- * Keep hex values aligned with src/shared/theme/tokens.ts mochaPalette.
+ * WCAG contrast gate for Mocha (app chrome) and Rose Pine Moon (conversation).
+ * Keep hex values aligned with src/shared/theme/tokens.ts.
  */
 const mochaPalette = {
   crust: "#11111b",
@@ -14,6 +14,21 @@ const mochaPalette = {
   green: "#a6e3a1",
   yellow: "#f9e2af",
   red: "#f38ba8",
+};
+
+const rosePineMoonPalette = {
+  base: "#232136",
+  surface: "#2a273f",
+  overlay: "#393552",
+  muted: "#6e6a86",
+  subtle: "#908caa",
+  text: "#e0def4",
+  iris: "#c4a7e7",
+  love: "#eb6f92",
+  foam: "#9ccfd8",
+  gold: "#f6c177",
+  pine: "#3e8fb0",
+  readableMuted: "#b4b1cb",
 };
 
 function hexToRgb(hex) {
@@ -53,6 +68,18 @@ const pairs = [
   [mochaPalette.crust, mochaPalette.green, 3, "success on green (large)"],
   [mochaPalette.mauve, mochaPalette.base, 3, "primary accent on base"],
   [mochaPalette.blue, mochaPalette.base, 3, "info accent on base"],
+  [rosePineMoonPalette.text, rosePineMoonPalette.base, 4.5, "conversation body on base"],
+  [rosePineMoonPalette.text, rosePineMoonPalette.surface, 4.5, "conversation body on surface"],
+  [rosePineMoonPalette.text, rosePineMoonPalette.overlay, 4.5, "conversation body on overlay"],
+  [rosePineMoonPalette.readableMuted, rosePineMoonPalette.base, 4.5, "conversation secondary on base"],
+  [rosePineMoonPalette.readableMuted, rosePineMoonPalette.surface, 4.5, "conversation secondary on surface"],
+  [rosePineMoonPalette.readableMuted, rosePineMoonPalette.overlay, 4.5, "conversation secondary on overlay"],
+  [rosePineMoonPalette.iris, rosePineMoonPalette.base, 3, "conversation iris on base"],
+  [rosePineMoonPalette.love, rosePineMoonPalette.base, 3, "conversation love on base"],
+  [rosePineMoonPalette.foam, rosePineMoonPalette.base, 3, "conversation foam on base"],
+  [rosePineMoonPalette.gold, rosePineMoonPalette.base, 3, "conversation gold on base"],
+  [rosePineMoonPalette.base, rosePineMoonPalette.gold, 4.5, "conversation warning badge text"],
+  [rosePineMoonPalette.base, rosePineMoonPalette.love, 4.5, "conversation danger badge text"],
 ];
 
 let failed = 0;

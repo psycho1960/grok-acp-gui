@@ -35,6 +35,7 @@ defineEmits<{ click: [event: MouseEvent] }>();
 .ui-button {
   min-height: var(--button-height);
   padding: 0 var(--space-3);
+  text-align: center;
   border: 1px solid var(--ctp-surface1);
   border-radius: var(--radius-control);
   color: var(--ctp-text);

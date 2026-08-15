@@ -229,6 +229,12 @@ export interface ComposerAttachment {
   previewCapability: string;
 }
 
+export interface QueuedFollowUp {
+  id: string;
+  text: string;
+  attachments: ComposerAttachment[];
+}
+
 export interface ComposerView {
   draft: string;
   capabilities: ComposerCapabilities;
@@ -260,6 +266,8 @@ export interface SessionTimelineSnapshot {
   workspaceStrategy?: import("../../bridge/types").WorkspaceStrategy | string | null;
   /** Backend-verified availability for the persisted workspace policy. */
   workspaceAvailable?: boolean;
+  /** Task lifecycle status from task.open (conflicted is attention-worthy). */
+  taskStatus?: string | null;
   /** Persisted model selection (restores the conversation controls). */
   model?: string | null;
   /** Persisted reasoning effort selection. */

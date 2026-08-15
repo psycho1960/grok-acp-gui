@@ -29,6 +29,9 @@ describe("GAG-009 permission and Plan UI", () => {
     expect(wrapper.text()).toContain("将修改工作区");
     expect(wrapper.text()).toContain("src/app.ts");
     expect(document.activeElement?.textContent).toContain("拒绝");
+    const permActions = wrapper.get('[data-testid="permission-actions"]');
+    expect(permActions.attributes("data-align")).toBe("end");
+    expect(permActions.get("button").attributes("data-label-align")).toBe("center");
     wrapper.unmount();
   });
 
@@ -51,6 +54,9 @@ describe("GAG-009 permission and Plan UI", () => {
     expect(wrapper.findAll("ol li")).toHaveLength(3);
     expect(wrapper.text()).toContain("批准已失效");
     expect(wrapper.findAll("button").every((button) => button.attributes("disabled") !== undefined)).toBe(true);
+    const planActions = wrapper.get('[data-testid="plan-actions"]');
+    expect(planActions.attributes("data-align")).toBe("end");
+    expect(planActions.get("button").attributes("data-label-align")).toBe("center");
   });
 
   it("submits a permission only once during rapid double approval", async () => {

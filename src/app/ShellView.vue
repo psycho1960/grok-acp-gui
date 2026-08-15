@@ -270,6 +270,7 @@ const main = computed(() => {
 });
 
 const inspector = computed(() => {
+  if (showConversation.value) return undefined;
   if (showRecovery.value) {
     return h("section", { class: "inspector-content" }, [
       h("h2", "恢复说明"),
@@ -347,10 +348,7 @@ const breadcrumbTrail = computed(() => {
       label: `审查：${selectedTask.value?.title || reviewTaskId.value || "任务"}`,
     });
   } else if (showConversation.value) {
-    crumbs.push({ label: "任务中心", onClick: () => goTaskCenter() });
-    crumbs.push({
-      label: `对话：${selectedTask.value?.title || conversationRoute.value.taskId || "任务"}`,
-    });
+    crumbs.push({ label: "对话" });
   } else {
     crumbs.push({ label: "任务中心" });
   }

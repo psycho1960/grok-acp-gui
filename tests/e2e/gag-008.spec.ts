@@ -1,4 +1,4 @@
-import { expect, test } from "./fixtures";
+import { expect, test, waitForConversationIdle } from "./fixtures";
 import axe from "axe-core";
 
 test.describe("GAG-008 conversation timeline", () => {
@@ -17,16 +17,7 @@ test.describe("GAG-008 conversation timeline", () => {
     // May be disabled while running — wait for idle after autoplay
     await page.waitForTimeout(500);
     // Stop if running so we can send
-    const stop = page.getByTestId("composer-stop");
-    if (await stop.isVisible().catch(() => false)) {
-      await stop.click();
-      await expect(
-        page
-          .getByTestId("conversation-header")
-          .locator(".badge")
-          .filter({ hasText: /^空闲$/ }),
-      ).toBeVisible();
-    }
+    await waitForConversationIdle(page);
 
     const input = page.getByTestId("composer-input");
     await input.fill("one visible user turn");
@@ -57,16 +48,7 @@ test.describe("GAG-008 conversation timeline", () => {
     const jump = page.getByTestId("jump-to-bottom");
     await expect(jump).toBeVisible();
 
-    const stop = page.getByTestId("composer-stop");
-    if (await stop.isVisible()) {
-      await stop.click();
-      await expect(
-        page
-          .getByTestId("conversation-header")
-          .locator(".badge")
-          .filter({ hasText: /^空闲$/ }),
-      ).toBeVisible();
-    }
+    await waitForConversationIdle(page);
 
     const input = page.getByTestId("composer-input");
     await input.fill("new content while reading history");

@@ -1,6 +1,6 @@
 // GAG-008: Pinia store — snapshot/delta merge, composer, cancel, drafts.
 
-import { computed, ref, shallowRef } from "vue";
+import { computed, ref, shallowRef, watch } from "vue";
 import { defineStore } from "pinia";
 import type {
   ArtifactBlobInput,
@@ -13,6 +13,7 @@ import type {
   TaskOpenResult,
   TaskId,
   TypedDesktopEvent,
+  WorktreeRecord,
 } from "../../bridge/types";
 import {
   createConversationFacade,
@@ -32,6 +33,7 @@ import {
   appendUserMessage,
   createEmptyConversationState,
   foldExploreTools,
+  isOffTimelineStatus,
   markUserMessageConfirmed,
   markUserMessageFailed,
   setRunStatus,
@@ -43,6 +45,7 @@ import type {
   ComposerCapabilities,
   ComposerAttachment,
   ConversationLoadState,
+  QueuedFollowUp,
   ConversationState,
   SessionTimelineSnapshot,
   TimelineItem,
@@ -74,7 +77,13 @@ export const useConversationStore = defineStore("conversation", () => {
   const sendPending = ref(false);
   const attachmentPending = ref(false);
   const attachments = ref<ComposerAttachment[]>([]);
+  const queuedFollowUps = ref<QueuedFollowUp[]>([]);
+  let queueDrainPending = false;
+  let interruptFollowUp: QueuedFollowUp | null = null;
   const artifactRevision = ref(0);
+  const listedArtifacts = ref<ArtifactDescriptor[]>([]);
+  const worktreeRecord = ref<WorktreeRecord | null>(null);
+  const lifecycleStatus = ref<string | null>(null);
   const cancelPending = ref(false);
   const bridgeOnline = ref(true);
   const focusEventSeq = ref<number | null>(null);
@@ -110,7 +119,8 @@ export const useConversationStore = defineStore("conversation", () => {
 
   const items = computed<TimelineItem[]>(() => {
     const raw = timeline.value.items;
-    return foldExplores.value ? foldExploreTools(raw) : raw;
+    const folded = foldExplores.value ? foldExploreTools(raw) : raw;
+    return folded.filter((item) => !isOffTimelineStatus(item));
   });
 
   const status = computed(() => timeline.value.status);
@@ -138,6 +148,64 @@ export const useConversationStore = defineStore("conversation", () => {
     }
     return null;
   });
+
+  const hasArtifacts = computed(
+    () =>
+      listedArtifacts.value.length > 0 ||
+      items.value.some((item) => item.kind === "artifact"),
+  );
+
+  const workspaceAttention = computed(() => {
+    if (lifecycleStatus.value === "conflicted") return "conflicted";
+    if (workspaceStrategy.value === "worktree" && workspaceAvailable.value === false) {
+      return "not-created";
+    }
+    const state = worktreeRecord.value?.state;
+    if (state === "missing" || state === "creation_failed" || state === "allocating") {
+      return "not-created";
+    }
+    if (worktreeRecord.value?.ownership === "external") {
+      return "external-awaiting-adoption";
+    }
+    if (state === "orphaned" || state === "quarantined") {
+      return "cleanup-recovery-pending";
+    }
+    return null;
+  });
+
+  const railNeeded = computed(
+    () => hasArtifacts.value || workspaceAttention.value != null,
+  );
+
+  function clearRailContext(): void {
+    listedArtifacts.value = [];
+    worktreeRecord.value = null;
+    lifecycleStatus.value = null;
+  }
+
+  async function refreshRailContext(): Promise<void> {
+    const current = facade;
+    const id = taskId.value;
+    if (!current || !id) {
+      listedArtifacts.value = [];
+      worktreeRecord.value = null;
+      return;
+    }
+    try {
+      const listed = await current.listArtifacts(id);
+      listedArtifacts.value =
+        listed.success === "true" ? (listed.data?.artifacts ?? []) : [];
+    } catch {
+      listedArtifacts.value = [];
+    }
+    try {
+      const inspected = await current.inspectWorktree(id);
+      worktreeRecord.value =
+        inspected.success === "true" ? (inspected.data?.worktree ?? null) : null;
+    } catch {
+      worktreeRecord.value = null;
+    }
+  }
 
   const composerCapabilities = computed<ComposerCapabilities>(() => {
     if (!bridgeOnline.value) {
@@ -190,18 +258,18 @@ export const useConversationStore = defineStore("conversation", () => {
         bridgeOnline: true,
       };
     }
-    if (st === "waiting_permission") {
+    if (st === "waiting_permission" || st === "waiting_plan") {
       return {
         canSend: false,
         canCancel: true,
-        disabledReason: "等待权限审批",
+        disabledReason: st === "waiting_plan" ? "等待计划审批" : "等待权限审批",
         bridgeOnline: true,
       };
     }
-    // idle | error | waiting_plan — allow compose (plan approval is separate slot)
+    // idle | error — allow compose
     return {
       canSend: true,
-      canCancel: st === "waiting_plan",
+      canCancel: false,
       bridgeOnline: true,
     };
   });
@@ -247,7 +315,10 @@ export const useConversationStore = defineStore("conversation", () => {
         bridgeOnline.value = true;
       }
     }
-    if (event.type === "artifact.available") artifactRevision.value += 1;
+    if (event.type === "artifact.available") {
+      artifactRevision.value += 1;
+      void refreshRailContext();
+    }
     if (event.type === "session.commands.updated") {
       const commands = event.payload.commands;
       if (Array.isArray(commands)) slashCommands.value = commands;
@@ -322,6 +393,10 @@ export const useConversationStore = defineStore("conversation", () => {
     selectedModel.value = null;
     selectedReasoning.value = null;
     settingsPending.value = false;
+    clearRailContext();
+    queuedFollowUps.value = [];
+    interruptFollowUp = null;
+    queueDrainPending = false;
   }
 
   function commitSnapshot(snapshot: SessionTimelineSnapshot): void {
@@ -330,6 +405,9 @@ export const useConversationStore = defineStore("conversation", () => {
     commit(next);
     draft.value = loadDraft(snapshot.taskId);
     attachments.value = [];
+    queuedFollowUps.value = [];
+    interruptFollowUp = null;
+    queueDrainPending = false;
     sendError.value = null;
     loadState.value = "ready";
     errorMessage.value = null;
@@ -346,6 +424,7 @@ export const useConversationStore = defineStore("conversation", () => {
     if (snapshot.reasoning !== undefined) {
       selectedReasoning.value = normalizeReasoning(snapshot.reasoning);
     }
+    lifecycleStatus.value = snapshot.taskStatus ?? null;
   }
 
   function openFromSnapshot(snapshot: SessionTimelineSnapshot): void {
@@ -368,9 +447,13 @@ export const useConversationStore = defineStore("conversation", () => {
     });
     draft.value = loadDraft(taskId);
     attachments.value = [];
+    queuedFollowUps.value = [];
+    interruptFollowUp = null;
+    queueDrainPending = false;
     selectedMode.value = null;
     workspaceStrategy.value = null;
     workspaceAvailable.value = null;
+    lifecycleStatus.value = null;
     selectedModel.value = null;
     selectedReasoning.value = null;
 
@@ -413,6 +496,7 @@ export const useConversationStore = defineStore("conversation", () => {
         if (data.reasoning !== undefined) {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
         }
+        lifecycleStatus.value = data.status ?? null;
         commitSnapshot({
           taskId: data.taskId,
           sessionId: data.sessionId,
@@ -426,6 +510,7 @@ export const useConversationStore = defineStore("conversation", () => {
           workspaceAvailable: data.workspaceAvailable,
           model: data.model,
           reasoning: data.reasoning,
+          taskStatus: data.status,
         });
       } else if (data?.title) {
         if (data.mode !== undefined) selectedMode.value = data.mode ?? null;
@@ -441,6 +526,7 @@ export const useConversationStore = defineStore("conversation", () => {
         if (data.reasoning !== undefined) {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
         }
+        lifecycleStatus.value = data.status ?? null;
         commit({
           ...timeline.value,
           title: data.title,
@@ -455,6 +541,7 @@ export const useConversationStore = defineStore("conversation", () => {
         });
       }
       loadState.value = "ready";
+      await refreshRailContext();
     } catch (error) {
       if (version !== openVersion || disposed) return;
       errorMessage.value =
@@ -734,6 +821,88 @@ export const useConversationStore = defineStore("conversation", () => {
     }
   }
 
+  function enqueueFollowUp(): boolean {
+    const text = draft.value.trim();
+    const outgoing = attachments.value.map((attachment) => ({ ...attachment }));
+    if (!text && outgoing.length === 0) return false;
+    if (composerCapabilities.value.canSend) return false;
+    queuedFollowUps.value = [
+      ...queuedFollowUps.value,
+      { id: `queue-${Date.now()}-${queuedFollowUps.value.length}`, text, attachments: outgoing },
+    ];
+    draft.value = "";
+    attachments.value = [];
+    if (timeline.value.taskId) clearDraft(timeline.value.taskId);
+    return true;
+  }
+
+  function editFollowUp(id: string): boolean {
+    const item = queuedFollowUps.value.find((entry) => entry.id === id);
+    if (!item) return false;
+    queuedFollowUps.value = queuedFollowUps.value.filter((entry) => entry.id !== id);
+    draft.value = item.text;
+    attachments.value = item.attachments.map((attachment) => ({ ...attachment }));
+    if (timeline.value.taskId) saveDraft(timeline.value.taskId, item.text);
+    return true;
+  }
+
+  function deleteFollowUp(id: string): boolean {
+    const next = queuedFollowUps.value.filter((entry) => entry.id !== id);
+    if (next.length === queuedFollowUps.value.length) return false;
+    queuedFollowUps.value = next;
+    return true;
+  }
+
+  async function drainQueuedFollowUp(): Promise<void> {
+    const status = timeline.value.status;
+    if (status !== "idle" && status !== "error") return;
+    if (queueDrainPending || sendPending.value || !composerCapabilities.value.canSend) return;
+    const next = interruptFollowUp ?? queuedFollowUps.value[0];
+    if (!next) return;
+    queueDrainPending = true;
+    const preservedDraft = draft.value;
+    const preservedAttachments = attachments.value.map((attachment) => ({ ...attachment }));
+    try {
+      if (interruptFollowUp?.id === next.id) interruptFollowUp = null;
+      else queuedFollowUps.value = queuedFollowUps.value.filter((entry) => entry.id !== next.id);
+      draft.value = next.text;
+      attachments.value = next.attachments.map((attachment) => ({ ...attachment }));
+      await sendMessage();
+      draft.value = preservedDraft;
+      attachments.value = preservedAttachments;
+      if (timeline.value.taskId) saveDraft(timeline.value.taskId, preservedDraft);
+    } finally {
+      queueDrainPending = false;
+    }
+  }
+
+  async function sendFollowUpNow(id: string): Promise<boolean> {
+    if (interruptFollowUp || cancelPending.value) return false;
+    const item = queuedFollowUps.value.find((entry) => entry.id === id);
+    if (!item) return false;
+    queuedFollowUps.value = queuedFollowUps.value.filter((entry) => entry.id !== id);
+    interruptFollowUp = item;
+    if (composerCapabilities.value.canCancel) {
+      const cancelled = await cancelTurn();
+      if (!cancelled && !composerCapabilities.value.canSend) {
+        interruptFollowUp = null;
+        queuedFollowUps.value = [item, ...queuedFollowUps.value];
+        return false;
+      }
+    }
+    if (composerCapabilities.value.canSend) {
+      await drainQueuedFollowUp();
+    }
+    return true;
+  }
+
+  watch(
+    () => [composerCapabilities.value.canSend, timeline.value.status] as const,
+    () => {
+      void drainQueuedFollowUp();
+    },
+  );
+
   async function resolvePermission(itemId: string, optionId: string): Promise<boolean> {
     if (!facade) return false;
     const item = timeline.value.items.find((candidate) => candidate.id === itemId);
@@ -873,6 +1042,8 @@ export const useConversationStore = defineStore("conversation", () => {
     sendPending,
     attachmentPending,
     attachments,
+    queuedFollowUps,
+    queueInterruptPending: computed(() => interruptFollowUp != null || cancelPending.value),
     artifactRevision,
     cancelPending,
     bridgeOnline,
@@ -885,6 +1056,9 @@ export const useConversationStore = defineStore("conversation", () => {
     workspaceStrategy,
     workspaceAvailable,
     workspaceNotice,
+    hasArtifacts,
+    workspaceAttention,
+    railNeeded,
     selectedModel,
     selectedReasoning,
     settingsPending,
@@ -892,6 +1066,7 @@ export const useConversationStore = defineStore("conversation", () => {
     isRunning,
     attach,
     detach,
+    refreshRailContext,
     openFromSnapshot,
     openTask,
     setDraft,
@@ -903,6 +1078,10 @@ export const useConversationStore = defineStore("conversation", () => {
     configureReasoning,
     removeAttachment,
     sendMessage,
+    enqueueFollowUp,
+    editFollowUp,
+    deleteFollowUp,
+    sendFollowUpNow,
     cancelTurn,
     resumeSession,
     resolvePermission,

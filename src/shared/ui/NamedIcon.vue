@@ -83,8 +83,22 @@ withDefaults(
     <template v-else-if="name === 'chevronDown'">
       <path d="M6 9l6 6 6-6" />
     </template>
+    <template v-else-if="name === 'chevronLeft'">
+      <path d="M15 18l-6-6 6-6" />
+    </template>
     <template v-else-if="name === 'chevronRight'">
       <path d="M9 18l6-6-6-6" />
+    </template>
+    <template v-else-if="name === 'copy'">
+      <rect x="8" y="8" width="12" height="12" rx="2" />
+      <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+    </template>
+    <template v-else-if="name === 'paperclip'">
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </template>
+    <template v-else-if="name === 'pencil'">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
     </template>
   </Icon>
 </template>

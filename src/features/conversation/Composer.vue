@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import Button from "../../shared/ui/Button.vue";
 import IconButton from "../../shared/ui/IconButton.vue";
 import NamedIcon from "../../shared/ui/NamedIcon.vue";
-import type { SlashCommandInfo } from "../../bridge/types";
+import Select from "../../shared/ui/Select.vue";
+import type { ModelInfo, ReasoningEffort, SlashCommandInfo } from "../../bridge/types";
 import { extractImageFiles } from "./clipboard-images";
 import {
   filterSlashCommands,
@@ -23,19 +23,27 @@ const props = defineProps<{
   dropActive?: boolean;
   /** grok build quick commands discovered from ACP available_commands. */
   slashCommands?: SlashCommandInfo[];
+  models?: ModelInfo[];
+  selectedModel?: string | null;
+  selectedReasoning?: ReasoningEffort | null;
+  settingsLocked?: boolean;
 }>();
 
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   send: [];
+  queue: [];
   cancel: [];
   addAttachments: [];
   dropAttachments: [paths: string[]];
   pasteImages: [files: File[]];
   removeAttachment: [artifactId: string];
+  "update:model": [model: string | null];
+  "update:reasoning": [reasoning: ReasoningEffort];
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const modelMenuOpen = ref(false);
 const hoverDropActive = ref(false);
 const slashOpen = ref(false);
 const slashHelpPinned = ref(false);
@@ -46,6 +54,35 @@ const slashIndex = ref(0);
  *  or a selection must not be undone by the keyup that follows it). */
 let slashEscapeLock = false;
 const hasContent = computed(() => props.modelValue.trim().length > 0 || (props.attachments?.length ?? 0) > 0);
+
+const REASONING_LABEL: Record<string, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  max: "最高",
+};
+
+const modelOptions = computed(() => [
+  { value: "", label: "使用运行时默认模型" },
+  ...(props.models ?? [])
+    .filter((model) => model.modelId.trim().length > 0)
+    .map((model) => ({ value: model.modelId, label: model.name || model.modelId })),
+]);
+
+const reasoningOptions = [
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+  { value: "max", label: "最高" },
+];
+
+const modelSummary = computed(() => {
+  const model =
+    modelOptions.value.find((option) => option.value === (props.selectedModel ?? ""))?.label ??
+    "默认模型";
+  const reasoning = REASONING_LABEL[props.selectedReasoning ?? "medium"] ?? "中";
+  return `${model} · ${reasoning}`;
+});
 
 const filteredCommands = computed(() =>
   filterSlashCommands(props.slashCommands ?? [], slashHelpPinned.value ? "" : slashQuery.value),
@@ -156,6 +193,10 @@ function onKeydown(event: KeyboardEvent): void {
     event.preventDefault();
     if (props.capabilities.canSend && hasContent.value) {
       emit("send");
+      return;
+    }
+    if (!props.capabilities.canSend && props.capabilities.canCancel && hasContent.value) {
+      emit("queue");
     }
   }
 }
@@ -198,6 +239,28 @@ function onDrop(event: DragEvent): void {
   hoverDropActive.value = false;
   const paths = pathsFromTransfer(event.dataTransfer);
   if (paths.length) emit("dropAttachments", paths);
+}
+
+function onModelChange(value: string): void {
+  emit("update:model", value === "" ? null : value);
+}
+
+function onReasoningChange(value: string): void {
+  if (value === "low" || value === "medium" || value === "high" || value === "max") {
+    emit("update:reasoning", value);
+  }
+}
+
+function toggleModelMenu(): void {
+  if (!props.settingsLocked) modelMenuOpen.value = !modelMenuOpen.value;
+}
+
+function pickModel(value: string): void {
+  onModelChange(value);
+}
+
+function pickReasoning(value: string): void {
+  onReasoningChange(value);
 }
 
 defineExpose({ textarea, focus: () => textarea.value?.focus() });
@@ -276,36 +339,116 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
           @click="onSelectionChange"
           @select="onSelectionChange"
         />
-        <p class="composer-hint">Enter 发送 · Shift+Enter 换行 · / 快捷指令 · Esc 停止</p>
+        <div class="dock-tools">
+          <IconButton
+            label="添加图片"
+            data-testid="composer-add-attachment"
+            :disabled="!capabilities.canSend || sendPending"
+            :state="attachmentPending ? 'loading' : 'default'"
+            @click="emit('addAttachments')"
+          >
+            <NamedIcon name="paperclip" :size="16" />
+          </IconButton>
+          <IconButton
+            label="/ 指令"
+            data-testid="composer-slash-help"
+            :disabled="!capabilities.canSend"
+            @click="openSlashHelp"
+          >
+            <span class="slash-glyph">/</span>
+          </IconButton>
+          <div
+            class="model-control"
+            :class="{ locked: settingsLocked }"
+            data-testid="composer-model-control"
+          >
+            <button
+              v-if="!settingsLocked"
+              type="button"
+              class="model-toggle"
+              data-testid="model-reasoning-toggle"
+              @click="toggleModelMenu"
+            >
+              <span class="model-summary">{{ modelSummary }}</span>
+              <NamedIcon name="chevronDown" :size="12" data-testid="model-chevron" />
+            </button>
+            <span v-else class="model-summary">{{ modelSummary }}</span>
+            <div
+              v-if="modelMenuOpen && !settingsLocked"
+              class="model-menu"
+              data-testid="model-reasoning-menu"
+            >
+              <p class="menu-label">模型</p>
+              <button
+                v-for="option in modelOptions"
+                :key="`model-${option.value}`"
+                type="button"
+                class="menu-item"
+                :class="{ on: (selectedModel ?? '') === option.value }"
+                @click="pickModel(option.value)"
+              >
+                {{ option.label }}
+              </button>
+              <p class="menu-label">推理</p>
+              <button
+                v-for="option in reasoningOptions"
+                :key="`reason-${option.value}`"
+                type="button"
+                class="menu-item"
+                :class="{ on: (selectedReasoning ?? 'medium') === option.value }"
+                @click="pickReasoning(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <div class="is-visually-hidden" aria-hidden="true">
+              <Select
+                class="settings-select"
+                data-testid="conversation-model-select"
+                label="模型"
+                :model-value="selectedModel ?? ''"
+                :options="modelOptions"
+                :disabled="settingsLocked"
+                tabindex="-1"
+                @update:model-value="onModelChange"
+              />
+              <Select
+                class="settings-select"
+                data-testid="conversation-reasoning-select"
+                label="推理强度"
+                :model-value="selectedReasoning ?? 'medium'"
+                :options="reasoningOptions"
+                :disabled="settingsLocked"
+                tabindex="-1"
+                @update:model-value="onReasoningChange"
+              />
+            </div>
+          </div>
+        </div>
       </div>
       <div class="actions">
-        <IconButton
-          label="查看快捷指令"
-          data-testid="composer-slash-help"
-          :disabled="!capabilities.canSend"
-          @click="openSlashHelp"
-        >
-          <NamedIcon name="help" :size="16" />
-        </IconButton>
-        <Button data-testid="composer-add-attachment" :disabled="!capabilities.canSend || sendPending" :state="attachmentPending ? 'loading' : 'default'" @click="emit('addAttachments')">添加图片</Button>
-        <Button
+        <button
           v-if="capabilities.canCancel"
-          variant="danger"
+          type="button"
+          class="dock-circle is-stop"
           data-testid="composer-stop"
-          :state="sendPending ? 'loading' : 'default'"
+          aria-label="停止"
+          :disabled="sendPending"
           @click="emit('cancel')"
         >
-          停止
-        </Button>
-        <Button
-          variant="primary"
+          <NamedIcon name="x" :size="16" />
+        </button>
+        <button
+          v-else
+          type="button"
+          class="dock-circle is-send"
           data-testid="composer-send"
+          aria-label="发送"
           :disabled="!capabilities.canSend || !hasContent"
-          :state="sendPending ? 'loading' : 'default'"
           @click="emit('send')"
         >
-          发送
-        </Button>
+          <NamedIcon name="play" :size="16" />
+        </button>
       </div>
     </div>
   </footer>
@@ -315,9 +458,11 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
 .composer {
   position: relative;
   flex-shrink: 0;
+  margin: 0 var(--space-3) var(--space-3);
   padding: var(--space-3);
-  border-top: 1px solid var(--ctp-surface0);
-  background: var(--ctp-mantle);
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 20px;
 }
 .composer.drop-active { outline: 2px solid var(--ctp-blue); outline-offset: -2px; }
 .drop-zone { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; color: var(--ctp-text); background: color-mix(in srgb, var(--ctp-mantle) 90%, transparent); border: 2px dashed var(--ctp-blue); pointer-events: none; }
@@ -336,12 +481,6 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
   position: relative;
   display: grid;
   gap: var(--space-1);
-}
-.composer-hint {
-  margin: 0;
-  color: var(--ctp-subtext0);
-  font-size: var(--text-sm);
-  line-height: var(--leading-tight);
 }
 .slash-menu {
   position: absolute;
@@ -395,14 +534,124 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
 }
 .input {
   width: 100%;
-  min-height: 72px;
+  min-height: 56px;
   max-height: 200px;
   padding: var(--space-2);
   resize: vertical;
   color: var(--ctp-text);
-  background: var(--ctp-surface0);
+  background: transparent;
+  border: 0;
+}
+.dock-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  align-items: center;
+}
+.slash-glyph {
+  font-weight: var(--font-weight-semibold);
+}
+.model-control {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-min-size);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 999px;
+}
+.model-toggle {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+.model-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  display: grid;
+  gap: 2px;
+  min-width: 180px;
+  padding: var(--space-1);
+  background: var(--ctp-mantle);
   border: 1px solid var(--ctp-surface1);
   border-radius: var(--radius-control);
+  box-shadow: var(--shadow-md);
+}
+.menu-label {
+  margin: var(--space-1) var(--space-2) 0;
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
+}
+.menu-item {
+  padding: 6px 8px;
+  color: var(--ctp-text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.menu-item.on,
+.menu-item:hover {
+  background: var(--overlay-hover);
+}
+.model-control.locked {
+  color: var(--ctp-subtext0);
+}
+.model-summary {
+  font-size: var(--font-small);
+  white-space: nowrap;
+}
+.model-control :deep(.field > span) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+.model-control :deep(select) {
+  min-height: 28px;
+  max-width: 92px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  appearance: none;
+}
+.model-control .is-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+.dock-circle {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  color: var(--ctp-crust);
+  background: var(--ctp-mauve);
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.dock-circle.is-stop {
+  color: var(--ctp-text);
+  background: var(--ctp-red);
+}
+.dock-circle:disabled {
+  color: var(--ctp-overlay0);
+  background: var(--ctp-surface1);
+  cursor: not-allowed;
 }
 .input:disabled {
   color: var(--ctp-overlay0);

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import Badge from "../../shared/ui/Badge.vue";
 import Button from "../../shared/ui/Button.vue";
 import IconButton from "../../shared/ui/IconButton.vue";
@@ -8,7 +8,7 @@ import Select from "../../shared/ui/Select.vue";
 import StatusIcon from "../../shared/ui/StatusIcon.vue";
 import Tooltip from "../../shared/ui/Tooltip.vue";
 import { modeHelpFor } from "../../shared/ui/mode-help";
-import type { ModeInfo, ModelInfo, ReasoningEffort } from "../../bridge/types";
+import type { ModeInfo } from "../../bridge/types";
 import {
   WORKSPACE_STRATEGY_OPTIONS,
   workspaceStrategyForMode,
@@ -16,29 +16,32 @@ import {
 } from "./mode-workspace";
 import type { ConversationRunStatus } from "./types";
 
+export interface ConversationTurn {
+  id: string;
+  seq: number;
+  firstLine: string;
+  timestamp: string;
+}
+
 const props = defineProps<{
   title: string;
   status: ConversationRunStatus;
   attempt?: number;
-  canCancel?: boolean;
   needsRefresh?: boolean;
   modes?: ModeInfo[];
-  models?: ModelInfo[];
   selectedMode?: string | null;
   selectedWorkspaceStrategy?: WorkspaceStrategy | null;
-  selectedModel?: string | null;
-  selectedReasoning?: ReasoningEffort | null;
   settingsDisabled?: boolean;
+  turns?: ConversationTurn[];
 }>();
 
 const emit = defineEmits<{
-  cancel: [];
+  back: [];
   refresh: [];
   resume: [];
   "update:mode": [mode: string | null, strategy: WorkspaceStrategy | null];
   "update:workspaceStrategy": [strategy: WorkspaceStrategy];
-  "update:model": [model: string | null];
-  "update:reasoning": [reasoning: ReasoningEffort];
+  "jump-turn": [id: string];
 }>();
 
 function statusIcon(
@@ -74,23 +77,21 @@ function statusLabel(s: ConversationRunStatus): string {
   return map[s];
 }
 
-const tone = () => {
-  if (props.status === "error" || props.status === "offline") return "danger" as const;
-  if (props.status === "running") return "info" as const;
-  if (props.status === "waiting_permission" || props.status === "waiting_plan")
-    return "warning" as const;
-  return "neutral" as const;
-};
+const settingsLocked = computed(() => Boolean(props.settingsDisabled));
 
-const modelOptions = computed(() => [
-  { value: "", label: "使用运行时默认模型" },
-  ...(props.models ?? [])
-    .filter((model) => model.modelId.trim().length > 0)
-    .map((model) => ({
-      value: model.modelId,
-      label: model.name || model.modelId,
-    })),
-]);
+const lockReason = computed(() => {
+  switch (props.status) {
+    case "running":
+      return "运行中无法切换会话身份";
+    case "cancelling":
+      return "停止中无法切换会话身份";
+    case "waiting_permission":
+    case "waiting_plan":
+      return "等待审批时无法切换会话身份";
+    default:
+      return "发送或保存中无法切换会话身份";
+  }
+});
 
 /** 中文模式标签：capability 名称优先，应用自有词汇兜底。 */
 const MODE_LABEL_FALLBACK: Record<string, string> = {
@@ -109,13 +110,6 @@ const modeOptions = computed(() => [
     })),
 ]);
 
-const reasoningOptions = computed(() => [
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-  { value: "max", label: "最高" },
-]);
-
 function onModeChange(value: string): void {
   const mode = value === "" ? null : value;
   // One event becomes one atomic session.configure call in the store.
@@ -128,70 +122,161 @@ function onWorkspaceStrategyChange(value: string): void {
   }
 }
 
-function onModelChange(value: string): void {
-  emit("update:model", value === "" ? null : value);
+const modeLabel = computed(() => {
+  const selected = props.selectedMode ?? "";
+  return modeOptions.value.find((option) => option.value === selected)?.label ?? "使用会话默认模式";
+});
+
+const workspaceLabel = computed(() => {
+  const selected = props.selectedWorkspaceStrategy ?? "";
+  if (selected === "") return "使用创建时的策略";
+  return WORKSPACE_STRATEGY_OPTIONS.find((option) => option.value === selected)?.label ?? selected;
+});
+
+const turnListOpen = ref(false);
+const turnHistoryRoot = ref<HTMLElement | null>(null);
+
+const turns = computed(() => props.turns ?? []);
+
+function formatRelativeTime(iso: string): string {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "";
+  const minutes = Math.floor(Math.max(0, Date.now() - then) / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
 }
 
-function onReasoningChange(value: string): void {
-  if (value === "low" || value === "medium" || value === "high" || value === "max") {
-    emit("update:reasoning", value);
-  }
+function toggleTurnList(): void {
+  if (turns.value.length === 0) return;
+  turnListOpen.value = !turnListOpen.value;
 }
+
+function closeTurnList(): void {
+  turnListOpen.value = false;
+}
+
+function onJumpTurn(id: string): void {
+  turnListOpen.value = false;
+  emit("jump-turn", id);
+}
+
+function onDocumentPointerDown(event: PointerEvent): void {
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (turnHistoryRoot.value && !turnHistoryRoot.value.contains(target)) closeTurnList();
+}
+
+function onDocumentKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") closeTurnList();
+}
+
+onMounted(() => {
+  window.addEventListener("pointerdown", onDocumentPointerDown);
+  window.addEventListener("keydown", onDocumentKeydown);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("pointerdown", onDocumentPointerDown);
+  window.removeEventListener("keydown", onDocumentKeydown);
+});
 </script>
 
 <template>
   <header class="conv-header" data-testid="conversation-header">
     <div class="left">
+      <IconButton label="返回任务中心" data-testid="conversation-back" @click="emit('back')">
+        <NamedIcon name="chevronLeft" :size="16" />
+      </IconButton>
       <h1 class="title">{{ title }}</h1>
-      <StatusIcon :status="statusIcon(status)" :label="statusLabel(status)" />
-      <Badge :tone="tone()">{{ statusLabel(status) }}</Badge>
-      <Badge v-if="attempt" tone="neutral">第 {{ attempt }} 次尝试</Badge>
+      <StatusIcon
+        data-testid="conversation-status"
+        :status="statusIcon(status)"
+        :label="statusLabel(status)"
+      />
+      <Badge v-if="attempt && attempt > 1" tone="neutral">第 {{ attempt }} 次尝试</Badge>
+      <div ref="turnHistoryRoot" class="turn-history" data-testid="turn-history-menu">
+        <IconButton
+          label="历史轮次"
+          data-testid="turn-history"
+          :disabled="turns.length === 0"
+          @click="toggleTurnList"
+        >
+          <NamedIcon name="clock" :size="16" />
+        </IconButton>
+        <ul v-if="turnListOpen" class="turn-list" data-testid="turn-list" role="listbox" aria-label="历史轮次">
+          <li v-for="turn in turns" :key="turn.id">
+            <button
+              type="button"
+              class="turn-row"
+              data-testid="turn-row"
+              :data-seq="turn.seq"
+              @click="onJumpTurn(turn.id)"
+            >
+              <span class="turn-line">{{ turn.firstLine }}</span>
+              <time class="turn-time" :datetime="turn.timestamp">{{ formatRelativeTime(turn.timestamp) }}</time>
+            </button>
+          </li>
+        </ul>
+      </div>
     </div>
     <div class="right">
       <div class="settings" aria-label="对话设置">
         <div class="mode-field">
-          <Select
-            class="settings-select"
+          <div
+            class="session-badge"
+            :class="{ locked: settingsLocked }"
             data-testid="conversation-mode-select"
-            label="模式"
-            :model-value="selectedMode ?? ''"
-            :options="modeOptions"
-            :disabled="settingsDisabled"
-            @update:model-value="onModeChange"
-          />
+            :title="settingsLocked ? lockReason : undefined"
+          >
+            <span v-if="settingsLocked" class="locked-label">{{ modeLabel }}</span>
+            <Select
+              class="settings-select"
+              :class="{ 'is-visually-hidden': settingsLocked }"
+              label="模式"
+              :model-value="selectedMode ?? ''"
+              :options="modeOptions"
+              :disabled="settingsLocked"
+              @update:model-value="onModeChange"
+            />
+            <NamedIcon
+              v-if="!settingsLocked"
+              name="chevronDown"
+              :size="12"
+              data-testid="mode-chevron"
+            />
+          </div>
           <Tooltip :text="modeHelpFor(selectedMode)">
             <IconButton label="模式说明" data-testid="conversation-mode-help">
               <NamedIcon name="help" :size="14" />
             </IconButton>
           </Tooltip>
         </div>
-        <Select
-          class="settings-select"
+        <div
+          class="session-badge"
+          :class="{ locked: settingsLocked }"
           data-testid="conversation-workspace-select"
-          label="工作区策略"
-          :model-value="selectedWorkspaceStrategy ?? ''"
-          :options="[{ value: '', label: '使用创建时的策略' }, ...WORKSPACE_STRATEGY_OPTIONS]"
-          :disabled="settingsDisabled"
-          @update:model-value="onWorkspaceStrategyChange"
-        />
-        <Select
-          class="settings-select"
-          data-testid="conversation-model-select"
-          label="模型"
-          :model-value="selectedModel ?? ''"
-          :options="modelOptions"
-          :disabled="settingsDisabled"
-          @update:model-value="onModelChange"
-        />
-        <Select
-          class="settings-select"
-          data-testid="conversation-reasoning-select"
-          label="推理强度"
-          :model-value="selectedReasoning ?? 'medium'"
-          :options="reasoningOptions"
-          :disabled="settingsDisabled"
-          @update:model-value="onReasoningChange"
-        />
+          :title="settingsLocked ? lockReason : undefined"
+        >
+          <span v-if="settingsLocked" class="locked-label">{{ workspaceLabel }}</span>
+          <Select
+            class="settings-select"
+            :class="{ 'is-visually-hidden': settingsLocked }"
+            label="工作区策略"
+            :model-value="selectedWorkspaceStrategy ?? ''"
+            :options="[{ value: '', label: '使用创建时的策略' }, ...WORKSPACE_STRATEGY_OPTIONS]"
+            :disabled="settingsLocked"
+            @update:model-value="onWorkspaceStrategyChange"
+          />
+          <NamedIcon
+            v-if="!settingsLocked"
+            name="chevronDown"
+            :size="12"
+            data-testid="workspace-chevron"
+          />
+        </div>
       </div>
       <Button
         v-if="status === 'error' || status === 'disconnected'"
@@ -208,14 +293,6 @@ function onReasoningChange(value: string): void {
         @click="emit('refresh')"
       >
         刷新快照
-      </Button>
-      <Button
-        v-if="canCancel"
-        variant="danger"
-        data-testid="header-stop"
-        @click="emit('cancel')"
-      >
-        停止
       </Button>
     </div>
   </header>
@@ -259,5 +336,93 @@ function onReasoningChange(value: string): void {
 }
 .settings-select {
   min-width: 132px;
+}
+.session-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-min-size);
+  padding: 0 var(--space-2);
+  color: var(--ctp-text);
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 999px;
+}
+.session-badge.locked {
+  color: var(--ctp-subtext0);
+  cursor: default;
+}
+.session-badge :deep(.field > span) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+.session-badge :deep(select) {
+  min-height: 28px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  appearance: none;
+}
+.session-badge .is-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+.turn-history {
+  position: relative;
+}
+.turn-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 4;
+  display: grid;
+  gap: 2px;
+  min-width: 220px;
+  max-width: min(360px, 70vw);
+  max-height: 280px;
+  margin: 0;
+  padding: var(--space-1);
+  overflow: auto;
+  list-style: none;
+  background: var(--ctp-mantle);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-md);
+}
+.turn-row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 8px;
+  color: var(--ctp-text);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  text-align: left;
+}
+.turn-row:hover,
+.turn-row:focus-visible {
+  background: var(--overlay-hover);
+}
+.turn-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-time {
+  flex-shrink: 0;
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
 }
 </style>

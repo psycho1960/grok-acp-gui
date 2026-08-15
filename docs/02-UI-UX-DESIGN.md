@@ -16,6 +16,8 @@
 
 ### 2.1 Catppuccin Mocha 色板
 
+任务中心、审查、恢复和壳层仍用本表。对话面（时间线、任务条、Composer、Conversation rail）改用 Rose Pine Moon，见 [ADR-0003](adr/ADR-0003-conversation-uses-grok-build-theme.md)。
+
 | Token | Hex | 用途 |
 |---|---|---|
 | `--ctp-crust` | `#11111b` | 最深窗口区域、标题栏 |
@@ -184,7 +186,7 @@ flowchart LR
 ### 5.12 UI-SETTINGS-001 设置与诊断
 
 - Grok 路径、受管 Worktree 根目录、日志级别、字体缩放和“显示思考”开关。
-- Theme v1 固定 Mocha，不显示虚假的主题选择器。
+- Theme v1 默认 Mocha，不显示虚假的主题选择器。对话面色源见 [ADR-0003](adr/ADR-0003-conversation-uses-grok-build-theme.md)（Rose Pine Moon）；任务中心、审查、恢复等页面本期仍用 Mocha。
 - 诊断页显示应用/Grok/Git/WebView2 版本和日志位置；复制内容必须先脱敏。
 
 ### 5.13 UI-ERROR-001 全局错误与启动阻断

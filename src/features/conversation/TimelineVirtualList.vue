@@ -167,8 +167,7 @@ function scrollToBottom(smooth = false): void {
   persist();
 }
 
-function scrollToSeq(seq: number): void {
-  const idx = props.items.findIndex((i) => i.seq === seq);
+function scrollToIndex(idx: number): void {
   if (idx < 0 || !root.value) return;
   pendingRestoredScrollTop = null;
   const top = layout.value.tops[idx] ?? idx * props.itemHeight;
@@ -181,6 +180,14 @@ function scrollToSeq(seq: number): void {
     anchorEventKey: props.items[idx]?.eventKey,
   };
   persist();
+}
+
+function scrollToSeq(seq: number): void {
+  scrollToIndex(props.items.findIndex((item) => item.seq === seq));
+}
+
+function scrollToId(id: string): void {
+  scrollToIndex(props.items.findIndex((item) => item.id === id));
 }
 
 function visibleRevision(): string {
@@ -301,6 +308,7 @@ defineExpose({
   root,
   scrollToBottom,
   scrollToSeq,
+  scrollToId,
   anchor,
   range,
   renderedCount,

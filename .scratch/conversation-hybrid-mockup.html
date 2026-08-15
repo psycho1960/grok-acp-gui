@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>混合时间线示意图</title>
+  <style>
+    :root {
+      /* Rose Pine Moon — current Grok Build theme (ui.theme = rosepine-moon) */
+      --rp-base: #232136;
+      --rp-surface: #2a273f;
+      --rp-overlay: #393552;
+      --rp-muted: #6e6a86;
+      --rp-subtle: #908caa;
+      --rp-text: #e0def4;
+      --rp-love: #eb6f92;
+      --rp-gold: #f6c177;
+      --rp-rose: #ea9a97;
+      --rp-pine: #3e8fb0;
+      --rp-foam: #9ccfd8;
+      --rp-iris: #c4a7e7;
+      --rp-hl-low: #2a283e;
+      --rp-hl-med: #44415a;
+      --ctp-crust: #1a1828;
+      --ctp-mantle: var(--rp-base);
+      --ctp-base: var(--rp-base);
+      --ctp-surface0: var(--rp-surface);
+      --ctp-surface1: var(--rp-overlay);
+      --ctp-surface2: var(--rp-hl-med);
+      --ctp-overlay0: var(--rp-muted);
+      --ctp-subtext0: var(--rp-subtle);
+      --ctp-text: var(--rp-text);
+      --ctp-mauve: var(--rp-iris);
+      --ctp-blue: var(--rp-pine);
+      --ctp-green: var(--rp-foam);
+      --ctp-yellow: var(--rp-gold);
+      --ctp-red: var(--rp-love);
+      --ctp-peach: var(--rp-rose);
+      --canvas: var(--rp-base);
+      --hairline: var(--rp-overlay);
+      --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      --mono: "Cascadia Code", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      font-family: var(--font);
+      color: var(--ctp-text);
+      background: #191724;
+    }
+    .stage {
+      width: 1440px;
+      height: 900px;
+      margin: 24px auto;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+    }
+    .caption {
+      color: var(--ctp-subtext0);
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 0 8px;
+    }
+    .caption strong { color: var(--ctp-mauve); font-weight: 600; }
+    .window {
+      display: grid;
+      grid-template-rows: 48px 1fr 28px;
+      min-height: 0;
+      background: var(--canvas);
+      border: 1px solid var(--hairline);
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 24px 64px rgb(0 0 0 / 0.55);
+    }
+    .topbar, .statusbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 16px;
+      background: color-mix(in srgb, var(--ctp-mauve) 5%, var(--ctp-crust));
+      font-size: 12px;
+    }
+    .topbar { border-bottom: 1px solid var(--hairline); }
+    .statusbar {
+      border-top: 1px solid var(--hairline);
+      color: var(--ctp-subtext0);
+      justify-content: space-between;
+    }
+    .crumb { color: var(--ctp-subtext0); }
+    .crumb b { color: var(--ctp-text); font-weight: 600; }
+    .icon-btn {
+      width: 32px; height: 32px;
+      display: grid; place-items: center;
+      border: 0; border-radius: 6px;
+      background: transparent; color: var(--ctp-subtext0);
+    }
+    .columns {
+      display: grid;
+      grid-template-columns: 220px 1fr 320px;
+      min-height: 0;
+    }
+    .nav {
+      padding: 16px 12px;
+      background: color-mix(in srgb, var(--ctp-mauve) 6%, var(--ctp-mantle));
+      border-right: 1px solid var(--hairline);
+    }
+    .nav-sec {
+      margin: 16px 8px 6px;
+      color: var(--ctp-subtext0);
+      font-size: 11px;
+      letter-spacing: .06em;
+    }
+    .nav-sec:first-child { margin-top: 0; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      padding: 0 8px 0 10px;
+      color: var(--ctp-subtext0);
+      border-radius: 6px;
+      border-left: 3px solid transparent;
+      font-size: 13px;
+    }
+    .nav-item svg, .work-head svg, .thinking svg {
+      flex-shrink: 0;
+    }
+    .nav-item.active {
+      color: var(--ctp-text);
+      background: color-mix(in srgb, var(--ctp-mauve) 16%, transparent);
+      border-left-color: var(--ctp-mauve);
+    }
+    .nav-count { margin-left: auto; color: var(--ctp-overlay0); font-size: 11px; }
+    .conversation {
+      display: grid;
+      grid-template-rows: 48px 1fr auto;
+      min-width: 0;
+      min-height: 0;
+      background: var(--canvas);
+    }
+    .taskbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px;
+      background: color-mix(in srgb, var(--ctp-mauve) 6%, var(--ctp-mantle));
+      border-bottom: 1px solid var(--hairline);
+    }
+    .back {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--ctp-subtext0);
+    }
+    .back svg { display: block; }
+    .title { margin: 0; font-size: 16px; font-weight: 600; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--ctp-blue) 14%, transparent);
+      color: var(--ctp-blue);
+      font-size: 12px;
+    }
+    .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--ctp-blue);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--ctp-blue) 25%, transparent);
+    }
+    .ws-badge, .mode-badge {
+      padding: 2px 8px;
+      border: 1px solid var(--hairline);
+      border-radius: 999px;
+      color: var(--ctp-subtext0);
+      font-size: 12px;
+    }
+    .ws-badge.is-locked, .mode-badge.is-locked {
+      border-color: transparent;
+      background: color-mix(in srgb, var(--rp-overlay) 35%, transparent);
+      color: var(--rp-muted);
+    }
+    .grow { flex: 1; }
+    .taskbar { position: relative; }
+    .turn-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      right: 12px;
+      z-index: 8;
+      width: 280px;
+      padding: 6px;
+      background: var(--rp-surface);
+      border: 1px solid var(--hairline);
+      border-radius: 10px;
+      box-shadow: 0 12px 40px rgb(0 0 0 / 0.45);
+    }
+    .turn-menu p {
+      margin: 0 8px 6px;
+      color: var(--rp-muted);
+      font-size: 11px;
+    }
+    .turn-row {
+      padding: 8px;
+      border-radius: 6px;
+      color: var(--rp-text);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .turn-row:hover, .turn-row.on {
+      background: color-mix(in srgb, var(--rp-iris) 16%, transparent);
+    }
+    .turn-row small {
+      display: block;
+      margin-top: 2px;
+      color: var(--rp-muted);
+      font-size: 11px;
+    }
+    .timeline {
+      overflow: hidden;
+      padding: 10px 20px 6px;
+    }
+    .gap-time {
+      margin: 0 0 10px;
+      color: var(--ctp-overlay0);
+      font-size: 11px;
+    }
+    .user-wrap {
+      display: flex;
+      justify-content: flex-end;
+      margin: 0 0 12px;
+    }
+    .user {
+      max-width: 72%;
+      padding: 8px 12px;
+      background: color-mix(in srgb, var(--ctp-mauve) 16%, var(--ctp-mantle));
+      border: 1px solid color-mix(in srgb, var(--ctp-mauve) 28%, transparent);
+      border-radius: 12px 12px 4px 12px;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    .queue-bar {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin: 0 16px 6px;
+      padding: 6px 8px 6px 10px;
+      background: color-mix(in srgb, var(--rp-iris) 12%, var(--rp-surface));
+      border: 1px solid color-mix(in srgb, var(--rp-iris) 28%, transparent);
+      border-radius: 10px;
+    }
+    .queue-tag {
+      color: var(--rp-iris);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .queue-preview {
+      overflow: hidden;
+      color: var(--rp-subtle);
+      font-size: 13px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .queue-icons {
+      display: flex;
+      gap: 2px;
+    }
+    .qbtn {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--rp-subtle);
+    }
+    .send-go {
+      width: 28px; height: 28px;
+      display: grid; place-items: center;
+      border: 0; border-radius: 50%;
+      background: var(--rp-iris);
+      color: var(--rp-base);
+      font-size: 14px;
+    }
+    .caret {
+      display: inline-block;
+      width: 7px;
+      height: 14px;
+      margin-left: 3px;
+      background: var(--ctp-mauve);
+      vertical-align: -2px;
+      animation: blink 1s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    .user-thumbs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 0 0 6px;
+    }
+    .user-thumbs span {
+      width: 72px;
+      height: 72px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #393552, #c4a7e7 80%);
+      border: 1px solid var(--ctp-surface1);
+    }
+    .thinking {
+      margin: 0 0 10px;
+      color: var(--ctp-overlay0);
+      font-size: 12px;
+    }
+    .assistant {
+      margin: 0 0 12px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .assistant p { margin: 2px 0 6px; }
+    .assistant p:last-child { margin-bottom: 0; }
+    .code {
+      margin: 6px 0 0;
+      padding: 10px 12px;
+      background: color-mix(in srgb, var(--ctp-mauve) 4%, var(--ctp-crust));
+      border: 1px solid var(--hairline);
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--ctp-subtext0);
+    }
+    .work {
+      margin: 0 0 10px;
+      padding: 0;
+      background: color-mix(in srgb, var(--ctp-mauve) 5%, var(--ctp-mantle));
+      border: 1px solid var(--hairline);
+      border-left: 3px solid var(--ctp-blue);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .work.perm { border-left-color: var(--ctp-yellow); }
+    .work-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: color-mix(in srgb, var(--ctp-mauve) 8%, var(--ctp-mantle));
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .pill {
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .pill.ok { color: var(--ctp-green); background: color-mix(in srgb, var(--ctp-green) 14%, transparent); }
+    .pill.warn { color: var(--ctp-yellow); background: color-mix(in srgb, var(--ctp-yellow) 16%, transparent); }
+    .meta { color: var(--ctp-overlay0); font-size: 12px; font-weight: 400; }
+    .work-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .work-body { padding: 8px 12px 10px; color: var(--ctp-subtext0); font-size: 12px; line-height: 1.45; }
+    .work-body code { color: var(--ctp-text); font-family: var(--mono); }
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      min-width: 72px;
+      padding: 0 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1;
+      text-align: center;
+    }
+    .btn.safe {
+      border: 1px solid var(--ctp-surface2);
+      background: var(--ctp-surface0);
+      color: var(--ctp-text);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--ctp-mauve) 55%, transparent);
+    }
+    .btn.allow {
+      border: 0;
+      background: var(--ctp-mauve);
+      color: var(--ctp-crust);
+    }
+    .whisper {
+      margin: 0 0 10px;
+      color: var(--ctp-overlay0);
+      font-size: 12px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 8px;
+      padding: 6px 8px 6px 6px;
+      background: var(--ctp-mantle);
+      border: 1px solid var(--ctp-surface0);
+      border-radius: 8px;
+      font-size: 12px;
+      color: var(--ctp-subtext0);
+    }
+    .thumb {
+      width: 36px; height: 36px;
+      border-radius: 4px;
+      background: linear-gradient(135deg, #393552, #c4a7e7 80%);
+    }
+    .composer {
+      padding: 8px 16px 12px;
+      background: var(--canvas);
+    }
+    .dock {
+      display: grid;
+      grid-template-rows: 1fr auto;
+      min-height: 92px;
+      padding: 10px 12px 8px;
+      background: color-mix(in srgb, var(--ctp-mauve) 8%, var(--ctp-mantle));
+      border: 1px solid var(--hairline);
+      border-radius: 16px;
+    }
+    .input {
+      min-height: 36px;
+      color: var(--ctp-overlay0);
+      font-size: 14px;
+    }
+    .dock-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .paper {
+      width: 28px; height: 28px;
+      display: grid; place-items: center;
+      border: 0; border-radius: 50%;
+      background: transparent;
+      color: var(--ctp-subtext0);
+      font-size: 16px;
+    }
+    .slash {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 8px;
+      border: 1px solid var(--hairline);
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--ctp-mauve) 8%, transparent);
+      color: var(--ctp-subtext0);
+      font-size: 12px;
+    }
+    .model {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 4px;
+      padding: 2px 8px;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--ctp-subtext0);
+      font-size: 12px;
+    }
+    .send-stop {
+      width: 28px; height: 28px;
+      display: grid; place-items: center;
+      margin-left: auto;
+      border: 0; border-radius: 50%;
+      background: var(--ctp-red);
+      color: var(--ctp-crust);
+    }
+    .send-stop .sq {
+      width: 10px; height: 10px;
+      border-radius: 2px;
+      background: currentColor;
+    }
+    .rail {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      background: color-mix(in srgb, var(--ctp-mauve) 6%, var(--ctp-mantle));
+      border-left: 1px solid var(--hairline);
+      min-width: 0;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--hairline);
+    }
+    .tab {
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      color: var(--ctp-subtext0);
+    }
+    .tab.on {
+      color: var(--ctp-text);
+      background: color-mix(in srgb, var(--ctp-mauve) 18%, transparent);
+    }
+    .gallery { padding: 12px; }
+    .gallery h3 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .card {
+      padding: 10px;
+      border: 1px solid var(--hairline);
+      border-radius: 8px;
+      background: color-mix(in srgb, var(--ctp-mauve) 5%, var(--ctp-base));
+    }
+    .preview {
+      height: 112px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, #393552, #c4a7e7 80%);
+      margin-bottom: 8px;
+    }
+    .card p { margin: 0; font-size: 12px; color: var(--ctp-subtext0); }
+    .tag {
+      display: inline-block;
+      margin: 0 0 4px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--ctp-mauve) 18%, transparent);
+      color: var(--ctp-mauve);
+      font-size: 10px;
+      letter-spacing: .04em;
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <p class="caption">
+      配色 · 当前 Grok Build 主题 <strong>Rose Pine Moon</strong>（iris / base / surface），不再用 Catppuccin Mocha。
+    </p>
+    <div class="window">
+      <header class="topbar">
+        <span class="crumb">demo-app / <b>对话</b></span>
+        <span class="grow"></span>
+        <span class="icon-btn">⌘K</span>
+        <span class="icon-btn">?</span>
+      </header>
+      <div class="columns">
+        <aside class="nav">
+          <div class="nav-sec">任务</div>
+          <div class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+            全部任务
+          </div>
+          <div class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            等待处理 <span class="nav-count">1</span>
+          </div>
+          <div class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M8 5v14l11-7z"/></svg>
+            运行中 <span class="nav-count">1</span>
+          </div>
+          <div class="nav-sec">工具</div>
+          <div class="nav-item active">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            对话时间线
+          </div>
+          <div class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 15V6m0 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm12 3v3a6 6 0 0 1-6 6"/></svg>
+            变更审查
+          </div>
+          <div class="nav-sec">系统</div>
+          <div class="nav-item">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            恢复中心
+          </div>
+        </aside>
+
+        <section class="conversation">
+          <header class="taskbar">
+            <span class="back" title="返回任务中心" aria-label="返回任务中心">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M10 3.5 5.5 8 10 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </span>
+            <h1 class="title">修复登录超时</h1>
+            <span class="status"><span class="dot"></span>运行中</span>
+            <span class="mode-badge is-locked" title="运行中无法更改模式">智能体</span>
+            <span class="ws-badge is-locked" title="运行中无法更改工作区">隔离工作区</span>
+            <span class="grow"></span>
+            <span class="back" title="历史轮次" aria-label="历史轮次" style="margin-left:auto">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            </span>
+            <div class="turn-menu">
+              <p>历史轮次</p>
+              <div class="turn-row on">登录页会超时，帮我查一下 auth 中间件…<small>3 分钟前</small></div>
+            </div>
+          </header>
+
+          <div class="timeline">
+            <div class="gap-time">3 分钟前</div>
+
+            <div class="user-wrap">
+              <div class="user">
+                <div class="user-thumbs"><span></span><span></span></div>
+                登录页会超时，帮我查一下 auth 中间件。附图是失败时的网络面板。
+              </div>
+            </div>
+
+            <div class="thinking">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></svg>
+              已思考 1.2s
+            </div>
+
+            <article class="work is-open">
+              <div class="work-head">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>
+                已查看 3 项
+                <span class="pill ok">完成</span>
+                <span class="work-tools">
+                  <span class="meta">210ms</span>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+                </span>
+              </div>
+              <div class="work-body">
+                <div>src/auth/session.ts</div>
+                <div>src/middleware/timeout.ts</div>
+                <div>src/routes/login.ts</div>
+                <pre class="details-safe" style="margin:8px 0 0;padding:8px;max-height:88px;overflow:auto;font-family:var(--mono);font-size:12px;background:var(--rp-base);border-radius:6px;color:var(--rp-subtle)">read  src/auth/session.ts
+read  src/middleware/timeout.ts
+read  src/routes/login.ts</pre>
+              </div>
+            </article>
+
+            <div class="assistant">
+              <p>超时发生在校验 session 的中间件。我建议把超时改成可配置，并补一条失败日志。<span class="caret"></span></p>
+            </div>
+
+          </div>
+
+          <footer class="composer">
+            <div class="queue-bar">
+              <span class="queue-tag">排队中</span>
+              <span class="queue-preview">先别改代码，只说明风险。</span>
+              <span class="queue-icons">
+                <span class="qbtn" title="编辑">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                </span>
+                <span class="qbtn" title="立即发送">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+                </span>
+                <span class="qbtn" title="取消排队">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>
+                </span>
+              </span>
+            </div>
+            <div class="dock">
+              <div class="input" style="color:var(--rp-text)">也把测试范围写进说明。</div>
+              <div class="dock-bar">
+                <span class="paper">+</span>
+                <span class="slash">/ 指令</span>
+                <span class="model is-locked" style="color:var(--rp-muted)">grok-4.5 · 高</span>
+                <span class="send-stop" title="停止"><span class="sq"></span></span>
+              </div>
+            </div>
+          </footer>
+        </section>
+
+        <aside class="rail">
+          <div class="tabs">
+            <span class="tab on">图片与结果</span>
+            <span class="tab">工作区</span>
+          </div>
+          <div class="gallery">
+            <h3>图片与结果</h3>
+            <div class="card">
+              <div class="preview"></div>
+              <p>失败时的网络面板.png</p>
+              <p>来自刚才的回复 · 保存 / 打开位置</p>
+            </div>
+          </div>
+        </aside>
+      </div>
+      <footer class="statusbar">
+        <span>D:\work\demo-app</span>
+        <span>session 已连接 · 运行中</span>
+        <span>grok-4.5</span>
+      </footer>
+    </div>
+  </div>
+</body>
+</html>
