@@ -214,6 +214,18 @@ async function onResume(): Promise<void> {
   await store.resumeSession();
 }
 
+const slashCommandsPending = ref(false);
+
+async function onRequestSlashCommands(): Promise<void> {
+  if (slashCommandsPending.value || store.slashCommands.length > 0) return;
+  slashCommandsPending.value = true;
+  try {
+    await store.resumeSession();
+  } finally {
+    slashCommandsPending.value = false;
+  }
+}
+
 async function onAddAttachments(): Promise<void> {
   const result = await pickImages();
   if (result.error) store.sendError = result.error;
@@ -469,6 +481,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       :attachments="store.attachments"
       :drop-active="nativeDropActive"
       :slash-commands="store.slashCommands"
+      :slash-commands-pending="slashCommandsPending"
       :models="store.models"
       :selected-model="store.selectedModel"
       :selected-reasoning="store.selectedReasoning"
@@ -483,6 +496,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       @drop-attachments="onDropAttachments"
       @paste-images="onPasteImages"
       @remove-attachment="store.removeAttachment"
+      @request-slash-commands="onRequestSlashCommands"
     />
   </section>
 </template>

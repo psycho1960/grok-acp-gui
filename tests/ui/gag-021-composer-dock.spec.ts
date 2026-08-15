@@ -138,6 +138,58 @@ describe("GAG-021 composer dock", () => {
     clicked.unmount();
   });
 
+  it("requests Grok Build commands when slash opens with no cached commands", async () => {
+    const wrapper = mount(Composer, {
+      props: {
+        modelValue: "",
+        capabilities: { canSend: true, canCancel: false, bridgeOnline: true },
+        slashCommands: [],
+        slashCommandsPending: false,
+      },
+    });
+
+    const input = wrapper.get('[data-testid="composer-input"]');
+    await input.setValue("/");
+    await wrapper.setProps({ modelValue: "/" });
+    (input.element as HTMLTextAreaElement).setSelectionRange(1, 1);
+    await input.trigger("keyup");
+    await wrapper.setProps({ slashCommandsPending: true });
+    await input.trigger("keyup");
+
+    expect(wrapper.emitted("request-slash-commands")).toHaveLength(1);
+    expect(wrapper.get('[data-testid="slash-menu"]').text()).toContain("正在获取快捷指令");
+    wrapper.unmount();
+  });
+
+  it("resumes the ACP session when an empty conversation requests slash commands", async () => {
+    const executed: string[] = [];
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        executed.push(command.type);
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    });
+    const wrapper = mount(ConversationView, {
+      props: {
+        bridge,
+        taskId: FIX_TASK,
+        snapshot: fixtureSessionSnapshot({ status: "idle", cursor: 1 }),
+      },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    const input = wrapper.get('[data-testid="composer-input"]');
+    await input.setValue("/");
+    (input.element as HTMLTextAreaElement).setSelectionRange(1, 1);
+    await input.trigger("keyup");
+    await input.trigger("keyup");
+    await flushPromises();
+
+    expect(executed.filter((type) => type === "session.resume")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
   it("closes the model menu when typing slash opens the command menu", async () => {
     const wrapper = mount(Composer, {
       props: {

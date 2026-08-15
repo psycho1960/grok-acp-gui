@@ -23,6 +23,7 @@ const props = defineProps<{
   dropActive?: boolean;
   /** grok build quick commands discovered from ACP available_commands. */
   slashCommands?: SlashCommandInfo[];
+  slashCommandsPending?: boolean;
   models?: ModelInfo[];
   selectedModel?: string | null;
   selectedReasoning?: ReasoningEffort | null;
@@ -40,6 +41,7 @@ const emit = defineEmits<{
   removeAttachment: [artifactId: string];
   "update:model": [model: string | null];
   "update:reasoning": [reasoning: ReasoningEffort];
+  "request-slash-commands": [];
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
@@ -53,6 +55,7 @@ const slashIndex = ref(0);
 /** Suppress slash-menu syncs until the next real input event (an Esc close
  *  or a selection must not be undone by the keyup that follows it). */
 let slashEscapeLock = false;
+let slashRequestIssued = false;
 const hasContent = computed(() => props.modelValue.trim().length > 0 || (props.attachments?.length ?? 0) > 0);
 
 const REASONING_LABEL: Record<string, string> = {
@@ -92,6 +95,16 @@ const showSlashMenu = computed(
   () => slashOpen.value || slashHelpPinned.value,
 );
 
+function requestSlashCommandsIfNeeded(): void {
+  if (
+    slashRequestIssued ||
+    props.slashCommandsPending ||
+    (props.slashCommands?.length ?? 0) > 0
+  ) return;
+  slashRequestIssued = true;
+  emit("request-slash-commands");
+}
+
 function syncSlashMenu(): void {
   if (slashEscapeLock) return;
   const el = textarea.value;
@@ -104,7 +117,10 @@ function syncSlashMenu(): void {
   if (slashIndex.value >= filteredCommands.value.length) {
     slashIndex.value = 0;
   }
-  if (state.open) void nextTick(scrollSlashItemIntoView);
+  if (state.open) {
+    requestSlashCommandsIfNeeded();
+    void nextTick(scrollSlashItemIntoView);
+  }
 }
 
 function closeSlashMenu(): void {
@@ -112,6 +128,7 @@ function closeSlashMenu(): void {
   slashHelpPinned.value = false;
   slashQuery.value = "";
   slashEscapeLock = true;
+  slashRequestIssued = false;
 }
 
 function openSlashHelp(): void {
@@ -120,6 +137,7 @@ function openSlashHelp(): void {
   slashOpen.value = true;
   slashQuery.value = "";
   slashIndex.value = 0;
+  requestSlashCommandsIfNeeded();
 }
 
 function scrollSlashItemIntoView(): void {
@@ -305,7 +323,13 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
           aria-label="快捷指令"
         >
           <p v-if="filteredCommands.length === 0" class="slash-empty" role="status">
-            {{ (slashCommands?.length ?? 0) === 0 ? "暂无可用快捷指令" : "没有匹配的快捷指令" }}
+            {{
+              slashCommandsPending
+                ? "正在获取快捷指令…"
+                : (slashCommands?.length ?? 0) === 0
+                  ? "暂无可用快捷指令"
+                  : "没有匹配的快捷指令"
+            }}
           </p>
           <button
             v-for="(command, index) in filteredCommands"
