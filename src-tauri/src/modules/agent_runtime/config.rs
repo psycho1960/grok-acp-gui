@@ -19,6 +19,7 @@ pub struct ConfiguredModel {
     pub id: String,
     pub name: String,
     pub reasoning_effort: Option<String>,
+    pub reasoning_efforts: Vec<String>,
     /// Name of the environment variable that holds this profile's API key
     /// (`env_key` in the profile). The value is never read or stored — only
     /// the variable NAME is captured so callers can check presence.
@@ -87,6 +88,9 @@ fn parse_configured_models(contents: &str) -> Vec<ConfiguredModel> {
     let mut current_profile: Option<String> = None;
     let mut current_model: Option<String> = None;
     let mut current_reasoning_effort: Option<String> = None;
+    let mut current_reasoning_efforts = Vec::new();
+    let mut nested_reasoning_effort: Option<String> = None;
+    let mut in_reasoning_effort = false;
     let mut current_env_key: Option<String> = None;
 
     for raw_line in contents.lines() {
@@ -96,17 +100,34 @@ fn parse_configured_models(contents: &str) -> Vec<ConfiguredModel> {
         }
 
         if line.starts_with('[') && line.ends_with(']') {
+            if let Some(effort) = nested_reasoning_effort.take() {
+                if !current_reasoning_efforts.contains(&effort) {
+                    current_reasoning_efforts.push(effort);
+                }
+            }
+
+            let nested_profile = line
+                .strip_prefix("[[model.")
+                .and_then(|section| section.strip_suffix(".reasoning_efforts]]"))
+                .and_then(parse_toml_key);
+            if nested_profile.is_some() && nested_profile.as_deref() == current_profile.as_deref() {
+                in_reasoning_effort = true;
+                continue;
+            }
+
             push_configured_model(
                 &mut profiles,
                 current_profile.take(),
                 current_model.take(),
                 current_reasoning_effort.take(),
+                std::mem::take(&mut current_reasoning_efforts),
                 current_env_key.take(),
             );
             current_profile = line
                 .strip_prefix("[model.")
                 .and_then(|section| section.strip_suffix(']'))
                 .and_then(parse_toml_key);
+            in_reasoning_effort = false;
             continue;
         }
 
@@ -116,6 +137,12 @@ fn parse_configured_models(contents: &str) -> Vec<ConfiguredModel> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
+        if in_reasoning_effort {
+            if key.trim() == "value" {
+                nested_reasoning_effort = parse_reasoning_effort(value.trim());
+            }
+            continue;
+        }
         match key.trim() {
             "model" => current_model = parse_toml_string(value.trim()),
             "reasoning_effort" => current_reasoning_effort = parse_reasoning_effort(value.trim()),
@@ -126,11 +153,17 @@ fn parse_configured_models(contents: &str) -> Vec<ConfiguredModel> {
         }
     }
 
+    if let Some(effort) = nested_reasoning_effort {
+        if !current_reasoning_efforts.contains(&effort) {
+            current_reasoning_efforts.push(effort);
+        }
+    }
     push_configured_model(
         &mut profiles,
         current_profile,
         current_model,
         current_reasoning_effort,
+        current_reasoning_efforts,
         current_env_key,
     );
     profiles
@@ -141,6 +174,7 @@ fn push_configured_model(
     profile: Option<String>,
     model_name: Option<String>,
     reasoning_effort: Option<String>,
+    reasoning_efforts: Vec<String>,
     env_key: Option<String>,
 ) {
     let (Some(profile), Some(model_name)) = (profile, model_name) else {
@@ -158,6 +192,7 @@ fn push_configured_model(
         id: profile,
         name,
         reasoning_effort,
+        reasoning_efforts,
         env_key,
     });
 }
@@ -463,16 +498,47 @@ mod tests {
                     id: "grok-4.5".into(),
                     name: "grok-4.5".into(),
                     reasoning_effort: Some("high".into()),
+                    reasoning_efforts: vec![],
                     env_key: None,
                 },
                 ConfiguredModel {
                     id: "deepseek".into(),
                     name: "deepseek (deepseek-v4-pro)".into(),
                     reasoning_effort: Some("max".into()),
+                    reasoning_efforts: vec![],
                     env_key: None,
                 },
             ],
         );
+    }
+
+    #[test]
+    fn parses_reasoning_efforts_declared_by_each_model_profile() {
+        let config = r#"
+            [model.fast]
+            model = "fast"
+            reasoning_effort = "high"
+            [[model.fast.reasoning_efforts]]
+            id = "high"
+            value = "high"
+            default = true
+            [[model.fast.reasoning_efforts]]
+            id = "max"
+            value = "max"
+            default = false
+
+            [model."visual-model"]
+            model = "visual-model"
+            reasoning_effort = "medium"
+            [[model."visual-model".reasoning_efforts]]
+            value = "medium"
+            [[model."visual-model".reasoning_efforts]]
+            value = "high"
+        "#;
+
+        let models = parse_configured_models(config);
+        assert_eq!(models[0].reasoning_efforts, vec!["high", "max"]);
+        assert_eq!(models[1].reasoning_efforts, vec!["medium", "high"]);
     }
 
     #[test]
@@ -495,12 +561,14 @@ mod tests {
                     id: "opencode".into(),
                     name: "opencode (opencode-deepseek-v4-flash)".into(),
                     reasoning_effort: None,
+                    reasoning_efforts: vec![],
                     env_key: Some("OPENCODE_API_KEY1".into()),
                 },
                 ConfiguredModel {
                     id: "minimax".into(),
                     name: "minimax (MiniMax-M3)".into(),
                     reasoning_effort: None,
+                    reasoning_efforts: vec![],
                     // Inline api_key profiles carry no env_key: grok reads the
                     // key from config.toml itself, and we never capture values.
                     env_key: None,
@@ -515,6 +583,7 @@ mod tests {
             id: "opencode".into(),
             name: "opencode-deepseek-v4-flash".into(),
             reasoning_effort: None,
+            reasoning_efforts: vec![],
             env_key: Some("OPENCODE_API_KEY1".into()),
         }];
 
@@ -533,6 +602,7 @@ mod tests {
             id: "opencode".into(),
             name: "opencode-deepseek-v4-flash".into(),
             reasoning_effort: None,
+            reasoning_efforts: vec![],
             env_key: Some("OPENCODE_API_KEY1".into()),
         }];
 
@@ -545,6 +615,7 @@ mod tests {
             id: "native".into(),
             name: "grok-4.5".into(),
             reasoning_effort: None,
+            reasoning_efforts: vec![],
             env_key: None,
         }];
 

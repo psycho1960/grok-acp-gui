@@ -660,6 +660,18 @@ async fn workspace_change_rebinds_next_session_and_rejects_an_active_turn() {
         )
     );
 
+    // A retained ACP process can still be marked active after its turn has
+    // completed. TaskStatus is the serialized source of truth for whether a
+    // cwd change is unsafe; an idle task must be allowed to disconnect and
+    // rebind that retained process.
+    let mut retained = repo
+        .get_binding_by_task("task-rebind")
+        .expect("binding")
+        .expect("binding");
+    retained.state = SessionState::Active;
+    repo.update_binding(&retained)
+        .expect("mark retained binding active");
+
     let configured = execute_impl(
         repo.as_ref(),
         runtime.as_ref(),

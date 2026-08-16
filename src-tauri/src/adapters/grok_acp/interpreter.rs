@@ -9,7 +9,7 @@
 //! and must NOT crash the process (GAG-005 §11).
 
 use crate::bridge::types::{CorrelationId, SessionId};
-use crate::modules::agent_runtime::diagnostics::redact_visible_text;
+use crate::modules::agent_runtime::diagnostics::{redact, redact_visible_text};
 use crate::modules::agent_runtime::events::*;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -394,9 +394,10 @@ fn interpret_session_update(
             let mut tool_call = extract_tool_call(update);
             let started_at = crate::bridge::types::utc_now();
             tool_call.started_at = Some(started_at.clone());
-            tool_call.input_summary = update
-                .get("rawInput")
-                .map(|value| summarize_structure(value, "参数"));
+            tool_call.input_summary = update.get("rawInput").map(safe_tool_summary);
+            if tool_call.input_summary.is_some() {
+                tool_call.input_redacted = false;
+            }
             ctx.tool_started
                 .insert(tool_call.tool_call_id.clone(), (started_at, Instant::now()));
             let event = AgentEvent::ToolStarted(tool_call);
@@ -418,11 +419,11 @@ fn interpret_session_update(
                     outcome: tool_call.status.unwrap_or_else(|| "unknown".into()),
                     summary: update
                         .get("rawOutput")
-                        .map(|value| summarize_structure(value, "结果"))
+                        .map(safe_tool_summary)
                         .or_else(|| Some("工具调用已结束".into())),
                     ended_at: Some(crate::bridge::types::utc_now()),
                     duration_ms,
-                    result_redacted: true,
+                    result_redacted: false,
                 })
             } else {
                 AgentEvent::ToolUpdated(tool_call)
@@ -437,14 +438,15 @@ fn interpret_session_update(
                 .or_else(|| extract_string_field(update, "status"))
                 .unwrap_or_else(|| "unknown".into());
             let summary = extract_string_field(update, "summary")
-                .or_else(|| extract_string_field(update, "content"));
+                .or_else(|| extract_string_field(update, "content"))
+                .map(|value| safe_tool_text(&value));
             let event = AgentEvent::ToolCompleted(ToolCompletedPayload {
                 duration_ms: tool_duration(ctx, &tool_call_id),
                 tool_call_id,
                 outcome,
                 summary,
                 ended_at: Some(crate::bridge::types::utc_now()),
-                result_redacted: true,
+                result_redacted: false,
             });
             let meta = request_meta(session_id, ctx);
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
@@ -669,43 +671,23 @@ fn extract_locations(source: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn summarize_structure(value: &serde_json::Value, label: &str) -> String {
-    match value {
-        serde_json::Value::Object(fields) => {
-            let mut names: Vec<_> = fields
-                .keys()
-                .filter(|name| !is_sensitive_name(name))
-                .take(8)
-                .cloned()
-                .collect();
-            names.sort();
-            if names.is_empty() {
-                format!("{label}对象（内容已隐藏）")
-            } else {
-                format!("{label}字段：{}", names.join(", "))
-            }
-        }
-        serde_json::Value::Array(items) => format!("{label}列表（{} 项，内容已隐藏）", items.len()),
-        serde_json::Value::String(text) => {
-            format!("{label}文本（{} 字符，内容已隐藏）", text.chars().count())
-        }
-        _ => format!("{label}已隐藏"),
-    }
+const MAX_TOOL_SUMMARY_CHARS: usize = 2000;
+
+fn safe_tool_summary(value: &serde_json::Value) -> String {
+    let safe = redact(value, 8);
+    let serialized = serde_json::to_string(&safe).unwrap_or_else(|_| "摘要不可用".into());
+    safe_tool_text(&serialized.replace("<redacted>", "[redacted]"))
 }
 
-fn is_sensitive_name(name: &str) -> bool {
-    let normalized = name.to_ascii_lowercase();
-    [
-        "token",
-        "secret",
-        "password",
-        "authorization",
-        "api_key",
-        "apikey",
-        "env",
-    ]
-    .iter()
-    .any(|needle| normalized.contains(needle))
+fn safe_tool_text(value: &str) -> String {
+    let safe = redact_visible_text(value);
+    let mut chars = safe.chars();
+    let summary: String = chars.by_ref().take(MAX_TOOL_SUMMARY_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{summary}…")
+    } else {
+        summary
+    }
 }
 
 fn tool_duration(ctx: &mut AcpSessionContext, tool_call_id: &str) -> Option<u64> {
@@ -944,6 +926,97 @@ mod tests {
                 other => panic!("expected ToolStarted, got {:?}", other),
             },
             other => panic!("expected Events, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_events_publish_safe_input_and_result_summaries_without_blanket_redaction() {
+        let started = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: json!({
+                "type": "tool_call",
+                "toolCallId": "tc-safe-summary",
+                "title": "List files",
+                "kind": "read",
+                "rawInput": { "command": "git status --short", "path": "src" }
+            }),
+        };
+        let mut context = ctx();
+        let result = interpret(&AcpMessage::Notification(started), &sid(), &mut context);
+        match result {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::ToolStarted(tool) => {
+                    assert_eq!(
+                        tool.input_summary.as_deref(),
+                        Some(r#"{"command":"git status --short","path":"src"}"#)
+                    );
+                    assert!(!tool.input_redacted);
+                }
+                other => panic!("expected ToolStarted, got {other:?}"),
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+
+        let completed = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: json!({
+                "type": "tool_call_update",
+                "toolCallId": "tc-safe-summary",
+                "status": "completed",
+                "rawOutput": { "exitCode": 0, "stdout": " M src/main.ts" }
+            }),
+        };
+        let result = interpret(&AcpMessage::Notification(completed), &sid(), &mut context);
+        match result {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::ToolCompleted(tool) => {
+                    assert_eq!(
+                        tool.summary.as_deref(),
+                        Some(r#"{"exitCode":0,"stdout":" M src/main.ts"}"#)
+                    );
+                    assert!(!tool.result_redacted);
+                }
+                other => panic!("expected ToolCompleted, got {other:?}"),
+            },
+            other => panic!("expected Events, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_event_safe_summaries_still_remove_secrets() {
+        let notification = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "session/update".into(),
+            params: json!({
+                "type": "tool_call",
+                "toolCallId": "tc-secret-summary",
+                "title": "Call API",
+                "kind": "execute",
+                "rawInput": {
+                    "api_key": "GAG009_TEST_SECRET_NEVER_LOG",
+                    "command": "curl https://example.test"
+                }
+            }),
+        };
+        let mut context = ctx();
+        let result = interpret(
+            &AcpMessage::Notification(notification),
+            &sid(),
+            &mut context,
+        );
+        match result {
+            InterpretationResult::Events(events) => match &events[0].event {
+                AgentEvent::ToolStarted(tool) => {
+                    let summary = tool.input_summary.as_deref().unwrap_or_default();
+                    assert!(summary.contains("[redacted]"));
+                    assert!(!summary.contains("GAG009_TEST_SECRET_NEVER_LOG"));
+                    assert!(!tool.input_redacted);
+                }
+                other => panic!("expected ToolStarted, got {other:?}"),
+            },
+            other => panic!("expected Events, got {other:?}"),
         }
     }
 

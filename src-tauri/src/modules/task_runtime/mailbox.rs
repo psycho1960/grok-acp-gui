@@ -905,10 +905,10 @@ pub fn map_stored_event_to_bridge(
             }),
         ),
         "session_ready" => (
-            event_types::ACTIVITY_UPDATED,
+            event_types::SESSION_CAPABILITIES_UPDATED,
             serde_json::json!({
-                "kind": "status",
-                "detail": "Grok session ready",
+                "models": field("models"),
+                "modes": field("modes"),
             }),
         ),
         _ => return None,
@@ -1058,6 +1058,40 @@ mod tests {
             .payload
             .to_string()
             .contains("must-never-be-forwarded"));
+    }
+
+    #[test]
+    fn session_ready_preserves_advertised_modes_for_the_renderer() {
+        let stored = crate::domain::types::StoredEvent {
+            dedup_key: "session-modes:1".into(),
+            session_id: crate::domain::types::SessionId::new("session-modes"),
+            task_id: crate::domain::types::TaskId::new("task-modes"),
+            sequence: 1,
+            event_type: "session_ready".into(),
+            payload: serde_json::json!({
+                "protocolVersion": 1,
+                "agentName": "grok",
+                "agentVersion": "1.0.4",
+                "models": [],
+                "modes": [
+                    { "id": "agent", "name": "Agent" },
+                    { "id": "plan", "name": "Plan" },
+                    { "id": "ask", "name": "Ask" }
+                ]
+            }),
+            correlation_id: None,
+            persisted_at: crate::domain::types::utc_now(),
+            has_side_effects: false,
+        };
+
+        let event = map_stored_event_to_bridge(&stored).expect("bridge event");
+        assert_eq!(event.event_type, "session.capabilities.updated");
+        assert_eq!(
+            event.task_id.as_ref().map(|id| id.0.as_str()),
+            Some("task-modes")
+        );
+        assert_eq!(event.payload["modes"].as_array().map(Vec::len), Some(3));
+        assert_eq!(event.payload["modes"][1]["id"], "plan");
     }
 
     #[test]

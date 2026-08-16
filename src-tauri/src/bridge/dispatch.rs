@@ -85,6 +85,7 @@ pub fn bootstrap_impl(repo: &dyn Repository, db_init_error: Option<&str>) -> Boo
             name: model.name,
             description: None,
             reasoning_effort: model.reasoning_effort,
+            reasoning_efforts: model.reasoning_efforts,
         })
         .collect();
 
@@ -112,6 +113,7 @@ pub fn bootstrap_impl(repo: &dyn Repository, db_init_error: Option<&str>) -> Boo
             // Domain entities from persistence
             projects: domain_snap.projects,
             active_tasks: domain_snap.active_tasks,
+            completed_tasks: domain_snap.completed_tasks,
             bindings: domain_snap.bindings,
             worktrees: domain_snap.worktrees,
             recovery_items: domain_snap.recovery_items,
@@ -164,6 +166,7 @@ fn empty_bootstrap() -> BootstrapSnapshot {
         },
         projects: vec![],
         active_tasks: vec![],
+        completed_tasks: vec![],
         bindings: vec![],
         worktrees: vec![],
         recovery_items: vec![],
@@ -191,6 +194,7 @@ pub struct BootstrapSnapshot {
     // Domain entities (GAG-004)
     pub projects: Vec<domain::types::Project>,
     pub active_tasks: Vec<domain::types::Task>,
+    pub completed_tasks: Vec<domain::types::Task>,
     pub bindings: Vec<domain::types::SessionBinding>,
     pub worktrees: Vec<domain::types::WorktreeRecord>,
     pub recovery_items: Vec<domain::types::RecoveryItem>,
@@ -247,6 +251,8 @@ pub struct ModelInfo {
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_efforts: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1103,20 +1109,14 @@ async fn task_create(
     use crate::domain::types::{utc_now, Task, TaskId, TaskStatus};
     use uuid::Uuid;
 
-    if payload.prompt.trim().is_empty() {
-        return DesktopResult::err(
-            AppError::new(
-                domain::error::codes::BRIDGE_VALIDATION_FAILED,
-                "Task prompt is required",
-            )
-            .with_action("Enter a task goal before creating."),
-        );
-    }
-    // The task title is optional (FR: auto-generate from the first sentence
-    // of the user's first message). Defense in depth: a direct API caller
-    // that omits the title still gets a derived one instead of an error.
+    // Empty title is the persisted sentinel for “derive it from the first
+    // non-empty user message”. Renderer presents it as “新任务” meanwhile.
     let title = if payload.title.trim().is_empty() {
-        derive_task_title(&payload.prompt)
+        if payload.prompt.trim().is_empty() {
+            String::new()
+        } else {
+            derive_task_title(&payload.prompt)
+        }
     } else {
         payload.title.clone()
     };
@@ -1195,12 +1195,37 @@ async fn task_create(
         if let Err(error) = service.create_managed_worktree(CreateManagedWorktree {
             repo_root: std::path::PathBuf::from(repo_root),
             task_id: task.id.clone(),
-            task_slug: task.title.clone(),
+            task_slug: if task.title.is_empty() {
+                "new-task".into()
+            } else {
+                task.title.clone()
+            },
             base_ref,
         }) {
             let _ = repo.update_task_status(&task.id.0, "failed", Some(error.message));
             return DesktopResult::err(AppError::new(error.code, error.message));
         }
+    }
+
+    if payload.prompt.trim().is_empty()
+        && payload
+            .attachments
+            .as_deref()
+            .is_none_or(|attachments| attachments.is_empty())
+    {
+        if let Err(error) = repo.update_task_status(&task.id.0, "idle", None) {
+            return DesktopResult::err(AppError::new(error.code, error.message));
+        }
+        return DesktopResult::ok(serde_json::json!({
+            "taskId": task.id.0,
+            "task": {
+                "id": task.id.0,
+                "projectId": task.project_id.0,
+                "title": task.title,
+                "status": "idle",
+                "createdAt": task.created_at,
+            }
+        }));
     }
 
     task_create_start_turn(
@@ -1500,10 +1525,17 @@ async fn turn_send(
         Ok(session_id) => session_id,
         Err(error) => return DesktopResult::err(error),
     };
-    let task = match repo.get_task(&payload.task_id.0) {
+    let mut task = match repo.get_task(&payload.task_id.0) {
         Ok(task) => task,
         Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
     };
+    if task.title.trim().is_empty() && !payload.message.trim().is_empty() {
+        task.title = derive_task_title(&payload.message);
+        task.updated_at = crate::domain::types::utc_now();
+        if let Err(error) = repo.update_task(&task) {
+            return DesktopResult::err(AppError::new(error.code, error.message));
+        }
+    }
     // Images are consumed only by the isolated visual runtime (Luna). The
     // main task model receives the resulting untrusted OCR/description text,
     // never the raw image bytes, per 03-TECHNICAL-DESIGN.md visual pipeline.
@@ -1551,6 +1583,7 @@ async fn turn_send(
     if let Err(error) = repo.update_task_status(&payload.task_id.0, "running", None) {
         return DesktopResult::err(AppError::new(error.code, error.message));
     }
+    let task_title = task.title.clone();
 
     match runtime
         .send(
@@ -1567,7 +1600,11 @@ async fn turn_send(
         )
         .await
     {
-        Ok(ack) => DesktopResult::ok(ack),
+        Ok(ack) => {
+            let mut data = serde_json::to_value(ack).unwrap_or_default();
+            data["taskTitle"] = serde_json::Value::String(task_title);
+            DesktopResult::ok(data)
+        }
         Err(error) => {
             let _ = repo.update_task_status(&payload.task_id.0, "failed", Some(&error.message));
             DesktopResult::err(AppError::new(error.code, error.message))
@@ -2046,13 +2083,19 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
         }
 
         AgentEvent::SessionReady(p) => {
-            // Emit a runtime.updated event (non-session) with the
-            // session-ready info.  The Renderer uses this to update
-            // the runtime status indicator.
-            Some(DesktopEvent::non_session(
-                super::events::event_types::RUNTIME_UPDATED,
-                serde_json::to_value(&p).unwrap_or(serde_json::Value::Null),
-            ))
+            // Capabilities belong to this ACP session. Keeping the event
+            // session-scoped prevents one task from replacing another
+            // task's mode menu when multiple agents are running.
+            Some(
+                super::events::SessionEvent::new(
+                    super::events::event_types::SESSION_CAPABILITIES_UPDATED,
+                    super::types::TaskId::new(""),
+                    session_id,
+                    seq,
+                    serde_json::json!({ "models": p.models, "modes": p.modes }),
+                )
+                .build(),
+            )
         }
 
         AgentEvent::AssistantDelta(p) => {
@@ -2091,38 +2134,41 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
         }
 
         AgentEvent::ToolStarted(p) | AgentEvent::ToolUpdated(p) => {
-            let payload = super::events::ActivityUpdatedPayload {
-                kind: "tool".into(),
-                detail: p.title.unwrap_or_default(),
-                code: None,
-                retryable: None,
-            };
+            // Tool lifecycle updates are first-class work cards in the
+            // conversation, not generic activity rows.
+            let payload = serde_json::json!({ "toolCall": p });
             Some(
                 super::events::SessionEvent::new(
-                    super::events::event_types::ACTIVITY_UPDATED,
+                    super::events::event_types::MESSAGE_DELTA,
                     super::types::TaskId::new(""),
                     session_id,
                     seq,
-                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+                    payload,
                 )
                 .build(),
             )
         }
 
         AgentEvent::ToolCompleted(p) => {
-            let payload = super::events::ActivityUpdatedPayload {
-                kind: format!("tool:{}", p.outcome),
-                detail: p.summary.unwrap_or_default(),
-                code: None,
-                retryable: None,
-            };
+            // Completion is a delta. The Renderer merges it into the card by
+            // toolCallId, retaining title, kind, input and locations.
+            let payload = serde_json::json!({
+                "toolCall": {
+                    "toolCallId": p.tool_call_id,
+                    "status": p.outcome,
+                    "resultSummary": p.summary,
+                    "endedAt": p.ended_at,
+                    "durationMs": p.duration_ms,
+                    "resultRedacted": p.result_redacted,
+                }
+            });
             Some(
                 super::events::SessionEvent::new(
-                    super::events::event_types::ACTIVITY_UPDATED,
+                    super::events::event_types::MESSAGE_DELTA,
                     super::types::TaskId::new(""),
                     session_id,
                     seq,
-                    serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null),
+                    payload,
                 )
                 .build(),
             )
@@ -2303,6 +2349,64 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"success\":\"false\""));
         assert!(json.contains("\"error\""));
+    }
+
+    #[test]
+    fn tool_lifecycle_maps_to_message_delta_work_cards() {
+        use crate::modules::agent_runtime::events::{ToolCompletedPayload, ToolEventPayload};
+        use crate::modules::agent_runtime::EventMeta;
+
+        let started = map_agent_event(TimestampedEvent {
+            meta: EventMeta::new(super::super::types::SessionId::new("session-tool-card"), 7),
+            event: AgentEvent::ToolStarted(ToolEventPayload {
+                tool_call_id: "tool-7".into(),
+                title: Some("编辑文件".into()),
+                kind: Some("edit".into()),
+                status: Some("in_progress".into()),
+                started_at: Some("2026-08-16T12:00:00.000Z".into()),
+                input_summary: Some("{\"path\":\"src/App.vue\"}".into()),
+                input_redacted: false,
+                locations: vec!["src/App.vue".into()],
+            }),
+        })
+        .expect("tool start must be visible to the renderer");
+
+        assert_eq!(
+            started.event_type,
+            super::super::events::event_types::MESSAGE_DELTA
+        );
+        assert_eq!(started.payload["toolCall"]["toolCallId"], "tool-7");
+        assert_eq!(started.payload["toolCall"]["title"], "编辑文件");
+        assert_eq!(started.payload["toolCall"]["status"], "in_progress");
+        assert_eq!(
+            started.payload["toolCall"]["inputSummary"],
+            "{\"path\":\"src/App.vue\"}"
+        );
+
+        let completed = map_agent_event(TimestampedEvent {
+            meta: EventMeta::new(super::super::types::SessionId::new("session-tool-card"), 8),
+            event: AgentEvent::ToolCompleted(ToolCompletedPayload {
+                tool_call_id: "tool-7".into(),
+                outcome: "completed".into(),
+                summary: Some("已更新 src/App.vue".into()),
+                ended_at: Some("2026-08-16T12:00:01.500Z".into()),
+                duration_ms: Some(1500),
+                result_redacted: false,
+            }),
+        })
+        .expect("tool completion must update the same renderer work card");
+
+        assert_eq!(
+            completed.event_type,
+            super::super::events::event_types::MESSAGE_DELTA
+        );
+        assert_eq!(completed.payload["toolCall"]["toolCallId"], "tool-7");
+        assert_eq!(completed.payload["toolCall"]["status"], "completed");
+        assert_eq!(
+            completed.payload["toolCall"]["resultSummary"],
+            "已更新 src/App.vue"
+        );
+        assert_eq!(completed.payload["toolCall"]["durationMs"], 1500);
     }
 
     #[tokio::test]

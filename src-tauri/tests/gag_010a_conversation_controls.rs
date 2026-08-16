@@ -11,7 +11,7 @@ use std::time::Duration;
 use grok_acp_gui_lib::adapters::grok_acp::{FakeAcpTransport, FakeScenario};
 use grok_acp_gui_lib::adapters::sqlite::SqliteRepository;
 use grok_acp_gui_lib::bridge::dispatch::{execute_impl, DesktopResult};
-use grok_acp_gui_lib::domain::types::{utc_now, Project, ProjectId};
+use grok_acp_gui_lib::domain::types::{utc_now, Project, ProjectId, TaskStatus};
 use grok_acp_gui_lib::modules::agent_runtime::{AgentRuntime, AgentRuntimeImpl};
 use grok_acp_gui_lib::modules::persistence::Repository;
 use grok_acp_gui_lib::modules::task_runtime::{TaskRuntime, TaskRuntimeImpl};
@@ -91,6 +91,108 @@ async fn wait_for_event(
             _ => continue,
         }
     }
+}
+
+#[tokio::test]
+async fn new_task_works_with_legacy_grok_model_protocol() {
+    let repo = make_repo_with_project("project-legacy-model").await;
+    let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::LegacyModelConfig,
+        fake_agent_path(),
+    ));
+    let task_runtime = Arc::new(TaskRuntimeImpl::new(repo.clone(), runtime.clone()));
+    task_runtime.spawn_agent_event_forwarder();
+    let mut events = task_runtime.event_subscriber();
+    let created = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "task.create",
+            "payload": {
+                "projectId": "project-legacy-model",
+                "prompt": "first message",
+                "title": "Legacy model",
+                "mode": "ask",
+                "model": "opencode-deepseek-v4-flash",
+                "reasoning": "high",
+                "workspaceStrategy": "direct"
+            }
+        }),
+    )
+    .await;
+    let task_id = match created {
+        DesktopResult::Ok { data } => data["taskId"].as_str().unwrap().to_string(),
+        DesktopResult::Err { error } => panic!("create failed: {error:?}"),
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        let task = repo.get_task(&task_id).expect("task query");
+        let status = task.status;
+        if matches!(
+            status,
+            TaskStatus::Idle | TaskStatus::Failed | TaskStatus::Interrupted
+        ) || tokio::time::Instant::now() >= deadline
+        {
+            break status;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(status, TaskStatus::Idle, "new task ended in {status:?}");
+
+    let configured = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "session.configure",
+            "payload": {
+                "taskId": task_id,
+                "settings": { "model": "deepseek-v4-pro", "reasoning": "max" }
+            }
+        }),
+    )
+    .await;
+    assert!(
+        matches!(configured, DesktopResult::Ok { .. }),
+        "{configured:?}"
+    );
+
+    let sent = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "turn.send",
+            "payload": { "taskId": task_id, "message": "second message" }
+        }),
+    )
+    .await;
+    assert!(matches!(sent, DesktopResult::Ok { .. }), "{sent:?}");
+
+    let mut streamed = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline
+        && !streamed.contains("MODEL=deepseek-v4-pro REASONING=max")
+    {
+        if let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
+            if event.event_type == "message.delta" {
+                streamed.push_str(
+                    event
+                        .payload
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or(""),
+                );
+            }
+        }
+    }
+    assert!(
+        streamed.contains("MODEL=deepseek-v4-pro REASONING=max"),
+        "legacy session/set_model was not applied before the prompt: {streamed:?}"
+    );
+
+    runtime.shutdown_all("test complete").await;
 }
 
 #[tokio::test]
@@ -180,7 +282,9 @@ async fn session_configure_persists_and_next_prompt_carries_model_and_reasoning(
 
     let mut streamed = String::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while tokio::time::Instant::now() < deadline && !streamed.contains("MODEL=") {
+    while tokio::time::Instant::now() < deadline
+        && !streamed.contains("MODEL=deepseek-v4-pro REASONING=max")
+    {
         if let Ok(Ok(event)) = tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
             if event.event_type == "message.delta" {
                 streamed.push_str(
@@ -195,7 +299,7 @@ async fn session_configure_persists_and_next_prompt_carries_model_and_reasoning(
     }
     assert!(
         streamed.contains("MODEL=deepseek-v4-pro REASONING=max"),
-        "the session/prompt params were not echoed back: {streamed:?}"
+        "the ACP configuration was not applied before the prompt: {streamed:?}"
     );
 
     runtime.shutdown_all("test complete").await;
@@ -843,6 +947,78 @@ async fn empty_task_title_is_derived_from_the_first_sentence() {
     let third_task = repo.get_task(&third).expect("task query");
     assert!(third_task.title.ends_with('…'));
     assert!(third_task.title.chars().count() <= 31);
+
+    runtime.shutdown_all("test complete").await;
+}
+
+#[tokio::test]
+async fn empty_task_starts_without_a_turn_and_first_message_derives_its_title() {
+    let repo = make_repo_with_project("project-empty-conversation").await;
+    let runtime = AgentRuntimeImpl::new(FakeAcpTransport::new(
+        FakeScenario::Normal,
+        fake_agent_path(),
+    ));
+    let task_runtime = Arc::new(TaskRuntimeImpl::new(repo.clone(), runtime.clone()));
+    task_runtime.spawn_agent_event_forwarder();
+
+    let created = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "task.create",
+            "payload": {
+                "projectId": "project-empty-conversation",
+                "prompt": "",
+                "title": "",
+                "mode": "ask",
+                "workspaceStrategy": "direct"
+            }
+        }),
+    )
+    .await;
+    let task_id = match created {
+        DesktopResult::Ok { data } => {
+            assert_eq!(data["task"]["status"], "idle");
+            assert!(
+                data.get("turn").is_none(),
+                "empty creation must not send a turn"
+            );
+            data["taskId"].as_str().expect("task id").to_string()
+        }
+        DesktopResult::Err { error } => panic!("empty task creation failed: {error:?}"),
+    };
+    let task = repo.get_task(&task_id).expect("task query");
+    assert_eq!(task.title, "");
+    assert_eq!(task.status, TaskStatus::Idle);
+    assert!(
+        repo.get_binding_by_task(&task_id)
+            .expect("binding query")
+            .is_none(),
+        "an empty task must not start ACP before the first message"
+    );
+
+    let sent = execute_impl(
+        repo.as_ref(),
+        runtime.as_ref(),
+        task_runtime.as_ref(),
+        serde_json::json!({
+            "type": "turn.send",
+            "payload": {
+                "taskId": task_id,
+                "message": "修复登录页面。并补充回归测试。"
+            }
+        }),
+    )
+    .await;
+    match sent {
+        DesktopResult::Ok { data } => assert_eq!(data["taskTitle"], "修复登录页面"),
+        DesktopResult::Err { error } => panic!("first turn failed: {error:?}"),
+    }
+    assert_eq!(
+        repo.get_task(&task_id).expect("renamed task query").title,
+        "修复登录页面"
+    );
 
     runtime.shutdown_all("test complete").await;
 }

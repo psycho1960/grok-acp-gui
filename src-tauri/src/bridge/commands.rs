@@ -40,11 +40,12 @@ pub struct ProjectForgetPayload {
 #[serde(rename_all = "camelCase")]
 pub struct TaskCreatePayload {
     pub project_id: super::types::ProjectId,
-    /// Optional: when empty the backend derives a title from the prompt's
-    /// first sentence (frontend also derives before sending).
+    /// Optional: when empty the backend derives a title from the first
+    /// non-empty user message.
     #[serde(default)]
     pub title: String,
-    /// Initial prompt text (FR-TASK-001). Required.
+    /// Optional initial message. When empty, creation opens an idle
+    /// conversation and the first later message derives the task title.
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<String>>,
@@ -563,7 +564,6 @@ pub fn validate(cmd: &DesktopCommand) -> Result<(), AppError> {
         DesktopCommand::TaskCreate(p) => {
             validate_id_non_empty(&p.project_id.0)?;
             validate_text_len(&p.title, MAX_TITLE_LENGTH, "title")?;
-            validate_non_empty_text(&p.prompt, "prompt")?;
             validate_text_len(&p.prompt, MAX_MESSAGE_LENGTH, "prompt")?;
             reject_base64_image(&p.prompt)?;
             validate_enum_opt(

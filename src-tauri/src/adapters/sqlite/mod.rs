@@ -745,6 +745,18 @@ impl Repository for SqliteRepository {
             collect_rows(rows, "bootstrap: tasks row")?
         };
 
+        let completed_tasks = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, project_id, title, status, workspace_kind, mode, model, reasoning, created_at, updated_at, interrupt_reason, interrupted_at, attempt_count FROM tasks WHERE status IN ('merged', 'archived') ORDER BY updated_at DESC",
+                )
+                .map_err(|e| db_error("bootstrap: completed tasks query", &e))?;
+            let rows = stmt
+                .query_map([], row_to_task)
+                .map_err(|e| db_error("bootstrap: completed tasks map", &e))?;
+            collect_rows(rows, "bootstrap: completed tasks row")?
+        };
+
         let bindings = {
             let mut stmt = conn
                 .prepare("SELECT task_id, session_id, cwd, last_seq, state, attempt_number FROM session_bindings")
@@ -796,6 +808,7 @@ impl Repository for SqliteRepository {
             platform: std::env::consts::OS.into(),
             projects,
             active_tasks,
+            completed_tasks,
             bindings,
             worktrees,
             recovery_items,
@@ -2687,10 +2700,14 @@ mod tests {
         repo.create_project(&p).unwrap();
         let t = make_task("t1", "p1", TaskStatus::Running);
         repo.create_task(&t).unwrap();
+        let completed = make_task("t2", "p1", TaskStatus::Merged);
+        repo.create_task(&completed).unwrap();
 
         let snap = repo.bootstrap_snapshot().unwrap();
         assert_eq!(snap.projects.len(), 1);
         assert_eq!(snap.active_tasks.len(), 1);
+        assert_eq!(snap.completed_tasks.len(), 1);
+        assert_eq!(snap.completed_tasks[0].id.0, "t2");
     }
 
     #[test]

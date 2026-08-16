@@ -610,6 +610,9 @@ pub struct BootstrapSnapshot {
     pub projects: Vec<Project>,
     /// All active (non-archived, non-merged) tasks with their bindings.
     pub active_tasks: Vec<Task>,
+    /// Terminal tasks retained for Task Center history.
+    #[serde(default)]
+    pub completed_tasks: Vec<Task>,
     /// Bindings for active tasks.
     pub bindings: Vec<SessionBinding>,
     /// Worktree records for active tasks.
@@ -663,6 +666,7 @@ mod tests {
             platform: "windows".into(),
             projects: vec![],
             active_tasks: vec![],
+            completed_tasks: vec![],
             bindings: vec![],
             worktrees: vec![],
             recovery_items: vec![],
@@ -674,6 +678,7 @@ mod tests {
         };
         let json = serde_json::to_string(&snap).unwrap();
         assert!(json.contains("productName"));
+        assert!(json.contains("completedTasks"));
         assert!(json.contains("recoveryPerformed"));
     }
 

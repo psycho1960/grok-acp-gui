@@ -55,6 +55,19 @@ const KILL_GRACE_SECS: u64 = 5;
 /// A mode must be confirmed before its Prompt is allowed to start.
 const MODE_CHANGE_TIMEOUT_SECS: u64 = 10;
 
+#[derive(Clone)]
+struct ConfigOptionBinding {
+    id: String,
+    category: String,
+    values: Vec<String>,
+}
+
+#[derive(Clone)]
+enum SessionConfigChange {
+    Standard { id: String, value: String },
+    LegacyModel { value: String },
+}
+
 /// Internal event sent from a session reader task to the central
 /// forwarder. Carries the session_id so the forwarder knows where it
 /// came from.
@@ -85,6 +98,15 @@ struct SessionSlot {
     available_mode_ids: Vec<String>,
     /// Client `session/set_mode` request ids awaiting the ACP response.
     pending_mode_change_responses: Arc<StdMutex<HashMap<u64, oneshot::Sender<bool>>>>,
+    /// Client `session/set_config_option` request ids awaiting ACP confirmation.
+    pending_config_change_responses: Arc<StdMutex<HashMap<u64, oneshot::Sender<bool>>>>,
+    /// Select options advertised by ACP in the `session/new` response.
+    config_options: Vec<ConfigOptionBinding>,
+    /// Model profile used to start the Grok process, updated after a
+    /// successful legacy `session/set_model` request.
+    active_model: Option<String>,
+    /// Reasoning supplied by the active local model profile when known.
+    active_reasoning: Option<String>,
     /// Agent-to-client JSON-RPC request ids awaiting a permission response.
     /// Keys are the stable request ids exposed to the task runtime; values are
     /// the raw JSON-RPC ids that must be echoed in the response envelope.
@@ -100,7 +122,11 @@ struct SessionSlot {
 }
 
 impl SessionSlot {
-    fn new(executable_path: String) -> Self {
+    fn new(
+        executable_path: String,
+        active_model: Option<String>,
+        active_reasoning: Option<String>,
+    ) -> Self {
         Self {
             state: RuntimeState::Unavailable,
             outbound: None,
@@ -113,6 +139,10 @@ impl SessionSlot {
             acp_session_id: None,
             available_mode_ids: Vec::new(),
             pending_mode_change_responses: Arc::new(StdMutex::new(HashMap::new())),
+            pending_config_change_responses: Arc::new(StdMutex::new(HashMap::new())),
+            config_options: Vec::new(),
+            active_model,
+            active_reasoning,
             pending_permission_requests: Arc::new(StdMutex::new(HashMap::new())),
             pending_plan_requests: Arc::new(StdMutex::new(HashMap::new())),
             executable_path,
@@ -468,6 +498,12 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
 
         // Create or reset the session slot.
         {
+            let active_reasoning = config.model.as_deref().and_then(|model| {
+                super::config::configured_models()
+                    .into_iter()
+                    .find(|profile| profile.id == model)
+                    .and_then(|profile| profile.reasoning_effort)
+            });
             let mut sessions = self.sessions.lock().await;
             if let Some(existing) = sessions.get(&session_id) {
                 if existing.state.is_live() {
@@ -487,6 +523,8 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         .resolved_path()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default(),
+                    config.model.clone(),
+                    active_reasoning,
                 ),
             );
         }
@@ -573,11 +611,8 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
 
                 let reader_acp_session_id = handshake_info.acp_session_id.clone();
                 let mut handshake_messages = handshake_info.pending_messages;
-                let available_mode_ids = handshake_info
-                    .modes
-                    .iter()
-                    .map(|mode| mode.id.clone())
-                    .collect();
+                let (available_mode_ids, visible_modes) =
+                    normalize_grok_session_modes(handshake_info.modes);
 
                 // Emit session_ready event.
                 let event = TimestampedEvent {
@@ -587,7 +622,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         agent_name: handshake_info.agent_name,
                         agent_version: handshake_info.agent_version,
                         models: vec![],
-                        modes: handshake_info.modes,
+                        modes: visible_modes,
                     }),
                 };
                 self.emit_runtime_event(event).await;
@@ -598,16 +633,19 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                     pending_permission_requests,
                     pending_plan_requests,
                     pending_mode_change_responses,
+                    pending_config_change_responses,
                 ) = {
                     let mut sessions = self.sessions.lock().await;
                     let slot = sessions.get_mut(&session_id).unwrap();
                     slot.acp_session_id = Some(handshake_info.acp_session_id);
                     slot.available_mode_ids = available_mode_ids;
+                    slot.config_options = handshake_info.config_options;
                     (
                         slot.interp_ctx.clone(),
                         slot.pending_permission_requests.clone(),
                         slot.pending_plan_requests.clone(),
                         slot.pending_mode_change_responses.clone(),
+                        slot.pending_config_change_responses.clone(),
                     )
                 };
                 let internal_tx = self.internal_event_tx.clone();
@@ -632,6 +670,14 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         if let AcpMessage::Response(response) = &msg {
                             if let Some(request_id) = response.id.as_u64() {
                                 if let Some(waiter) = pending_mode_change_responses
+                                    .lock()
+                                    .unwrap()
+                                    .remove(&request_id)
+                                {
+                                    let _ = waiter.send(response.error.is_none());
+                                    continue;
+                                }
+                                if let Some(waiter) = pending_config_change_responses
                                     .lock()
                                     .unwrap()
                                     .remove(&request_id)
@@ -759,6 +805,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                     pending_permission_requests.lock().unwrap().clear();
                     pending_plan_requests.lock().unwrap().clear();
                     pending_mode_change_responses.lock().unwrap().clear();
+                    pending_config_change_responses.lock().unwrap().clear();
                     // Inbound channel closed — process exited.
                     let exit_sequence = {
                         let mut context = interp_ctx.lock().unwrap();
@@ -864,12 +911,6 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         let mode_to_set = match &request {
             ClientRequest::Prompt(prompt) => match prompt.mode.as_deref() {
                 Some(requested_mode) => {
-                    // The task UI's "agent" mode is Grok's default ACP mode.
-                    // The other UI values intentionally match ACP mode ids.
-                    let requested_mode = match requested_mode {
-                        "agent" => "default",
-                        mode => mode,
-                    };
                     let advertised_modes = self
                         .sessions
                         .lock()
@@ -879,26 +920,96 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         .ok_or_else(|| {
                             DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
                         })?;
-                    if advertised_modes.is_empty() {
-                        if requested_mode.eq_ignore_ascii_case("plan") {
-                            return Err(DomainError::new(
-                                codes::ACP_REQUEST_FAILED,
-                                "ACP did not advertise the required plan mode",
-                            ));
-                        }
-                        None
-                    } else if advertised_modes.iter().any(|mode| mode == requested_mode) {
-                        Some(requested_mode.to_string())
-                    } else {
-                        return Err(DomainError::new(
-                            codes::ACP_REQUEST_FAILED,
-                            "requested session mode is not advertised by ACP",
-                        ));
-                    }
+                    Some(
+                        resolve_grok_mode_id(requested_mode, &advertised_modes).ok_or_else(
+                            || {
+                                DomainError::new(
+                                    codes::ACP_REQUEST_FAILED,
+                                    "requested session mode is not supported by Grok ACP",
+                                )
+                            },
+                        )?,
+                    )
                 }
                 None => None,
             },
             _ => None,
+        };
+
+        let config_to_set = match &request {
+            ClientRequest::Prompt(prompt) => {
+                let (advertised, active_model, active_reasoning) = self
+                    .sessions
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .map(|slot| {
+                        (
+                            slot.config_options.clone(),
+                            slot.active_model.clone(),
+                            slot.active_reasoning.clone(),
+                        )
+                    })
+                    .ok_or_else(|| {
+                        DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
+                    })?;
+                let mut changes = Vec::new();
+
+                if let Some(model) = prompt.model.as_deref() {
+                    if let Some(option) =
+                        advertised.iter().find(|option| option.category == "model")
+                    {
+                        if !option.values.iter().any(|value| value == model) {
+                            return Err(DomainError::new(
+                                codes::ACP_REQUEST_FAILED,
+                                "requested model value is not advertised by ACP",
+                            ));
+                        }
+                        changes.push(SessionConfigChange::Standard {
+                            id: option.id.clone(),
+                            value: model.to_string(),
+                        });
+                    } else if active_model.as_deref() != Some(model) {
+                        // Grok builds based on ACP 0.10.x expose the legacy
+                        // model request but do not return configOptions.
+                        changes.push(SessionConfigChange::LegacyModel {
+                            value: model.to_string(),
+                        });
+                    }
+                }
+
+                if let Some(reasoning) = prompt.reasoning.as_deref() {
+                    if let Some(option) = advertised
+                        .iter()
+                        .find(|option| option.category == "thought_level")
+                    {
+                        if !option.values.iter().any(|value| value == reasoning) {
+                            return Err(DomainError::new(
+                                codes::ACP_REQUEST_FAILED,
+                                "requested thought_level value is not advertised by ACP",
+                            ));
+                        }
+                        changes.push(SessionConfigChange::Standard {
+                            id: option.id.clone(),
+                            value: reasoning.to_string(),
+                        });
+                    } else if active_model.as_deref() == prompt.model.as_deref()
+                        && active_reasoning
+                            .as_deref()
+                            .is_some_and(|value| value != reasoning)
+                    {
+                        return Err(DomainError::new(
+                            codes::ACP_REQUEST_FAILED,
+                            "this Grok version only supports the reasoning configured by the selected model profile",
+                        ));
+                    }
+                    // With legacy Grok the selected local model profile owns
+                    // reasoning. Matching (or unknown) profile values require
+                    // no extra request and must not block the first Turn.
+                }
+                changes
+            }
+            _ => Vec::new(),
         };
 
         // Get the outbound channel.
@@ -913,7 +1024,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
         };
 
         // Allocate a request ID.
-        let (request_id, mode_request_id, mode_change_response, acp_session_id) = {
+        let (request_id, mode_request_id, mode_change_response, config_changes, acp_session_id) = {
             let mut sessions = self.sessions.lock().await;
             let slot = sessions.get_mut(&session_id).unwrap();
             let mode_request_id = mode_to_set.as_ref().map(|_| {
@@ -928,6 +1039,19 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                     .insert(mode_request_id, sender);
                 receiver
             });
+            let config_changes = config_to_set
+                .iter()
+                .map(|change| {
+                    slot.next_request_id += 1;
+                    let config_request_id = slot.next_request_id;
+                    let (sender, receiver) = oneshot::channel();
+                    slot.pending_config_change_responses
+                        .lock()
+                        .unwrap()
+                        .insert(config_request_id, sender);
+                    (config_request_id, change.clone(), receiver)
+                })
+                .collect::<Vec<_>>();
             slot.next_request_id += 1;
             let request_id = slot.next_request_id;
             let acp_session_id = slot.acp_session_id.clone().ok_or_else(|| {
@@ -937,6 +1061,7 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                 request_id,
                 mode_request_id,
                 mode_change_response,
+                config_changes,
                 acp_session_id,
             )
         };
@@ -999,6 +1124,81 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
             }
         }
 
+        for (config_request_id, change, config_change_response) in config_changes {
+            let (method, params) = match &change {
+                SessionConfigChange::Standard { id, value } => (
+                    "session/set_config_option",
+                    serde_json::json!({
+                        "sessionId": acp_session_id.as_str(),
+                        "configId": id,
+                        "value": value,
+                    }),
+                ),
+                SessionConfigChange::LegacyModel { value } => (
+                    "session/set_model",
+                    serde_json::json!({
+                        "sessionId": acp_session_id.as_str(),
+                        "modelId": value,
+                    }),
+                ),
+            };
+            let encoded = encode_request(config_request_id, method, &params);
+            if outbound.send(encoded).await.is_err() {
+                if let Some(slot) = self.sessions.lock().await.get(&session_id) {
+                    slot.pending_config_change_responses
+                        .lock()
+                        .unwrap()
+                        .remove(&config_request_id);
+                }
+                return Err(DomainError::new(
+                    codes::RUNTIME_PROCESS_DIED,
+                    "failed to send configuration to process",
+                ));
+            }
+
+            let config_change_result = timeout(
+                Duration::from_secs(MODE_CHANGE_TIMEOUT_SECS),
+                config_change_response,
+            )
+            .await;
+            if let Some(slot) = self.sessions.lock().await.get(&session_id) {
+                slot.pending_config_change_responses
+                    .lock()
+                    .unwrap()
+                    .remove(&config_request_id);
+            }
+            let config_change_succeeded = config_change_result
+                .map_err(|_| {
+                    DomainError::new(
+                        codes::ACP_REQUEST_FAILED,
+                        "ACP did not confirm the requested session configuration",
+                    )
+                })?
+                .map_err(|_| {
+                    DomainError::new(
+                        codes::RUNTIME_PROCESS_DIED,
+                        "ACP closed before confirming the requested session configuration",
+                    )
+                })?;
+            if !config_change_succeeded {
+                return Err(DomainError::new(
+                    codes::ACP_REQUEST_FAILED,
+                    "ACP rejected the requested session configuration",
+                ));
+            }
+
+            if let SessionConfigChange::LegacyModel { value } = change {
+                let active_reasoning = super::config::configured_models()
+                    .into_iter()
+                    .find(|profile| profile.id == value)
+                    .and_then(|profile| profile.reasoning_effort);
+                if let Some(slot) = self.sessions.lock().await.get_mut(&session_id) {
+                    slot.active_model = Some(value);
+                    slot.active_reasoning = active_reasoning;
+                }
+            }
+        }
+
         if starts_turn {
             self.try_transition(&session_id, RuntimeTransition::TurnStarted)
                 .await?;
@@ -1025,20 +1225,10 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                         "data": image.base64_data,
                     })
                 }));
-                let mut params = serde_json::json!({
+                let params = serde_json::json!({
                     "sessionId": acp_session_id,
                     "prompt": prompt,
                 });
-                // Per-turn model / reasoning override. These are additive
-                // ACP prompt params the agent may ignore; the observable
-                // contract is that every prompt carries the current task
-                // selection (GAG-008 conversation settings).
-                if let Some(model) = p.model.as_deref() {
-                    params["model"] = serde_json::json!(model);
-                }
-                if let Some(reasoning) = p.reasoning.as_deref() {
-                    params["reasoning"] = serde_json::json!(reasoning);
-                }
                 encode_request(request_id, "session/prompt", &params)
             }
             ClientRequest::Cancel => {
@@ -1361,7 +1551,115 @@ struct HandshakeInfo {
     agent_version: String,
     acp_session_id: String,
     modes: Vec<ModeDescriptor>,
+    config_options: Vec<ConfigOptionBinding>,
     pending_messages: VecDeque<AcpMessage>,
+}
+
+const GROK_COMPAT_MODE_IDS: [&str; 3] = ["default", "plan", "ask"];
+
+/// Grok 1.0.4 accepts the legacy session modes but omits `modes` from
+/// `session/new`. Keep product modes available while preserving the exact
+/// advertised IDs when newer/older builds do publish them.
+fn normalize_grok_session_modes(
+    advertised: Vec<ModeDescriptor>,
+) -> (Vec<String>, Vec<ModeDescriptor>) {
+    let wire_ids: Vec<String> = if advertised.is_empty() {
+        GROK_COMPAT_MODE_IDS
+            .iter()
+            .map(|mode| (*mode).to_string())
+            .collect()
+    } else {
+        advertised.iter().map(|mode| mode.id.clone()).collect()
+    };
+    let supports = |ids: &[&str]| wire_ids.iter().any(|mode| ids.contains(&mode.as_str()));
+    let mut visible = Vec::new();
+    if supports(&["default", "agent", "auto"]) {
+        visible.push(ModeDescriptor {
+            id: "agent".into(),
+            name: "智能体".into(),
+        });
+    }
+    if supports(&["plan"]) {
+        visible.push(ModeDescriptor {
+            id: "plan".into(),
+            name: "计划".into(),
+        });
+    }
+    if supports(&["ask"]) {
+        visible.push(ModeDescriptor {
+            id: "ask".into(),
+            name: "问答".into(),
+        });
+    }
+    (wire_ids, visible)
+}
+
+fn resolve_grok_mode_id(requested: &str, supported: &[String]) -> Option<String> {
+    let candidates: &[&str] = match requested {
+        "agent" => &["default", "agent", "auto"],
+        "plan" => &["plan"],
+        "ask" => &["ask"],
+        other => &[other],
+    };
+    candidates
+        .iter()
+        .find(|candidate| supported.iter().any(|mode| mode == **candidate))
+        .map(|mode| (*mode).to_string())
+}
+
+#[cfg(test)]
+mod mode_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn missing_grok_mode_advertisement_uses_verified_legacy_ids() {
+        let (wire_ids, visible) = normalize_grok_session_modes(vec![]);
+        assert_eq!(wire_ids, vec!["default", "plan", "ask"]);
+        assert_eq!(
+            visible
+                .iter()
+                .map(|mode| mode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent", "plan", "ask"]
+        );
+        assert_eq!(
+            resolve_grok_mode_id("agent", &wire_ids).as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            resolve_grok_mode_id("plan", &wire_ids).as_deref(),
+            Some("plan")
+        );
+        assert_eq!(
+            resolve_grok_mode_id("ask", &wire_ids).as_deref(),
+            Some("ask")
+        );
+    }
+
+    #[test]
+    fn advertised_modes_remain_authoritative() {
+        let advertised = vec![
+            ModeDescriptor {
+                id: "auto".into(),
+                name: "Auto".into(),
+            },
+            ModeDescriptor {
+                id: "plan".into(),
+                name: "Plan".into(),
+            },
+            ModeDescriptor {
+                id: "ask".into(),
+                name: "Ask".into(),
+            },
+        ];
+        let (wire_ids, visible) = normalize_grok_session_modes(advertised);
+        assert_eq!(
+            resolve_grok_mode_id("agent", &wire_ids).as_deref(),
+            Some("auto")
+        );
+        assert_eq!(visible.len(), 3);
+        assert_eq!(resolve_grok_mode_id("unsupported", &wire_ids), None);
+    }
 }
 
 /// Perform the ACP handshake: send `initialize` and wait for the response.
@@ -1562,6 +1860,38 @@ async fn perform_handshake(
                                 Some(ModeDescriptor { id, name })
                             })
                             .collect();
+                        let config_options = session
+                            .get("configOptions")
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|option| {
+                                if option.get("type").and_then(serde_json::Value::as_str)
+                                    != Some("select")
+                                {
+                                    return None;
+                                }
+                                let id = option.get("id")?.as_str()?.to_string();
+                                let category = option.get("category")?.as_str()?.to_string();
+                                let values = option
+                                    .get("options")
+                                    .and_then(serde_json::Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|value| {
+                                        value
+                                            .get("value")
+                                            .and_then(serde_json::Value::as_str)
+                                            .map(str::to_string)
+                                    })
+                                    .collect();
+                                Some(ConfigOptionBinding {
+                                    id,
+                                    category,
+                                    values,
+                                })
+                            })
+                            .collect();
 
                         return Ok(HandshakeInfo {
                             protocol_version,
@@ -1569,6 +1899,7 @@ async fn perform_handshake(
                             agent_version,
                             acp_session_id,
                             modes,
+                            config_options,
                             pending_messages,
                         });
                     }
