@@ -204,8 +204,8 @@ describe("DesktopEvent round-trip", () => {
 
   it("all event type constants are defined", () => {
     const eventTypes = Object.values(EventTypes);
-    expect(eventTypes).toHaveLength(12);
-    expect(new Set(eventTypes).size).toBe(12);
+    expect(eventTypes).toHaveLength(13);
+    expect(new Set(eventTypes).size).toBe(13);
   });
 
   it("session.commands.updated event mirrors the Rust SlashCommandInfo DTO", () => {
@@ -217,7 +217,11 @@ describe("DesktopEvent round-trip", () => {
       timestamp: "2026-01-01T00:00:00Z",
       payload: {
         commands: [
-          { name: "init", description: "初始化一个新项目", acceptsInput: false },
+          {
+            name: "init",
+            description: "初始化一个新项目",
+            acceptsInput: false,
+          },
           { name: "plan", description: "为变更制定计划", acceptsInput: true },
         ],
       },
@@ -242,12 +246,26 @@ describe("DesktopEvent round-trip", () => {
 describe("FakeDesktopBridge", () => {
   it("bootstrap returns configured snapshot", async () => {
     const bridge = createFakeDesktopBridge({
-      bootstrapSnapshot: { version: "1.2.3" },
+      bootstrapSnapshot: {
+        version: "1.2.3",
+        completedTasks: [
+          {
+            id: "completed-task" as TaskId,
+            projectId: "project" as ProjectId,
+            title: "Done",
+            status: "merged",
+            workspaceKind: "worktree",
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-02T00:00:00Z",
+          },
+        ],
+      },
     });
     const snap = await bridge.bootstrap();
     expect(snap.version).toBe("1.2.3");
     expect(snap.productName).toContain("Grok ACP GUI");
     expect(snap.ready).toBe(true);
+    expect(snap.completedTasks?.[0]?.status).toBe("merged");
   });
 
   it("execute returns stub acknowledgement by default", async () => {

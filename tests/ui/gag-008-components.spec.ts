@@ -26,6 +26,19 @@ describe("GAG-008 components", () => {
     expect(w.html()).toContain("<strong>ok</strong>");
   });
 
+  it("SafeMarkdown renders structured assistant content", () => {
+    const w = mount(SafeMarkdown, {
+      props: {
+        source: "## 技术栈\n\n| 层 | 技术 |\n| --- | --- |\n| 前端 | 微信小程序 |\n\n1. 开发版\n2. 正式版\n\n- Fastify\n- SQLite",
+      },
+    });
+
+    expect(w.get("h2").text()).toBe("技术栈");
+    expect(w.get("table").text()).toContain("微信小程序");
+    expect(w.findAll("ol > li")).toHaveLength(2);
+    expect(w.findAll("ul > li")).toHaveLength(2);
+  });
+
   it("copies the complete visible message with code preserved and secrets redacted", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {

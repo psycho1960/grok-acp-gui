@@ -106,17 +106,76 @@ describe("GAG-021 conversation rail", () => {
     w.unmount();
   });
 
+  it("shows direct workspace information without invoking Worktree operations", async () => {
+    const commands: DesktopCommand[] = [];
+    const artifact: ArtifactDescriptor = {
+      artifactId: "art-direct",
+      displayName: "result.png",
+      mimeType: "image/png",
+      bytes: 1024,
+      state: "ready",
+      previewCapability: "inline",
+    };
+    const w = await mountConversation(
+      {
+        workspaceStrategy: "direct",
+        workspaceAvailable: true,
+        events: [fixtureArtifact(1)],
+      },
+      createFakeDesktopBridge({
+        onExecute(command) {
+          commands.push(command);
+          if (command.type === "artifact.list") {
+            return { success: "true", data: { artifacts: [artifact] } };
+          }
+          if (command.type === "worktree.inspect") {
+            return {
+              success: "false",
+              error: { code: "WORKTREE_NOT_READY", message: "Worktree is not registered" },
+            };
+          }
+          return { success: "true", data: { acknowledged: command.type } };
+        },
+      }),
+    );
+
+    await w.get('[data-testid="rail-tab-workspace"]').trigger("click");
+    await flushPromises();
+
+    const rail = w.get('[data-testid="conversation-rail"]');
+    expect(rail.text()).toContain("当前项目目录");
+    expect(rail.text()).not.toContain("Worktree is not registered");
+    expect(commands.some((command) => command.type === "worktree.inspect")).toBe(false);
+    w.unmount();
+  });
+
   it("opens for not-created, conflicted, external-awaiting-adoption, and cleanup-recovery-pending workspaces", async () => {
-    const notCreated = await mountConversation({
-      workspaceStrategy: "worktree",
-      workspaceAvailable: false,
-      events: [],
-      items: [itemBase("user", 1, { text: "还没建好" })],
-    });
+    const notCreatedCommands: DesktopCommand[] = [];
+    const notCreated = await mountConversation(
+      {
+        workspaceStrategy: "worktree",
+        workspaceAvailable: false,
+        events: [],
+        items: [itemBase("user", 1, { text: "还没建好" })],
+      },
+      createFakeDesktopBridge({
+        onExecute(command) {
+          notCreatedCommands.push(command);
+          return { success: "true", data: { acknowledged: command.type } };
+        },
+      }),
+    );
     expect(notCreated.get('[data-testid="conversation-rail"]').exists()).toBe(true);
     expect(notCreated.get('[data-testid="rail-tab-workspace"]').attributes("aria-selected")).toBe(
       "true",
     );
+    expect(notCreated.get('[data-testid="worktree-not-created"]').text()).toContain(
+      "隔离 Worktree 尚未创建",
+    );
+    expect(notCreated.text()).not.toContain("Worktree is not registered");
+    expect(
+      notCreatedCommands.some((command) => command.type === "worktree.inspect"),
+    ).toBe(false);
     notCreated.unmount();
 
     const conflicted = await mountConversation({

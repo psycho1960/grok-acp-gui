@@ -191,6 +191,21 @@ describe("GAG-021 hybrid timeline", () => {
     w.unmount();
   });
 
+  it("keeps a visible processing status while a running turn has no safe work detail yet", async () => {
+    const w = await mountConversation({
+      cursor: 1,
+      events: [],
+      status: "running",
+      items: [itemBase("user", 1, { text: "请开始处理" })],
+    });
+
+    const processing = w.get('[data-testid="agent-processing"]');
+    expect(processing.text()).toContain("正在处理");
+    expect(processing.attributes("role")).toBe("status");
+    expect(processing.attributes("aria-live")).toBe("polite");
+    w.unmount();
+  });
+
   it("labels thinking in Chinese and expands only the ACP summary", async () => {
     const w = await mountConversation({
       cursor: 1,
@@ -207,6 +222,7 @@ describe("GAG-021 hybrid timeline", () => {
     const toggle = w.get('[data-testid="thinking-toggle"]');
     expect(toggle.text()).toContain("思考中");
     expect(toggle.text()).not.toContain("Thinking");
+    expect(w.find('[data-testid="agent-processing"]').exists()).toBe(false);
     expect(w.find('[data-testid="thinking-body"]').exists()).toBe(false);
     await toggle.trigger("click");
     await flushPromises();

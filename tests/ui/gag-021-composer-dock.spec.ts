@@ -13,8 +13,18 @@ import {
 import type { ModelInfo, TypedDesktopEvent } from "../../src/bridge/types";
 
 const MODELS: ModelInfo[] = [
-  { modelId: "grok-4.5", name: "grok-4.5" },
-  { modelId: "deepseek", name: "deepseek" },
+  {
+    modelId: "grok-4.5",
+    name: "grok-4.5",
+    reasoningEffort: "high",
+    reasoningEfforts: ["high", "max"],
+  },
+  {
+    modelId: "deepseek",
+    name: "deepseek",
+    reasoningEffort: "medium",
+    reasoningEfforts: ["medium", "high"],
+  },
 ];
 
 describe("GAG-021 composer dock", () => {
@@ -51,6 +61,82 @@ describe("GAG-021 composer dock", () => {
     });
     expect(w.find('[data-testid="composer-stop"]').exists()).toBe(true);
     expect(w.find('[data-testid="composer-send"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it("keeps slash commands usable while a turn is running so they can be queued", async () => {
+    const commandUpdate = {
+      type: "session.commands.updated",
+      taskId: FIX_TASK,
+      sessionId: FIX_SESSION,
+      seq: 2,
+      timestamp: "2026-04-01T12:00:02.000Z",
+      payload: {
+        commands: [{ name: "session-info", description: "查看会话信息", acceptsInput: false }],
+      },
+    } as TypedDesktopEvent;
+    const w = mount(ConversationView, {
+      props: {
+        bridge: createFakeDesktopBridge(),
+        taskId: FIX_TASK,
+        snapshot: fixtureSessionSnapshot({
+          status: "running",
+          cursor: 2,
+          events: [fixtureTaskState(1, "running"), commandUpdate],
+        }),
+      },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    const slashButton = w.get('[data-testid="composer-slash-help"]');
+    expect((slashButton.element as HTMLButtonElement).disabled).toBe(false);
+    await slashButton.trigger("click");
+    await w.get('[data-testid="slash-menu-item"]').trigger("click");
+    await w.get('[data-testid="composer-input"]').trigger("keydown", { key: "Enter" });
+
+    expect(w.get('[data-testid="queue-bar"]').text()).toContain("/session-info");
+    w.unmount();
+  });
+
+  it("filters slash commands when typing after opening the slash button", async () => {
+    const commandUpdate = {
+      type: "session.commands.updated",
+      taskId: FIX_TASK,
+      sessionId: FIX_SESSION,
+      seq: 2,
+      timestamp: "2026-04-01T12:00:02.000Z",
+      payload: {
+        commands: [
+          { name: "compact", description: "压缩上下文", acceptsInput: false },
+          { name: "plugins", description: "管理插件", acceptsInput: true },
+          { name: "session-info", description: "查看会话信息", acceptsInput: false },
+        ],
+      },
+    } as TypedDesktopEvent;
+    const w = mount(ConversationView, {
+      props: {
+        bridge: createFakeDesktopBridge(),
+        taskId: FIX_TASK,
+        snapshot: fixtureSessionSnapshot({
+          status: "idle",
+          cursor: 2,
+          events: [fixtureTaskState(1, "idle"), commandUpdate],
+        }),
+      },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await w.get('[data-testid="composer-slash-help"]').trigger("click");
+    const input = w.get('[data-testid="composer-input"]');
+    await input.setValue("/sess");
+    (input.element as HTMLTextAreaElement).setSelectionRange(5, 5);
+    await input.trigger("keyup");
+
+    const items = w.findAll('[data-testid="slash-menu-item"]');
+    expect(items).toHaveLength(1);
+    expect(items[0].text()).toContain("/session-info");
     w.unmount();
   });
 
@@ -105,6 +191,62 @@ describe("GAG-021 composer dock", () => {
     locked.unmount();
   });
 
+  it("switches from the visible menu and shows only reasoning efforts declared by that Grok profile", async () => {
+    const wrapper = mount(Composer, {
+      props: {
+        modelValue: "",
+        capabilities: { canSend: true, canCancel: false, bridgeOnline: true },
+        models: MODELS,
+        selectedModel: "grok-4.5",
+        selectedReasoning: "high",
+        settingsLocked: false,
+      },
+    });
+
+    await wrapper.get('[data-testid="model-reasoning-toggle"]').trigger("click");
+    const menu = wrapper.get('[data-testid="model-reasoning-menu"]');
+    expect(menu.findAll('[data-testid="reasoning-option"]').map((item) => item.text())).toEqual([
+      "高",
+      "最高",
+    ]);
+
+    await menu
+      .findAll('[data-testid="model-option"]')
+      .find((item) => item.text() === "deepseek")!
+      .trigger("click");
+    expect(wrapper.emitted("update:model")?.at(-1)).toEqual(["deepseek"]);
+    expect(wrapper.find('[data-testid="model-reasoning-menu"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("closes the model menu when the composer input or another page area is clicked", async () => {
+    const wrapper = mount(Composer, {
+      props: {
+        modelValue: "",
+        capabilities: { canSend: true, canCancel: false, bridgeOnline: true },
+        models: MODELS,
+        selectedModel: "grok-4.5",
+        selectedReasoning: "high",
+        settingsLocked: false,
+      },
+      attachTo: document.body,
+    });
+
+    const toggle = wrapper.get('[data-testid="model-reasoning-toggle"]');
+    await toggle.trigger("click");
+    expect(wrapper.find('[data-testid="model-reasoning-menu"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="composer-input"]').trigger("click");
+    expect(wrapper.find('[data-testid="model-reasoning-menu"]').exists()).toBe(false);
+
+    await toggle.trigger("click");
+    expect(wrapper.find('[data-testid="model-reasoning-menu"]').exists()).toBe(true);
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="model-reasoning-menu"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("slash button opens the same command list as typing /", async () => {
     const commands = [{ name: "init", description: "初始化" }];
     const typed = mount(Composer, {
@@ -136,6 +278,49 @@ describe("GAG-021 composer dock", () => {
     expect(clickedNames[0]).toContain("init");
     expect(clicked.find('[data-testid="model-reasoning-menu"]').exists()).toBe(false);
     clicked.unmount();
+  });
+
+  it("toggles the slash menu closed when the slash button is clicked again", async () => {
+    const wrapper = mount(Composer, {
+      props: {
+        modelValue: "",
+        capabilities: { canSend: true, canCancel: false, bridgeOnline: true },
+        slashCommands: [{ name: "session-info", description: "查看会话信息" }],
+      },
+    });
+
+    const slashButton = wrapper.get('[data-testid="composer-slash-help"]');
+    await slashButton.trigger("click");
+    expect(wrapper.find('[data-testid="slash-menu"]').exists()).toBe(true);
+
+    await slashButton.trigger("click");
+    expect(wrapper.find('[data-testid="slash-menu"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("closes the slash menu when the composer input or another page area is clicked", async () => {
+    const wrapper = mount(Composer, {
+      props: {
+        modelValue: "",
+        capabilities: { canSend: true, canCancel: false, bridgeOnline: true },
+        slashCommands: [{ name: "session-info", description: "查看会话信息" }],
+      },
+      attachTo: document.body,
+    });
+
+    const slashButton = wrapper.get('[data-testid="composer-slash-help"]');
+    await slashButton.trigger("click");
+    expect(wrapper.find('[data-testid="slash-menu"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="composer-input"]').trigger("click");
+    expect(wrapper.find('[data-testid="slash-menu"]').exists()).toBe(false);
+
+    await slashButton.trigger("click");
+    expect(wrapper.find('[data-testid="slash-menu"]').exists()).toBe(true);
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-testid="slash-menu"]').exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it("requests Grok Build commands when slash opens with no cached commands", async () => {

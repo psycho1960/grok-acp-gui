@@ -62,6 +62,26 @@ describe("GAG-007 first-use closed loop", () => {
     wrapper.unmount();
   });
 
+  it("creates an empty conversation directly without opening the create-task form", async () => {
+    const bridge = createStatefulTaskCenterBridge();
+    const store = useTaskCenterStore();
+    await store.attach(bridge);
+    await store.openProjectPath("D:/work/demo-repo");
+    window.location.hash = "";
+    const wrapper = mount(TaskCenterView, {
+      props: { bridge, syncHash: false },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    await wrapper.get('[data-testid="header-create-task"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="create-task-form"]').exists()).toBe(false);
+    expect(window.location.hash).toMatch(/^#conversation\/task-fake-/);
+    wrapper.unmount();
+  });
+
   it("rejects missing directory", async () => {
     const bridge = createStatefulTaskCenterBridge();
     const store = useTaskCenterStore();
@@ -94,6 +114,19 @@ describe("GAG-007 first-use closed loop", () => {
     expect(created.ok).toBe(true);
     expect(created.taskId).toBeTruthy();
     expect(store.allTasks.some((t) => t.id === created.taskId)).toBe(true);
+  });
+
+  it("creates an empty conversation without an initial task goal", async () => {
+    const bridge = createStatefulTaskCenterBridge();
+    const store = useTaskCenterStore();
+    await store.attach(bridge);
+    await store.openProjectPath("D:/work/demo-repo");
+
+    const created = await store.createTask({ prompt: "", title: "" });
+
+    expect(created.ok).toBe(true);
+    expect(created.taskId).toBeTruthy();
+    expect(store.allTasks.find((task) => task.id === created.taskId)?.title).toBe("新任务");
   });
 
   it("create fails without project", async () => {

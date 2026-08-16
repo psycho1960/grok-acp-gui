@@ -32,6 +32,30 @@ describe("GAG-008 safe markdown", () => {
     expect(html).not.toContain("<img");
   });
 
+  it("renders headings, tables, and lists as semantic blocks", () => {
+    const html = renderSafeMarkdown(`## 前端（微信小程序）
+
+| 层 | 技术 |
+| --- | --- |
+| 框架 | 微信原生小程序 |
+| 网络 | \`wx.request\` 封装 |
+
+1. 开发版
+2. 正式版
+
+- Fastify
+- SQLite`);
+
+    expect(html).toContain('<h2 class="md-heading md-h2">前端（微信小程序）</h2>');
+    expect(html).toContain('<table class="md-table">');
+    expect(html).toContain('<th class="md-align-left">层</th>');
+    expect(html).toContain('<td class="md-align-left">框架</td>');
+    expect(html).toContain('<code class="md-inline">wx.request</code>');
+    expect(html).toContain('<ol class="md-list">');
+    expect(html).toContain('<ul class="md-list">');
+    expect(html).not.toContain("| --- | --- |");
+  });
+
   it("handles long unbroken text without throwing", () => {
     const long = "a".repeat(50_000);
     const html = renderSafeMarkdown(long);

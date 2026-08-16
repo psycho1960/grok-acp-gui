@@ -88,6 +88,27 @@ test.describe("GAG-007 Task Center fixture", () => {
     await expect(page.locator('[data-task-id="task-int-1"]')).toBeVisible();
   });
 
+  test("in-progress and completed navigation filters show distinct task sets", async ({ page }) => {
+    await page.goto("/#task-center?group=running");
+    await expect(page.getByTestId("task-center")).toBeVisible();
+    await expect(page.locator("[data-task-id]")).toHaveCount(2);
+    await expect(page.locator('[data-task-id="task-run-1"]')).toBeVisible();
+    await expect(page.locator('[data-task-id="task-merged-1"]')).toHaveCount(0);
+
+    await page.evaluate(() => {
+      (window as FixtureWindow).__taskCenterPushState?.("task-run-1", "idle", 90);
+    });
+    await expect(page.locator("[data-task-id]")).toHaveCount(1);
+    await expect(page.locator('[data-task-id="task-run-1"]')).toHaveCount(0);
+
+    await page.evaluate(() => {
+      window.location.hash = "#task-center?group=completed";
+    });
+    await expect(page.locator("[data-task-id]")).toHaveCount(2);
+    await expect(page.locator('[data-task-id="task-run-1"]')).toBeVisible();
+    await expect(page.locator('[data-task-id="task-merged-1"]')).toBeVisible();
+  });
+
   test("navigating to bare #task-center clears group filter", async ({ page }) => {
     await page.goto("/#task-center?group=failed_interrupted");
     await expect(page.locator("[data-task-id]")).toHaveCount(1);

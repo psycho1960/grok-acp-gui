@@ -13,7 +13,10 @@ import {
 } from "../../src/features/task-center/hash-route";
 import { buildGroupedListRows } from "../../src/features/task-center/list-rows";
 import type { TaskViewModel } from "../../src/features/task-center/types";
-import { DEFAULT_FILTERS } from "../../src/features/task-center/types";
+import {
+  DEFAULT_FILTERS,
+  TASK_GROUP_LABELS,
+} from "../../src/features/task-center/types";
 import { formatDuration } from "../../src/features/task-center/format";
 
 function task(
@@ -65,6 +68,42 @@ const sample: TaskViewModel[] = [
 ];
 
 describe("GAG-007 grouping / sort / filter", () => {
+  it("labels the active-execution bucket as running", () => {
+    expect(TASK_GROUP_LABELS.running).toBe("运行中");
+  });
+
+  it("groups statuses by current execution and required user action", () => {
+    const statuses = [
+      "draft",
+      "preparing",
+      "running",
+      "waiting_permission",
+      "idle",
+      "failed",
+      "ready_for_review",
+      "integrating",
+      "conflicted",
+      "merged",
+      "archived",
+      "interrupted",
+    ] as const;
+    const tasks = statuses.map((status, index) =>
+      task({
+        id: `status-${index}` as TaskId,
+        title: status,
+        status,
+        updatedAt: "2026-04-01T12:00:00.000Z",
+      }),
+    );
+
+    expect(countByGroup(tasks)).toEqual({
+      needs_attention: 3,
+      running: 3,
+      completed: 4,
+      failed_interrupted: 2,
+    });
+  });
+
   it("sorts needs-attention first, then running by updatedAt desc, stable by id", () => {
     const sorted = [...sample].sort(compareTasks);
     expect(sorted.map((t) => t.id)).toEqual(["w", "r1", "r2", "c", "i"]);

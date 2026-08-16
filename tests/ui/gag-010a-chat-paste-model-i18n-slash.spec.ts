@@ -421,6 +421,16 @@ describe("conversation model & reasoning settings", () => {
   it("persists selection via session.configure and restores on reopen", async () => {
     const configureCalls: Array<{ model?: string | null; reasoning?: string }> = [];
     const bridge = createFakeDesktopBridge({
+      bootstrapSnapshot: {
+        capabilities: {
+          models: [
+            { modelId: "grok-4.5", name: "grok-4.5", reasoningEffort: "high" },
+            { modelId: "deepseek", name: "deepseek", reasoningEffort: "max" },
+          ],
+          modes: [],
+          slashCommands: [],
+        },
+      },
       onExecute(command) {
         if (command.type === "session.configure") {
           const settings = command.payload.settings as Record<string, string>;
@@ -451,10 +461,8 @@ describe("conversation model & reasoning settings", () => {
     store.openFromSnapshot(fixtureSessionSnapshot({ status: "idle" }));
 
     await store.configureModel("deepseek");
-    await store.configureReasoning("max");
     expect(configureCalls).toEqual([
-      { model: "deepseek", reasoning: undefined },
-      { model: null, reasoning: "max" },
+      { model: "deepseek", reasoning: "max" },
     ]);
     expect(store.selectedModel).toBe("deepseek");
     expect(store.selectedReasoning).toBe("max");
@@ -541,6 +549,24 @@ describe("conversation model & reasoning settings", () => {
 // ---------------------------------------------------------------------------
 
 describe("CreateTaskDialog optional title", () => {
+  it("creates an empty conversation when the initial message and title are omitted", async () => {
+    const wrapper = mount(CreateTaskDialog, {
+      props: { open: true },
+      attachTo: document.body,
+    });
+    await wrapper.vm.$nextTick();
+
+    await wrapper.get('[data-testid="create-task-submit"]').trigger("click");
+
+    expect(wrapper.find('[data-testid="create-task-error"]').exists()).toBe(false);
+    const emitted = wrapper.emitted("create")?.at(-1)?.[0] as {
+      title: string;
+      prompt: string;
+    };
+    expect(emitted).toMatchObject({ title: "", prompt: "" });
+    wrapper.unmount();
+  });
+
   it("marks the title as optional and derives it from the first sentence", async () => {
     const wrapper = mount(CreateTaskDialog, {
       props: { open: true },

@@ -91,6 +91,7 @@ describe("GAG-007 TaskCenterView", () => {
       bootstrapSnapshot: {
         ...createTaskCenterSeedSnapshot(),
         activeTasks: [],
+        completedTasks: [],
       },
     });
     const wrapper = mount(TaskCenterView, {
