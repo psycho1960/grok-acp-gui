@@ -74,6 +74,29 @@ describe("GAG-008 conversation store", () => {
     expect(store.sendError).toContain("network");
   });
 
+  it("updates a provisional task title from the first successful turn", async () => {
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type === "turn.send") {
+          return {
+            success: "true",
+            data: { requestId: 1, taskTitle: "修复登录页面" },
+          };
+        }
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+    store.openFromSnapshot(
+      fixtureSessionSnapshot({ title: "新任务", status: "idle", cursor: 0, events: [] }),
+    );
+    store.setDraft("修复登录页面。并补充回归测试。");
+
+    expect(await store.sendMessage()).toBe(true);
+    expect(store.title).toBe("修复登录页面");
+  });
+
   it("disables send when offline and preserves draft", async () => {
     const bridge = createFakeDesktopBridge();
     const store = useConversationStore();
@@ -157,6 +180,27 @@ describe("GAG-008 conversation store", () => {
     await store.openTask("task-x" as TaskId, "X");
     expect(store.taskId).toBe("task-x");
     expect(store.title).toBe("T");
+  });
+
+  it("opens an empty task as an idle conversation with a provisional title", async () => {
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type === "task.open") {
+          return {
+            success: "true",
+            data: { taskId: command.payload.taskId, title: "", status: "idle" },
+          };
+        }
+        return { success: "true", data: {} };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+
+    await store.openTask("task-empty" as TaskId);
+
+    expect(store.title).toBe("新任务");
+    expect(store.status).toBe("idle");
   });
 
   it("applies the persisted task.open timeline instead of showing an empty demo", async () => {

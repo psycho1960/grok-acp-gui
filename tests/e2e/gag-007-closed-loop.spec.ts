@@ -1,6 +1,15 @@
 import { expect, test } from "./fixtures";
 
 test.describe("GAG-007 first-use closed loop (shell)", () => {
+  test("new task skips the setup form and opens an empty conversation", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("/#task-center");
+    await page.getByTestId("header-create-task").click();
+    await expect(page.getByTestId("create-task-form")).toHaveCount(0);
+    await expect(page).toHaveURL(/#conversation\//, { timeout: 10_000 });
+    await expect(page.getByTestId("conversation-view")).toBeVisible({ timeout: 10_000 });
+  });
+
   test("empty shell offers open project, then create task, then conversation", async ({
     page,
   }) => {
@@ -19,26 +28,13 @@ test.describe("GAG-007 first-use closed loop (shell)", () => {
     await page.getByTestId("project-open-cancel").click();
     await expect(page.getByTestId("open-project-form")).toHaveCount(0);
 
-    // New task intent carries through project selection to the creation form.
+    // New task intent carries through project selection directly to conversation.
     await page.getByTestId("header-create-task").click();
     await page.getByTestId("project-path-input").locator("input").fill("D:/work/demo-app");
     await page.getByTestId("project-trust").check();
     await page.getByTestId("project-open-submit").click();
 
-    await expect(page.getByTestId("header-create-task")).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId("active-project-label")).toContainText("demo-app");
-    await expect(page.getByTestId("topbar-project")).toContainText("demo-app");
-    await expect(page.getByTestId("topbar-workspace")).toContainText("D:/work/demo-app");
-    await expect(page.getByText("No workspace selected")).toHaveCount(0);
-    await expect(page.getByTestId("create-task-form")).toBeVisible();
-    await expect(page.getByTestId("create-task-model").locator("select")).toContainText("grok-4.5");
-    await page
-      .getByTestId("create-task-prompt")
-      .locator("textarea")
-      .fill("实现任务中心闭环\n包含项目选择");
-    await page.getByTestId("create-task-submit").click();
-
-    // Navigates to conversation
+    await expect(page.getByTestId("create-task-form")).toHaveCount(0);
     await expect(page).toHaveURL(/#conversation\//, { timeout: 10_000 });
     await expect(page.getByTestId("conversation-view")).toBeVisible({ timeout: 10_000 });
   });

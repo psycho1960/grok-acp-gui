@@ -71,6 +71,7 @@ fn is_session_event(t: &str) -> bool {
             | event_types::PLAN_UPDATED
             | event_types::CHANGES_UPDATED
             | event_types::ARTIFACT_AVAILABLE
+            | event_types::SESSION_CAPABILITIES_UPDATED
             | event_types::SESSION_COMMANDS_UPDATED
     )
 }
@@ -271,6 +272,7 @@ pub mod event_types {
     pub const PLAN_UPDATED: &str = "plan.updated";
     pub const CHANGES_UPDATED: &str = "changes.updated";
     pub const ARTIFACT_AVAILABLE: &str = "artifact.available";
+    pub const SESSION_CAPABILITIES_UPDATED: &str = "session.capabilities.updated";
     pub const SESSION_COMMANDS_UPDATED: &str = "session.commands.updated";
     pub const RESOURCE_WARNING: &str = "resource.warning";
     pub const DIAGNOSTIC_NOTICE: &str = "diagnostic.notice";

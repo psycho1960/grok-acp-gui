@@ -71,15 +71,18 @@ test("clipboard paste, slash commands, and model switching work together", async
   await input.press("Escape");
   await input.pressSequentially(" 再来", { delay: 10 });
 
-  // 3) Switch model + reasoning; the next turn echoes the new selection.
-  await page
-    .getByTestId("conversation-model-select")
-    .locator("select")
-    .selectOption("deepseek");
-  await page
-    .getByTestId("conversation-reasoning-select")
-    .locator("select")
-    .selectOption("max");
+  // 3) Each model switch atomically applies that profile's reasoning effort;
+  // the next turn echoes the effective selection.
+  const modelSelect = page.getByTestId("conversation-model-select").locator("select");
+  const reasoningSelect = page.getByTestId("conversation-reasoning-select").locator("select");
+  await modelSelect.selectOption("luna");
+  await expect(reasoningSelect).toHaveValue("medium");
+  await modelSelect.selectOption("deepseek");
+  await expect(reasoningSelect).toHaveValue("max");
+  await reasoningSelect.selectOption("high");
+  await expect(reasoningSelect).toHaveValue("high");
+  await reasoningSelect.selectOption("max");
+  await expect(reasoningSelect).toHaveValue("max");
 
   await page.getByTestId("composer-send").click();
   await expect(page.getByTestId("user-message").last()).toContainText("/plan 再来");  // The fixture echoes what the turn carried: [model=deepseek reasoning=max].

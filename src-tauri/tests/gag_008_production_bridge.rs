@@ -302,9 +302,12 @@ async fn create_send_stream_persist_and_reopen_real_production_path() {
     assert_eq!(tool_events[1]["payload"]["toolCall"]["status"], "completed");
     assert!(tool_events[1]["payload"]["toolCall"]["durationMs"].is_number());
     let visible_history = serde_json::to_string(history).unwrap();
+    // Original ACP field names must never leak into the persisted timeline.
     assert!(!visible_history.contains("rawInput"));
     assert!(!visible_history.contains("rawOutput"));
-    assert!(!visible_history.contains("fixture.txt"));
+    // Tool input/output are persisted as safe summaries: sensitive markers
+    // are replaced while ordinary content such as the file name may appear.
+    assert!(visible_history.contains("fixture.txt"));
 }
 
 #[tokio::test]

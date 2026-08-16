@@ -114,7 +114,7 @@ export function toTaskViewModel(
     id: task.id,
     projectId: task.projectId,
     projectLabel: projectLabel(projects, task.projectId),
-    title: task.title,
+    title: task.title.trim() || "新任务",
     status: task.status,
     workspaceKind: task.workspaceKind,
     mode: task.mode,
@@ -138,7 +138,10 @@ export function toTaskViewModel(
 
 export function mapBootstrapToTasks(snapshot: BootstrapSnapshot): TaskViewModel[] {
   const projects = snapshot.projects ?? [];
-  const tasks = snapshot.activeTasks ?? [];
+  const tasks = [
+    ...(snapshot.activeTasks ?? []),
+    ...(snapshot.completedTasks ?? []),
+  ];
   return tasks.map((task) =>
     toTaskViewModel(task, projects, snapshot.bindings, snapshot.worktrees),
   );
@@ -186,7 +189,8 @@ export function parseSnapshotTasks(
     }
 
     // Required fields: title, workspaceKind, createdAt, updatedAt — only from payload or prior.
-    const title = typeof t.title === "string" ? t.title : prev?.title;
+    const rawTitle = typeof t.title === "string" ? t.title : prev?.title;
+    const title = rawTitle === "" ? "新任务" : rawTitle;
     const workspaceKind = isWorkspaceKind(t.workspaceKind)
       ? t.workspaceKind
       : prev?.workspaceKind;

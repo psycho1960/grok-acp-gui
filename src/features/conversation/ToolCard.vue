@@ -114,6 +114,9 @@ async function copySummary(): Promise<void> {
   padding: var(--space-3);
   display: grid;
   gap: var(--space-2);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 .tool-head {
   display: flex;
@@ -121,12 +124,15 @@ async function copySummary(): Promise<void> {
   gap: var(--space-2);
   align-items: center;
   justify-content: space-between;
+  min-width: 0;
 }
 .tool-title-row {
   display: flex;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
+  min-width: 0;
 }
 .tool-title {
   font-weight: 600;
@@ -147,8 +153,10 @@ async function copySummary(): Promise<void> {
   margin-left: auto;
 }
 .tool-one-line {
+  flex: 1 1 20rem;
   margin: 0;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   color: var(--ctp-subtext0);
   font-size: var(--font-small);
@@ -157,8 +165,11 @@ async function copySummary(): Promise<void> {
 }
 .tool-summary {
   margin: 0;
+  min-width: 0;
   color: var(--ctp-subtext0);
   font-size: var(--font-small);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .tool-summary .label {
   margin-right: var(--space-1);

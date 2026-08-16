@@ -24,19 +24,40 @@ test("mode selector shows Chinese labels, switches mode, echoes it, and survives
   await openConversationFixture(page);
 
   // 1) The mode selector lists the three Chinese capability modes.
-  const modeSelect = page.getByTestId("conversation-mode-select").locator("select");
-  await expect(modeSelect).toBeVisible();
-  await expect(modeSelect.locator("option")).toHaveText([
+  const modeSelect = page.getByTestId("conversation-mode-select");
+  const modeTrigger = modeSelect.getByTestId("header-select-trigger");
+  await expect(modeTrigger).toBeVisible();
+  await modeSelect.getByTestId("mode-chevron").click();
+  const modeMenu = modeSelect.getByTestId("header-select-menu");
+  await expect(modeSelect.getByTestId("header-select-option")).toHaveText([
     "使用会话默认模式",
     "智能体",
     "计划",
     "问答",
   ]);
+  const triggerBox = await modeTrigger.boundingBox();
+  const menuBox = await modeMenu.boundingBox();
+  expect(triggerBox).not.toBeNull();
+  expect(menuBox).not.toBeNull();
+  expect(menuBox!.y).toBeGreaterThanOrEqual(triggerBox!.y + triggerBox!.height);
+  await modeSelect.locator('[data-value="agent"]').click();
+
+  // The mode help sits near the window top and must open below its trigger.
+  const modeHelp = page.getByTestId("conversation-mode-help");
+  await modeHelp.hover();
+  const modeTooltip = modeHelp.locator("..").getByRole("tooltip");
+  await expect(modeTooltip).toBeVisible();
+  const helpBox = await modeHelp.boundingBox();
+  const tooltipBox = await modeTooltip.boundingBox();
+  expect(helpBox).not.toBeNull();
+  expect(tooltipBox).not.toBeNull();
+  expect(tooltipBox!.y).toBeGreaterThanOrEqual(helpBox!.y + helpBox!.height);
   // The fixture snapshot restores the default selection.
-  await expect(modeSelect).toHaveValue("agent");
+  await expect(modeTrigger).toHaveAttribute("data-selected-value", "agent");
 
   // 2) Switching to Plan persists and the next turn echoes the new mode.
-  await modeSelect.selectOption("plan");
+  await modeTrigger.click();
+  await modeSelect.locator('[data-value="plan"]').click();
   const input = page.getByTestId("composer-input");
   await input.click();
   await input.fill("切换模式后发送");
@@ -51,8 +72,8 @@ test("mode selector shows Chinese labels, switches mode, echoes it, and survives
   await page.reload();
   await openConversationFixture(page);
   await expect(
-    page.getByTestId("conversation-mode-select").locator("select"),
-  ).toHaveValue("plan");
+    page.getByTestId("conversation-mode-select").getByTestId("header-select-trigger"),
+  ).toHaveAttribute("data-selected-value", "plan");
 
   // No console errors on the real fixture path.
   expect(consoleErrors).toEqual([]);
@@ -63,11 +84,13 @@ test("mode selector renders and the composer stays usable after a failed mode ch
   page,
 }) => {
   await openConversationFixture(page);
-  const modeSelect = page.getByTestId("conversation-mode-select").locator("select");
-  await expect(modeSelect).toBeVisible();
+  const modeSelect = page.getByTestId("conversation-mode-select");
+  const modeTrigger = modeSelect.getByTestId("header-select-trigger");
+  await expect(modeTrigger).toBeVisible();
   // The fixture always accepts mode changes; verify the control stays enabled
   // after sending a turn in Ask mode.
-  await modeSelect.selectOption("ask");
+  await modeTrigger.click();
+  await modeSelect.locator('[data-value="ask"]').click();
   const input = page.getByTestId("composer-input");
   await input.click();
   await input.fill("问答模式消息");

@@ -4,7 +4,6 @@ import Badge from "../../shared/ui/Badge.vue";
 import Button from "../../shared/ui/Button.vue";
 import IconButton from "../../shared/ui/IconButton.vue";
 import NamedIcon from "../../shared/ui/NamedIcon.vue";
-import Select from "../../shared/ui/Select.vue";
 import StatusIcon from "../../shared/ui/StatusIcon.vue";
 import Tooltip from "../../shared/ui/Tooltip.vue";
 import { modeHelpFor } from "../../shared/ui/mode-help";
@@ -15,6 +14,7 @@ import {
   type WorkspaceStrategy,
 } from "./mode-workspace";
 import type { ConversationRunStatus } from "./types";
+import HeaderSelect from "./HeaderSelect.vue";
 
 export interface ConversationTurn {
   id: string;
@@ -100,15 +100,33 @@ const MODE_LABEL_FALLBACK: Record<string, string> = {
   ask: "问答",
 };
 
-const modeOptions = computed(() => [
-  { value: "", label: "使用会话默认模式" },
-  ...(props.modes ?? [])
+type ModeOption = { value: string; label: string };
+
+const PRODUCT_MODES: readonly ModeOption[] = [
+  { value: "agent", label: "智能体" },
+  { value: "plan", label: "计划" },
+  { value: "ask", label: "问答" },
+];
+
+const modeOptions = computed(() => {
+  const available = PRODUCT_MODES.map((mode) => ({ ...mode }));
+  const additional = (props.modes ?? [])
     .filter((mode) => mode.id.trim().length > 0)
+    .filter((mode) => !available.some((option) => option.value === mode.id))
     .map((mode) => ({
       value: mode.id,
-      label: mode.name || MODE_LABEL_FALLBACK[mode.id] || mode.id,
-    })),
-]);
+      label: MODE_LABEL_FALLBACK[mode.id] || mode.name || mode.id,
+    }));
+  available.push(...additional);
+  const selected = props.selectedMode?.trim() ?? "";
+  if (selected && !available.some((mode) => mode.value === selected)) {
+    available.push({
+      value: selected,
+      label: MODE_LABEL_FALLBACK[selected] || selected,
+    });
+  }
+  return [{ value: "", label: "使用会话默认模式" }, ...available];
+});
 
 function onModeChange(value: string): void {
   const mode = value === "" ? null : value;
@@ -124,13 +142,19 @@ function onWorkspaceStrategyChange(value: string): void {
 
 const modeLabel = computed(() => {
   const selected = props.selectedMode ?? "";
-  return modeOptions.value.find((option) => option.value === selected)?.label ?? "使用会话默认模式";
+  return (
+    modeOptions.value.find((option) => option.value === selected)?.label ??
+    "使用会话默认模式"
+  );
 });
 
 const workspaceLabel = computed(() => {
   const selected = props.selectedWorkspaceStrategy ?? "";
   if (selected === "") return "使用创建时的策略";
-  return WORKSPACE_STRATEGY_OPTIONS.find((option) => option.value === selected)?.label ?? selected;
+  return (
+    WORKSPACE_STRATEGY_OPTIONS.find((option) => option.value === selected)
+      ?.label ?? selected
+  );
 });
 
 const turnListOpen = ref(false);
@@ -166,7 +190,8 @@ function onJumpTurn(id: string): void {
 function onDocumentPointerDown(event: PointerEvent): void {
   const target = event.target;
   if (!(target instanceof Node)) return;
-  if (turnHistoryRoot.value && !turnHistoryRoot.value.contains(target)) closeTurnList();
+  if (turnHistoryRoot.value && !turnHistoryRoot.value.contains(target))
+    closeTurnList();
 }
 
 function onDocumentKeydown(event: KeyboardEvent): void {
@@ -187,7 +212,11 @@ onBeforeUnmount(() => {
 <template>
   <header class="conv-header" data-testid="conversation-header">
     <div class="left">
-      <IconButton label="返回任务中心" data-testid="conversation-back" @click="emit('back')">
+      <IconButton
+        label="返回任务中心"
+        data-testid="conversation-back"
+        @click="emit('back')"
+      >
         <NamedIcon name="chevronLeft" :size="16" />
       </IconButton>
       <h1 class="title">{{ title }}</h1>
@@ -196,8 +225,14 @@ onBeforeUnmount(() => {
         :status="statusIcon(status)"
         :label="statusLabel(status)"
       />
-      <Badge v-if="attempt && attempt > 1" tone="neutral">第 {{ attempt }} 次尝试</Badge>
-      <div ref="turnHistoryRoot" class="turn-history" data-testid="turn-history-menu">
+      <Badge v-if="attempt && attempt > 1" tone="neutral">
+        第 {{ attempt }} 次尝试
+      </Badge>
+      <div
+        ref="turnHistoryRoot"
+        class="turn-history"
+        data-testid="turn-history-menu"
+      >
         <IconButton
           label="历史轮次"
           data-testid="turn-history"
@@ -206,7 +241,13 @@ onBeforeUnmount(() => {
         >
           <NamedIcon name="clock" :size="16" />
         </IconButton>
-        <ul v-if="turnListOpen" class="turn-list" data-testid="turn-list" role="listbox" aria-label="历史轮次">
+        <ul
+          v-if="turnListOpen"
+          class="turn-list"
+          data-testid="turn-list"
+          role="listbox"
+          aria-label="历史轮次"
+        >
           <li v-for="turn in turns" :key="turn.id">
             <button
               type="button"
@@ -216,7 +257,9 @@ onBeforeUnmount(() => {
               @click="onJumpTurn(turn.id)"
             >
               <span class="turn-line">{{ turn.firstLine }}</span>
-              <time class="turn-time" :datetime="turn.timestamp">{{ formatRelativeTime(turn.timestamp) }}</time>
+              <time class="turn-time" :datetime="turn.timestamp">{{
+                formatRelativeTime(turn.timestamp)
+              }}</time>
             </button>
           </li>
         </ul>
@@ -231,8 +274,10 @@ onBeforeUnmount(() => {
             data-testid="conversation-mode-select"
             :title="settingsLocked ? lockReason : undefined"
           >
-            <span v-if="settingsLocked" class="locked-label">{{ modeLabel }}</span>
-            <Select
+            <span v-if="settingsLocked" class="locked-label">{{
+              modeLabel
+            }}</span>
+            <HeaderSelect
               class="settings-select"
               :class="{ 'is-visually-hidden': settingsLocked }"
               label="模式"
@@ -240,15 +285,18 @@ onBeforeUnmount(() => {
               :options="modeOptions"
               :disabled="settingsLocked"
               @update:model-value="onModeChange"
-            />
-            <NamedIcon
-              v-if="!settingsLocked"
-              name="chevronDown"
-              :size="12"
-              data-testid="mode-chevron"
-            />
+            >
+              <template #indicator>
+                <NamedIcon
+                  v-if="!settingsLocked"
+                  name="chevronDown"
+                  :size="12"
+                  data-testid="mode-chevron"
+                />
+              </template>
+            </HeaderSelect>
           </div>
-          <Tooltip :text="modeHelpFor(selectedMode)">
+          <Tooltip :text="modeHelpFor(selectedMode)" placement="bottom">
             <IconButton label="模式说明" data-testid="conversation-mode-help">
               <NamedIcon name="help" :size="14" />
             </IconButton>
@@ -260,22 +308,27 @@ onBeforeUnmount(() => {
           data-testid="conversation-workspace-select"
           :title="settingsLocked ? lockReason : undefined"
         >
-          <span v-if="settingsLocked" class="locked-label">{{ workspaceLabel }}</span>
-          <Select
+          <span v-if="settingsLocked" class="locked-label">{{
+            workspaceLabel
+          }}</span>
+          <HeaderSelect
             class="settings-select"
             :class="{ 'is-visually-hidden': settingsLocked }"
             label="工作区策略"
             :model-value="selectedWorkspaceStrategy ?? ''"
-            :options="[{ value: '', label: '使用创建时的策略' }, ...WORKSPACE_STRATEGY_OPTIONS]"
+            :options="WORKSPACE_STRATEGY_OPTIONS"
             :disabled="settingsLocked"
             @update:model-value="onWorkspaceStrategyChange"
-          />
-          <NamedIcon
-            v-if="!settingsLocked"
-            name="chevronDown"
-            :size="12"
-            data-testid="workspace-chevron"
-          />
+          >
+            <template #indicator>
+              <NamedIcon
+                v-if="!settingsLocked"
+                name="chevronDown"
+                :size="12"
+                data-testid="workspace-chevron"
+              />
+            </template>
+          </HeaderSelect>
         </div>
       </div>
       <Button
@@ -351,21 +404,6 @@ onBeforeUnmount(() => {
 .session-badge.locked {
   color: var(--ctp-subtext0);
   cursor: default;
-}
-.session-badge :deep(.field > span) {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-}
-.session-badge :deep(select) {
-  min-height: 28px;
-  padding: 0;
-  color: inherit;
-  background: transparent;
-  border: 0;
-  appearance: none;
 }
 .session-badge .is-visually-hidden {
   position: absolute;

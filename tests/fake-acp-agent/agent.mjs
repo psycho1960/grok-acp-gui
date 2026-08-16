@@ -87,6 +87,8 @@ const pendingGates = [];
 const resolvedGates = new Set();
 let pendingPrompt = null;
 let activeMode = 'default';
+let activeModel = 'opencode-deepseek-v4-flash';
+let activeReasoning = 'high';
 
 function allGatesResolved() {
   return pendingGates.length > 0 && pendingGates.every((gate) => resolvedGates.has(gate));
@@ -149,18 +151,9 @@ function handleSessionNew(id, params) {
     return;
   }
   activeSessionId = `fake-session-${++requestCounter}`;
-  sendResponse(id, {
-    sessionId: activeSessionId,
-    modes: {
-      currentModeId: activeMode,
-      availableModes: [
-        { id: 'default', name: 'Default' },
-        { id: 'plan', name: 'Plan' },
-        { id: 'code', name: 'Code' },
-        { id: 'ask', name: 'Ask' },
-      ],
-    },
-  });
+  // Grok Build may advertise commands before acknowledging session/new.
+  // Keep this scenario interleaved so the Runtime must preserve handshake
+  // notifications until its normal reader loop is running.
   if (SCENARIO === 'available-commands') {
     sendNotification('session/update', {
       sessionId: activeSessionId,
@@ -173,6 +166,84 @@ function handleSessionNew(id, params) {
       },
     });
   }
+  const result = {
+    sessionId: activeSessionId,
+    modes: {
+      currentModeId: activeMode,
+      availableModes: [
+        { id: 'default', name: 'Default' },
+        { id: 'plan', name: 'Plan' },
+        { id: 'code', name: 'Code' },
+        { id: 'ask', name: 'Ask' },
+      ],
+    },
+  };
+  if (SCENARIO !== 'legacy-model-config') {
+    result.configOptions = [
+      {
+        type: 'select',
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        currentValue: activeModel,
+        options: [
+          { value: 'opencode-deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+          { value: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+        ],
+      },
+      {
+        type: 'select',
+        id: 'reasoning_effort',
+        name: 'Reasoning',
+        category: 'thought_level',
+        currentValue: activeReasoning,
+        options: [
+          { value: 'low', name: 'Low' },
+          { value: 'medium', name: 'Medium' },
+          { value: 'high', name: 'High' },
+          { value: 'max', name: 'Max' },
+        ],
+      },
+    ];
+  }
+  sendResponse(id, result);
+}
+
+function handleSetConfigOption(id, params) {
+  if (params?.sessionId !== activeSessionId || typeof params?.configId !== 'string') {
+    sendError(id, -32602, 'sessionId and configId are required');
+    return;
+  }
+  if (params.configId === 'model') {
+    const allowed = new Set(['opencode-deepseek-v4-flash', 'deepseek-v4-pro']);
+    if (!allowed.has(params.value)) {
+      sendError(id, -32602, 'model value was not advertised');
+      return;
+    }
+    activeModel = params.value;
+  } else if (params.configId === 'reasoning_effort') {
+    const allowed = new Set(['low', 'medium', 'high', 'max']);
+    if (!allowed.has(params.value)) {
+      sendError(id, -32602, 'reasoning value was not advertised');
+      return;
+    }
+    activeReasoning = params.value;
+  } else {
+    sendError(id, -32602, 'configId was not advertised');
+    return;
+  }
+  sendResponse(id, { configOptions: [] });
+}
+
+function handleSetModel(id, params) {
+  const allowed = new Set(['opencode-deepseek-v4-flash', 'deepseek-v4-pro']);
+  if (params?.sessionId !== activeSessionId || !allowed.has(params?.modelId)) {
+    sendError(id, -32602, 'sessionId and an advertised modelId are required');
+    return;
+  }
+  activeModel = params.modelId;
+  activeReasoning = activeModel === 'deepseek-v4-pro' ? 'max' : 'high';
+  sendResponse(id, {});
 }
 
 function handleSetMode(id, params) {
@@ -469,13 +540,10 @@ function streamAndFinish(id, params) {
     : text.includes('<attachment_visual_context')
       ? ['MAIN_TEXT_ONLY_OK']
       : ['Hello', ' from', ' fake', ' ACP', ' agent!'];
-  // Echo the active mode so tests can observe session/set_mode, plus the
-  // per-turn model/reasoning params when present.
-  if (params.model !== undefined || params.reasoning !== undefined) {
-    words.unshift(`MODEL=${params.model ?? '-'} REASONING=${params.reasoning ?? '-'} MODE=${activeMode}`);
-  } else {
-    words.unshift(`MODE=${activeMode}`);
-  }
+  // Echo only state changed through standard ACP configuration requests.
+  // Deliberately ignore private session/prompt fields so tests cannot pass
+  // unless the runtime really switches the agent configuration.
+  words.unshift(`MODEL=${activeModel} REASONING=${activeReasoning} MODE=${activeMode}`);
   let delay = SCENARIO === 'slow' ? 200 : 10;
   const step = SCENARIO === 'slow' ? 100 : 10;
   for (const word of words) {
@@ -614,6 +682,12 @@ rl.on('line', (line) => {
         break;
       case 'session/set_mode':
         handleSetMode(msg.id, msg.params);
+        break;
+      case 'session/set_config_option':
+        handleSetConfigOption(msg.id, msg.params);
+        break;
+      case 'session/set_model':
+        handleSetModel(msg.id, msg.params);
         break;
       case 'session/cancel':
         handleCancel(msg.id);

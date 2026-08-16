@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import IconButton from "../../shared/ui/IconButton.vue";
 import NamedIcon from "../../shared/ui/NamedIcon.vue";
 import Select from "../../shared/ui/Select.vue";
@@ -23,6 +23,7 @@ const props = defineProps<{
   dropActive?: boolean;
   /** grok build quick commands discovered from ACP available_commands. */
   slashCommands?: SlashCommandInfo[];
+  slashCommandsPending?: boolean;
   models?: ModelInfo[];
   selectedModel?: string | null;
   selectedReasoning?: ReasoningEffort | null;
@@ -40,9 +41,13 @@ const emit = defineEmits<{
   removeAttachment: [artifactId: string];
   "update:model": [model: string | null];
   "update:reasoning": [reasoning: ReasoningEffort];
+  "request-slash-commands": [];
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const modelControl = ref<HTMLElement | null>(null);
+const slashMenu = ref<HTMLElement | null>(null);
+const slashTrigger = ref<HTMLElement | null>(null);
 const modelMenuOpen = ref(false);
 const hoverDropActive = ref(false);
 const slashOpen = ref(false);
@@ -53,6 +58,7 @@ const slashIndex = ref(0);
 /** Suppress slash-menu syncs until the next real input event (an Esc close
  *  or a selection must not be undone by the keyup that follows it). */
 let slashEscapeLock = false;
+let slashRequestIssued = false;
 const hasContent = computed(() => props.modelValue.trim().length > 0 || (props.attachments?.length ?? 0) > 0);
 
 const REASONING_LABEL: Record<string, string> = {
@@ -69,18 +75,45 @@ const modelOptions = computed(() => [
     .map((model) => ({ value: model.modelId, label: model.name || model.modelId })),
 ]);
 
-const reasoningOptions = [
+const allReasoningOptions = [
   { value: "low", label: "低" },
   { value: "medium", label: "中" },
   { value: "high", label: "高" },
   { value: "max", label: "最高" },
-];
+] as const;
+
+const reasoningOptions = computed(() => {
+  if (!props.selectedModel) return allReasoningOptions;
+  const profile = (props.models ?? []).find((model) => model.modelId === props.selectedModel);
+  const configured = profile?.reasoningEfforts?.length
+    ? profile.reasoningEfforts
+    : profile?.reasoningEffort
+      ? [profile.reasoningEffort]
+      : [];
+  return configured.length
+    ? allReasoningOptions.filter((option) => configured.includes(option.value))
+    : allReasoningOptions;
+});
+
+const effectiveReasoning = computed<ReasoningEffort>(() => {
+  const profile = (props.models ?? []).find((model) => model.modelId === props.selectedModel);
+  const configured = profile?.reasoningEfforts?.length
+    ? profile.reasoningEfforts
+    : profile?.reasoningEffort
+      ? [profile.reasoningEffort]
+      : [];
+  if (configured.length === 1) return configured[0] as ReasoningEffort;
+  if (props.selectedReasoning && configured.includes(props.selectedReasoning)) {
+    return props.selectedReasoning;
+  }
+  return (profile?.reasoningEffort ?? props.selectedReasoning ?? "medium") as ReasoningEffort;
+});
 
 const modelSummary = computed(() => {
   const model =
     modelOptions.value.find((option) => option.value === (props.selectedModel ?? ""))?.label ??
     "默认模型";
-  const reasoning = REASONING_LABEL[props.selectedReasoning ?? "medium"] ?? "中";
+  const reasoning = REASONING_LABEL[effectiveReasoning.value] ?? "中";
   return `${model} · ${reasoning}`;
 });
 
@@ -92,18 +125,32 @@ const showSlashMenu = computed(
   () => slashOpen.value || slashHelpPinned.value,
 );
 
+function requestSlashCommandsIfNeeded(): void {
+  if (
+    slashRequestIssued ||
+    props.slashCommandsPending ||
+    (props.slashCommands?.length ?? 0) > 0
+  ) return;
+  slashRequestIssued = true;
+  emit("request-slash-commands");
+}
+
 function syncSlashMenu(): void {
   if (slashEscapeLock) return;
   const el = textarea.value;
   if (!el) return;
   const state = slashMenuState(el.value, el.selectionStart);
   slashOpen.value = state.open;
+  if (state.open) modelMenuOpen.value = false;
   slashQuery.value = state.query;
   slashLineStart.value = state.lineStart;
   if (slashIndex.value >= filteredCommands.value.length) {
     slashIndex.value = 0;
   }
-  if (state.open) void nextTick(scrollSlashItemIntoView);
+  if (state.open) {
+    requestSlashCommandsIfNeeded();
+    void nextTick(scrollSlashItemIntoView);
+  }
 }
 
 function closeSlashMenu(): void {
@@ -111,13 +158,20 @@ function closeSlashMenu(): void {
   slashHelpPinned.value = false;
   slashQuery.value = "";
   slashEscapeLock = true;
+  slashRequestIssued = false;
 }
 
-function openSlashHelp(): void {
+function toggleSlashHelp(): void {
+  if (showSlashMenu.value) {
+    closeSlashMenu();
+    return;
+  }
+  modelMenuOpen.value = false;
   slashHelpPinned.value = true;
   slashOpen.value = true;
   slashQuery.value = "";
   slashIndex.value = 0;
+  requestSlashCommandsIfNeeded();
 }
 
 function scrollSlashItemIntoView(): void {
@@ -203,6 +257,7 @@ function onKeydown(event: KeyboardEvent): void {
 
 function onInput(event: Event): void {
   slashEscapeLock = false;
+  slashHelpPinned.value = false;
   const value = (event.target as HTMLTextAreaElement).value;
   emit("update:modelValue", value);
   void nextTick(syncSlashMenu);
@@ -252,16 +307,39 @@ function onReasoningChange(value: string): void {
 }
 
 function toggleModelMenu(): void {
-  if (!props.settingsLocked) modelMenuOpen.value = !modelMenuOpen.value;
+  if (props.settingsLocked) return;
+  const opening = !modelMenuOpen.value;
+  modelMenuOpen.value = opening;
+  if (opening) closeSlashMenu();
 }
 
 function pickModel(value: string): void {
+  modelMenuOpen.value = false;
   onModelChange(value);
 }
 
 function pickReasoning(value: string): void {
+  modelMenuOpen.value = false;
   onReasoningChange(value);
 }
+
+function closeMenusOnOutsideClick(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (modelMenuOpen.value && !modelControl.value?.contains(target)) {
+    modelMenuOpen.value = false;
+  }
+  if (
+    showSlashMenu.value &&
+    !slashMenu.value?.contains(target) &&
+    !slashTrigger.value?.contains(target)
+  ) {
+    closeSlashMenu();
+  }
+}
+
+onMounted(() => document.addEventListener("click", closeMenusOnOutsideClick));
+onBeforeUnmount(() => document.removeEventListener("click", closeMenusOnOutsideClick));
 
 defineExpose({ textarea, focus: () => textarea.value?.focus() });
 </script>
@@ -294,13 +372,20 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
       <div class="composer-input-wrap">
         <div
           v-if="showSlashMenu"
+          ref="slashMenu"
           class="slash-menu"
           data-testid="slash-menu"
           role="listbox"
           aria-label="快捷指令"
         >
           <p v-if="filteredCommands.length === 0" class="slash-empty" role="status">
-            {{ (slashCommands?.length ?? 0) === 0 ? "暂无可用快捷指令" : "没有匹配的快捷指令" }}
+            {{
+              slashCommandsPending
+                ? "正在获取快捷指令…"
+                : (slashCommands?.length ?? 0) === 0
+                  ? "暂无可用快捷指令"
+                  : "没有匹配的快捷指令"
+            }}
           </p>
           <button
             v-for="(command, index) in filteredCommands"
@@ -349,15 +434,18 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
           >
             <NamedIcon name="paperclip" :size="16" />
           </IconButton>
-          <IconButton
-            label="/ 指令"
-            data-testid="composer-slash-help"
-            :disabled="!capabilities.canSend"
-            @click="openSlashHelp"
-          >
-            <span class="slash-glyph">/</span>
-          </IconButton>
+          <span ref="slashTrigger" class="slash-trigger">
+            <IconButton
+              label="/ 指令"
+              data-testid="composer-slash-help"
+              :disabled="!capabilities.canSend && !capabilities.canCancel"
+              @click="toggleSlashHelp"
+            >
+              <span class="slash-glyph">/</span>
+            </IconButton>
+          </span>
           <div
+            ref="modelControl"
             class="model-control"
             :class="{ locked: settingsLocked }"
             data-testid="composer-model-control"
@@ -384,6 +472,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
                 :key="`model-${option.value}`"
                 type="button"
                 class="menu-item"
+                data-testid="model-option"
                 :class="{ on: (selectedModel ?? '') === option.value }"
                 @click="pickModel(option.value)"
               >
@@ -395,7 +484,8 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
                 :key="`reason-${option.value}`"
                 type="button"
                 class="menu-item"
-                :class="{ on: (selectedReasoning ?? 'medium') === option.value }"
+                data-testid="reasoning-option"
+                :class="{ on: effectiveReasoning === option.value }"
                 @click="pickReasoning(option.value)"
               >
                 {{ option.label }}
@@ -416,7 +506,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
                 class="settings-select"
                 data-testid="conversation-reasoning-select"
                 label="推理强度"
-                :model-value="selectedReasoning ?? 'medium'"
+                :model-value="effectiveReasoning"
                 :options="reasoningOptions"
                 :disabled="settingsLocked"
                 tabindex="-1"
@@ -482,6 +572,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
   display: grid;
   gap: var(--space-1);
 }
+.slash-trigger { display: contents; }
 .slash-menu {
   position: absolute;
   bottom: calc(100% + 4px);

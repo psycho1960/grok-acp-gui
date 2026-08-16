@@ -2,6 +2,72 @@ import { expect, test, waitForConversationIdle } from "./fixtures";
 import axe from "axe-core";
 
 test.describe("GAG-008 conversation timeline", () => {
+  test("conversation scrollbars use the dark theme instead of Windows native chrome", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto("/#conversation");
+    const timeline = page.getByTestId("conversation-virtual-list");
+    await expect(timeline).toBeVisible({ timeout: 15_000 });
+
+    const scrollbar = await timeline.evaluate((element) => ({
+      color: getComputedStyle(element).scrollbarColor,
+      width: getComputedStyle(element, "::-webkit-scrollbar").width,
+      buttonDisplay: getComputedStyle(element, "::-webkit-scrollbar-button").display,
+      trackColor: getComputedStyle(element, "::-webkit-scrollbar-track").backgroundColor,
+    }));
+    expect(scrollbar.color).not.toBe("auto");
+    expect(scrollbar.width).toBe("10px");
+    expect(scrollbar.buttonDisplay).toBe("none");
+    expect(scrollbar.trackColor).not.toBe("rgb(255, 255, 255)");
+  });
+
+  test("missing worktree rail shows a localized empty state without invalid actions", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto("/#conversation");
+    await expect(page.getByTestId("conversation-rail")).toBeVisible({ timeout: 15_000 });
+    await page.getByTestId("rail-tab-workspace").click();
+    await expect(page.getByTestId("worktree-not-created")).toContainText(
+      "隔离 Worktree 尚未创建",
+    );
+    await expect(page.getByTestId("conversation-rail")).not.toContainText(
+      "Worktree is not registered",
+    );
+    await expect(page.getByRole("button", { name: "重新检查" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "对账" })).toHaveCount(0);
+  });
+
+  test("composer remains a compact dock when the optional workspace notice is absent", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.addInitScript(() => {
+      window.localStorage.setItem("gag010:fixture-mode", "ask");
+      window.localStorage.setItem("gag010:fixture-workspace", "direct");
+    });
+    await page.goto("/#conversation");
+    const conversation = page.getByTestId("conversation-view");
+    const composer = page.getByTestId("composer");
+    const timeline = page.getByTestId("conversation-virtual-list");
+    await expect(conversation).toBeVisible({ timeout: 15_000 });
+    await expect(composer).toBeVisible();
+    await expect(timeline).toBeVisible();
+    await expect(page.getByTestId("conversation-workspace-notice")).toHaveCount(0);
+
+    const [conversationBox, composerBox, timelineBox] = await Promise.all([
+      conversation.boundingBox(),
+      composer.boundingBox(),
+      timeline.boundingBox(),
+    ]);
+    expect(conversationBox).not.toBeNull();
+    expect(composerBox).not.toBeNull();
+    expect(timelineBox).not.toBeNull();
+    expect(composerBox!.height).toBeLessThanOrEqual(180);
+    expect(timelineBox!.height).toBeGreaterThan(composerBox!.height);
+  });
+
   test("fixture loads timeline, composer, and can send", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto("/#conversation");
@@ -58,6 +124,35 @@ test.describe("GAG-008 conversation timeline", () => {
 
     await jump.click();
     await expect(jump).toBeHidden({ timeout: 3000 });
+  });
+
+  test("long tool summaries never create page or timeline horizontal scrolling", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto("/#conversation");
+    const timeline = page.getByTestId("conversation-virtual-list");
+    await expect(timeline).toBeVisible({ timeout: 15_000 });
+    const oneLine = page.locator(".tool-one-line").first();
+    await expect(oneLine).toBeVisible({ timeout: 15_000 });
+
+    const dimensions = await oneLine.evaluate((summary) => {
+      const pageWidthBefore = document.documentElement.scrollWidth;
+      summary.textContent = `{"content":"${"a/very-long-path-segment/".repeat(160)}"}`;
+      const list = document.querySelector(
+        '[data-testid="conversation-virtual-list"]',
+      ) as HTMLElement | null;
+      if (!list) throw new Error("conversation timeline not found");
+      return {
+        pageWidthBefore,
+        pageScrollWidth: document.documentElement.scrollWidth,
+        listClientWidth: list.clientWidth,
+        listScrollWidth: list.scrollWidth,
+      };
+    });
+
+    expect(dimensions.pageScrollWidth).toBeLessThanOrEqual(dimensions.pageWidthBefore);
+    expect(dimensions.listScrollWidth).toBeLessThanOrEqual(dimensions.listClientWidth);
   });
 
   test("refresh restores the nearby reading position", async ({ page }) => {

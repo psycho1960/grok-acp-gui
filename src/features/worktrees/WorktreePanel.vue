@@ -347,7 +347,14 @@ watch(
 </template>
 
 <style scoped>
-.worktree-panel { display: grid; gap: var(--space-3); }
+.worktree-panel {
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+  min-height: 0;
+  padding: var(--space-3);
+  overflow: auto;
+}
 .worktree-panel header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-2); }
 .worktree-panel h2, .worktree-panel p, .removal-summary p { margin: 0; }
 .worktree-panel header p { color: var(--ctp-subtext0); font-size: var(--font-small); }

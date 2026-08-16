@@ -60,7 +60,30 @@ describe("GAG-021 task bar and breadcrumb", () => {
     });
     expect(w.find('[data-testid="mode-chevron"]').exists()).toBe(true);
     expect(w.find('[data-testid="workspace-chevron"]').exists()).toBe(true);
-    expect(w.get('[data-testid="conversation-mode-select"] select').exists()).toBe(true);
+    expect(
+      w
+        .get('[data-testid="conversation-mode-select"]')
+        .get('[data-testid="header-select-trigger"]')
+        .exists(),
+    ).toBe(true);
+    w.unmount();
+  });
+
+  it("does not imply an isolated workspace before its policy loads", () => {
+    const w = mount(ConversationHeader, {
+      props: {
+        title: "修对比度",
+        status: "idle",
+        modes: MODES,
+        selectedMode: "agent",
+        selectedWorkspaceStrategy: null,
+      },
+    });
+    const trigger = w
+      .get('[data-testid="conversation-workspace-select"]')
+      .get('[data-testid="header-select-trigger"]');
+    expect(trigger.text()).toContain("工作区策略");
+    expect(trigger.text()).not.toContain("隔离 Worktree");
     w.unmount();
   });
 
@@ -78,9 +101,11 @@ describe("GAG-021 task bar and breadcrumb", () => {
     expect(w.find('[data-testid="mode-chevron"]').exists()).toBe(false);
     expect(w.find('[data-testid="workspace-chevron"]').exists()).toBe(false);
     expect(
-      (w.get('[data-testid="conversation-mode-select"] select').element as HTMLSelectElement)
-        .disabled,
-    ).toBe(true);
+      w
+        .get('[data-testid="conversation-mode-select"]')
+        .get('[data-testid="header-select-trigger"]')
+        .attributes("disabled"),
+    ).toBeDefined();
     expect(w.get('[data-testid="conversation-mode-select"]').attributes("title")).toContain("运行");
     expect(w.get('[data-testid="conversation-workspace-select"]').attributes("title")).toContain("运行");
     w.unmount();

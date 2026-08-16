@@ -43,6 +43,31 @@ describe("GAG-007 task-center store", () => {
     expect(store.counts.failed_interrupted).toBe(1);
   });
 
+  it("loads terminal tasks and treats idle as not currently executing", async () => {
+    const snapshot = createTaskCenterSeedSnapshot();
+    const idle = {
+      ...snapshot.activeTasks![1]!,
+      id: "task-idle-1" as TaskId,
+      title: "等待下一轮",
+      status: "idle" as const,
+    };
+    const merged = snapshot.completedTasks!.find((task) => task.status === "merged")!;
+    const bridge = createFakeDesktopBridge({
+      bootstrapSnapshot: {
+        ...snapshot,
+        activeTasks: [idle],
+        completedTasks: [merged],
+      },
+    });
+
+    const store = useTaskCenterStore();
+    await store.attach(bridge);
+
+    expect(store.allTasks.map((task) => task.id)).toEqual([idle.id, merged.id]);
+    expect(store.counts.running).toBe(0);
+    expect(store.counts.completed).toBe(2);
+  });
+
   it("ignores older task.state seq per task (not global)", async () => {
     const store = useTaskCenterStore();
     store.__setTasksForTest([

@@ -175,7 +175,7 @@ function navItem(
 }
 
 const left = computed(() =>
-  h("nav", { class: "nav-list", "aria-label": "主导航" }, [
+  h("nav", { class: "nav-list task-navigation", "aria-label": "主导航" }, [
     h("p", { class: "nav-section" }, "任务"),
     navItem({
       label: "全部任务",
@@ -467,21 +467,22 @@ const commandItems = computed((): CommandItem[] => {
   <CommandPalette v-model="commandOpen" :items="commandItems" />
 </template>
 
-<style scoped>
-.nav-list {
+<style>
+.task-navigation {
   display: grid;
   gap: var(--space-1);
 }
-.nav-section {
+.task-navigation .nav-section {
   margin: var(--space-3) 0 var(--space-1);
   color: var(--ctp-subtext0);
   font-size: var(--text-xs);
   letter-spacing: 0.04em;
 }
-.nav-section:first-child {
+.task-navigation .nav-section:first-child {
   margin-top: 0;
 }
-.nav-list :deep(.nav-item) {
+.task-navigation .nav-item {
+  width: 100%;
   display: grid;
   grid-template-columns: 16px 1fr auto;
   gap: var(--space-2);
@@ -494,26 +495,30 @@ const commandItems = computed((): CommandItem[] => {
   border: 1px solid transparent;
   border-left: 3px solid transparent;
   border-radius: var(--radius-control);
+  appearance: none;
+  font: inherit;
   cursor: pointer;
 }
-.nav-list :deep(.nav-item:hover) {
+.task-navigation .nav-item:hover {
   color: var(--ctp-text);
   background: var(--ctp-surface0);
 }
-.nav-list :deep(.nav-item.active) {
+.task-navigation .nav-item.active {
   color: var(--ctp-text);
   background: var(--overlay-active);
   border-left-color: var(--ctp-mauve);
 }
-.nav-list :deep(.nav-item:disabled) {
+.task-navigation .nav-item:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
-.nav-list :deep(.nav-count) {
+.task-navigation .nav-count {
   color: var(--ctp-overlay0);
   font-size: var(--text-xs);
 }
-.nav-list :deep(h2),
+</style>
+
+<style scoped>
 .inspector-content h2 {
   margin: 0 0 var(--space-2);
   color: var(--ctp-text);

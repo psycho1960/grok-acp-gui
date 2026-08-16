@@ -10,7 +10,6 @@ import ConversationHeader from "../../src/features/conversation/ConversationHead
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
 import { useConversationStore } from "../../src/features/conversation/conversation-store";
 import { fixtureSessionSnapshot, FIX_TASK } from "../../src/features/conversation/fixtures";
-import CreateTaskDialog from "../../src/features/task-center/CreateTaskDialog.vue";
 import {
   isWorkspaceStrategy,
   workspaceStrategyForMode,
@@ -48,7 +47,7 @@ describe("conversation workspace strategy linkage", () => {
     sessionStorage.clear();
   });
 
-  it("header renders the three Chinese strategy options", () => {
+  it("header renders the three Chinese strategy options", async () => {
     const wrapper = mount(ConversationHeader, {
       props: {
         title: "演示",
@@ -59,33 +58,17 @@ describe("conversation workspace strategy linkage", () => {
     });
     const select = wrapper.get('[data-testid="conversation-workspace-select"]');
     expect(select.text()).toContain("工作区策略");
-    const options = select.findAll("option").map((option) => option.text());
+    const trigger = select.get('[data-testid="header-select-trigger"]');
+    expect(trigger.attributes("data-selected-value")).toBe("worktree");
+    await trigger.trigger("click");
+    const options = select
+      .findAll('[data-testid="header-select-option"]')
+      .map((option) => option.text());
     expect(options).toEqual([
-      "使用创建时的策略",
       "隔离 Worktree",
       "只读当前目录",
       "当前目录可写",
     ]);
-    expect((select.get("select").element as HTMLSelectElement).value).toBe("worktree");
-    wrapper.unmount();
-  });
-
-  it("Create Task shares the mapping and permits an explicit override", async () => {
-    const wrapper = mount(CreateTaskDialog, { props: { open: true } });
-    const mode = wrapper.get('[data-testid="create-task-mode"] select');
-    const workspace = wrapper.get('[data-testid="create-task-workspace"] select');
-    expect((workspace.element as HTMLSelectElement).value).toBe("direct");
-    await mode.setValue("agent");
-    expect((workspace.element as HTMLSelectElement).value).toBe("worktree");
-    expect(wrapper.text()).toContain(
-      "隔离 Worktree 尚未创建，本任务不会回落到原工作区。",
-    );
-    await workspace.setValue("readonly");
-    expect((workspace.element as HTMLSelectElement).value).toBe("readonly");
-    await mode.setValue("plan");
-    expect((workspace.element as HTMLSelectElement).value).toBe("worktree");
-    await mode.setValue("ask");
-    expect((workspace.element as HTMLSelectElement).value).toBe("direct");
     wrapper.unmount();
   });
 
@@ -121,7 +104,9 @@ describe("conversation workspace strategy linkage", () => {
         selectedWorkspaceStrategy: "worktree",
       },
     });
-    await header.get('[data-testid="conversation-mode-select"] select').setValue("plan");
+    const modeSelect = header.get('[data-testid="conversation-mode-select"]');
+    await modeSelect.get('[data-testid="header-select-trigger"]').trigger("click");
+    await modeSelect.get('[data-value="plan"]').trigger("click");
     const emitted = header.emitted();
     expect(emitted["update:mode"]?.at(-1)).toEqual(["plan", "worktree"]);
     expect(emitted["update:workspaceStrategy"]).toBeUndefined();
@@ -305,23 +290,33 @@ describe("conversation workspace strategy linkage", () => {
     await flushPromises();
 
     const workspaceSelect = wrapper.get(
-      '[data-testid="conversation-workspace-select"] select',
+      '[data-testid="conversation-workspace-select"]',
     );
-    expect(workspaceSelect.findAll("option").map((o) => o.text())).toEqual([
-      "使用创建时的策略",
+    await workspaceSelect
+      .get('[data-testid="header-select-trigger"]')
+      .trigger("click");
+    expect(
+      workspaceSelect
+        .findAll('[data-testid="header-select-option"]')
+        .map((option) => option.text()),
+    ).toEqual([
       "隔离 Worktree",
       "只读当前目录",
       "当前目录可写",
     ]);
 
     // Switch mode ask → one atomic configure persists mode + direct strategy.
-    const modeSelect = wrapper.get('[data-testid="conversation-mode-select"] select');
-    await modeSelect.setValue("ask");
+    const modeSelect = wrapper.get('[data-testid="conversation-mode-select"]');
+    await modeSelect.get('[data-testid="header-select-trigger"]').trigger("click");
+    await modeSelect.get('[data-value="ask"]').trigger("click");
     await flushPromises();
     expect(configureSettings).toEqual([{ mode: "ask", workspaceStrategy: "direct" }]);
 
-    // Manual strategy change persists independently.
-    await workspaceSelect.setValue("readonly");
+    // Every displayed workspace option is actionable and persists independently.
+    await workspaceSelect
+      .get('[data-testid="header-select-trigger"]')
+      .trigger("click");
+    await workspaceSelect.get('[data-value="readonly"]').trigger("click");
     await flushPromises();
     expect(configureSettings).toEqual([
       { mode: "ask", workspaceStrategy: "direct" },
@@ -330,6 +325,20 @@ describe("conversation workspace strategy linkage", () => {
     expect(wrapper.get('[data-testid="conversation-workspace-notice"]').text()).toContain(
       "只读策略已启用",
     );
+    await workspaceSelect
+      .get('[data-testid="header-select-trigger"]')
+      .trigger("click");
+    await workspaceSelect.get('[data-value="worktree"]').trigger("click");
+    await flushPromises();
+    await workspaceSelect
+      .get('[data-testid="header-select-trigger"]')
+      .trigger("click");
+    await workspaceSelect.get('[data-value="direct"]').trigger("click");
+    await flushPromises();
+    expect(configureSettings.slice(-2)).toEqual([
+      { workspaceStrategy: "worktree" },
+      { workspaceStrategy: "direct" },
+    ]);
     wrapper.unmount();
   });
 

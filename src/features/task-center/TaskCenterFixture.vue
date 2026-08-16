@@ -92,26 +92,18 @@ const fake = createFakeDesktopBridge({
       };
     }
     if (command.type === "task.create") {
-      if (!command.payload.prompt?.trim()) {
-        return {
-          success: "false",
-          error: {
-            code: "BRIDGE_VALIDATION_FAILED",
-            message: "Task prompt is required",
-            retryable: false,
-            detailsRedacted: true,
-            correlationId: "fixture000000012" as never,
-          },
-        };
-      }
       const id = `task-new-${activeTasks.length + 1}` as TaskId;
       const now = new Date().toISOString();
+      const startsTurn = Boolean(
+        command.payload.prompt?.trim() || command.payload.attachments?.length,
+      );
+      const status = startsTurn ? "preparing" : "idle";
       activeTasks.unshift({
         id,
         projectId: command.payload.projectId,
-        title: command.payload.title ?? "未命名任务",
-        status: "preparing",
-        workspaceKind: "worktree",
+        title: command.payload.title ?? "",
+        status,
+        workspaceKind: command.payload.workspaceStrategy ?? "direct",
         mode: command.payload.mode,
         model: command.payload.model,
         createdAt: now,
@@ -121,7 +113,7 @@ const fake = createFakeDesktopBridge({
         success: "true",
         data: {
           taskId: id,
-          task: { id, title: command.payload.title, status: "preparing" },
+          task: { id, title: command.payload.title, status },
         },
       };
     }

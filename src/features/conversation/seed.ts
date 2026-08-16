@@ -25,8 +25,18 @@ export function createConversationSeedSnapshot(): BootstrapSnapshot {
     capabilities: {
       models: [
         { modelId: "grok-4.5", name: "grok-4.5", reasoningEffort: "high" },
-        { modelId: "deepseek", name: "deepseek (deepseek-v4-pro)", reasoningEffort: "max" },
-        { modelId: "luna", name: "gpt-5.6-luna", reasoningEffort: "medium" },
+        {
+          modelId: "deepseek",
+          name: "deepseek (deepseek-v4-pro)",
+          reasoningEffort: "max",
+          reasoningEfforts: ["high", "max"],
+        },
+        {
+          modelId: "luna",
+          name: "gpt-5.6-luna",
+          reasoningEffort: "medium",
+          reasoningEfforts: ["medium", "high"],
+        },
       ],
       modes: [
         { id: "agent", name: "智能体" },

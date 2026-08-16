@@ -510,16 +510,13 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         let workspace_changed = task.workspace_kind != original_workspace_kind;
         let binding = self.repo.get_binding_by_task(&task_id.0)?;
         if workspace_changed
-            && (binding
-                .as_ref()
-                .is_some_and(|value| value.state == SessionState::Active)
-                || matches!(
-                    task.status,
-                    TaskStatus::Preparing
-                        | TaskStatus::Running
-                        | TaskStatus::WaitingPermission
-                        | TaskStatus::Integrating
-                ))
+            && matches!(
+                task.status,
+                TaskStatus::Preparing
+                    | TaskStatus::Running
+                    | TaskStatus::WaitingPermission
+                    | TaskStatus::Integrating
+            )
         {
             return Err(DomainError::new(
                 crate::domain::error::codes::DOMAIN_ILLEGAL_TRANSITION,

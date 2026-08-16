@@ -29,7 +29,23 @@ test("keeps navigation reachable at 200% page zoom", async ({ page }) => {
   await expect(page.getByRole("button", { name: "打开任务导航" })).toBeVisible();
   await expect(page.locator(".shell-left")).toHaveCount(0);
   await page.getByRole("button", { name: "打开任务导航" }).click();
-  await expect(page.getByRole("dialog", { name: "任务导航" })).toBeVisible();
+  const taskNavigation = page.getByRole("dialog", { name: "任务导航" });
+  await expect(taskNavigation).toBeVisible();
+  const navigationList = taskNavigation.locator(".nav-list");
+  // RenderVNode may project this node through a component boundary that does not
+  // preserve ShellView's generated scope marker. Navigation styling must not
+  // depend on that implementation detail.
+  await navigationList.evaluate((element) => {
+    for (const attribute of element.getAttributeNames()) {
+      if (attribute.startsWith("data-v-")) element.removeAttribute(attribute);
+    }
+  });
+  await expect(navigationList).toHaveCSS("display", "grid");
+  for (const testId of ["nav-all-tasks", "nav-recovery"]) {
+    const navigationButton = taskNavigation.getByTestId(testId);
+    await expect(navigationButton).toHaveCSS("display", "grid");
+    await expect(navigationButton).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  }
   await expect(page.locator(".app-shell")).toHaveScreenshot("shell-200-percent.png");
   await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
 });

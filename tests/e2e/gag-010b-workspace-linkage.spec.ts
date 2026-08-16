@@ -28,21 +28,21 @@ test("mode switch links the workspace strategy, echoes it, and survives reopen",
   );
 
   // 1) The workspace strategy selector lists the three Chinese labels.
-  const workspaceSelect = page
-    .getByTestId("conversation-workspace-select")
-    .locator("select");
-  await expect(workspaceSelect).toBeVisible();
-  await expect(workspaceSelect.locator("option")).toHaveText([
-    "使用创建时的策略",
+  const workspaceSelect = page.getByTestId("conversation-workspace-select");
+  const workspaceTrigger = workspaceSelect.getByTestId("header-select-trigger");
+  await expect(workspaceTrigger).toBeVisible();
+  await workspaceTrigger.click();
+  await expect(workspaceSelect.getByTestId("header-select-option")).toHaveText([
     "隔离 Worktree",
     "只读当前目录",
     "当前目录可写",
   ]);
 
   // 2) Switching mode ask links the strategy to direct (当前目录可写).
-  const modeSelect = page.getByTestId("conversation-mode-select").locator("select");
-  await modeSelect.selectOption("ask");
-  await expect(workspaceSelect).toHaveValue("direct");
+  const modeSelect = page.getByTestId("conversation-mode-select");
+  await modeSelect.getByTestId("header-select-trigger").click();
+  await modeSelect.locator('[data-value="ask"]').click();
+  await expect(workspaceTrigger).toHaveAttribute("data-selected-value", "direct");
 
   // 3) The next turn echoes both the mode and the linked strategy.
   const input = page.getByTestId("composer-input");
@@ -56,7 +56,8 @@ test("mode switch links the workspace strategy, echoes it, and survives reopen",
   );
 
   // 4) Manual strategy change persists too.
-  await workspaceSelect.selectOption("readonly");
+  await workspaceTrigger.click();
+  await workspaceSelect.locator('[data-value="readonly"]').click();
   await input.click();
   await input.fill("手动策略消息");
   await page.getByTestId("composer-send").click();
@@ -68,8 +69,11 @@ test("mode switch links the workspace strategy, echoes it, and survives reopen",
   // 5) Reopening restores mode + strategy.
   await page.reload();
   await openConversationFixture(page);
-  await expect(modeSelect).toHaveValue("ask");
-  await expect(workspaceSelect).toHaveValue("readonly");
+  await expect(modeSelect.getByTestId("header-select-trigger")).toHaveAttribute(
+    "data-selected-value",
+    "ask",
+  );
+  await expect(workspaceTrigger).toHaveAttribute("data-selected-value", "readonly");
 
   expect(consoleErrors).toEqual([]);
   await page.screenshot({ path: "workspace-e2e.png", fullPage: true });
@@ -77,12 +81,21 @@ test("mode switch links the workspace strategy, echoes it, and survives reopen",
 
 test("switching to plan links the strategy to worktree", async ({ page }) => {
   await openConversationFixture(page);
-  const workspaceSelect = page
-    .getByTestId("conversation-workspace-select")
-    .locator("select");
-  const modeSelect = page.getByTestId("conversation-mode-select").locator("select");
+  const workspaceSelect = page.getByTestId("conversation-workspace-select");
+  const modeSelect = page.getByTestId("conversation-mode-select");
 
-  await modeSelect.selectOption("plan");
-  await expect(workspaceSelect).toHaveValue("worktree");
+  await modeSelect.getByTestId("header-select-trigger").click();
+  await modeSelect.locator('[data-value="plan"]').click();
+  await expect(workspaceSelect.getByTestId("header-select-trigger")).toHaveAttribute(
+    "data-selected-value",
+    "worktree",
+  );
+  await expect(page.getByTestId("worktree-not-created")).toContainText(
+    "隔离 Worktree 尚未创建",
+  );
+  await expect(page.getByTestId("conversation-rail")).not.toContainText(
+    "Worktree is not registered",
+  );
+  await expect(page.getByRole("button", { name: "重新检查" })).toHaveCount(0);
   await page.screenshot({ path: "workspace-e2e-plan.png", fullPage: true });
 });

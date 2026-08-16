@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Onboarding 手动验证</title>
+    <style>
+      body { margin: 0; }
+      .scenario-bar {
+        position: fixed;
+        left: 8px;
+        bottom: 8px;
+        z-index: 99;
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .scenario-bar button {
+        padding: 6px 12px;
+        border-radius: 8px;
+        border: 1px solid #888;
+        background: #222;
+        color: #eee;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="scenario-bar" id="bar"></div>
+    <script type="module">
+      import { createApp, ref, onUnmounted } from "vue";
+      import OnboardingView from "/src/features/onboarding/OnboardingView.vue";
+      import { createFakeDesktopBridge } from "/src/bridge/fake-bridge";
+      import { applyThemeTokens } from "/src/shared/theme/tokens";
+      import "/src/shared/theme/tokens.css";
+
+      applyThemeTokens(document.documentElement.style);
+
+      function snapshot(scenario) {
+        const checks = [
+          { id: "git", label: "Git", status: "success", detail: "Git 已安装。" },
+          { id: "grok", label: "Grok", status: "success", detail: "已找到 Grok CLI。" },
+          { id: "version", label: "版本", status: "success", detail: "Grok 1.0.3 满足最低版本 0.2.118。" },
+          { id: "authentication", label: "认证", status: "success", detail: "Grok 已认证，并已通过最小模型请求验证。" },
+          { id: "database", label: "数据库", status: "success", detail: "应用数据库可用。" },
+          { id: "directory", label: "工作目录", status: "success", detail: "工作目录可用。" },
+          { id: "acp", label: "ACP 握手", status: "success", detail: "ACP 握手与会话初始化成功。" },
+        ];
+        const base = {
+          installed: true,
+          version: "1.0.3",
+          minVersion: "0.2.118",
+          authenticated: true,
+          ready: true,
+          login: { status: "idle", retryable: true },
+        };
+        if (scenario === "unauthenticated") {
+          checks[3] = { id: "authentication", label: "认证", status: "error", detail: "Grok 尚未登录、认证已失效，或服务端拒绝了当前凭据。", code: "RUNTIME_LOGIN_FAILED", action: "点击“登录 Grok”完成官方登录流程。" };
+          checks[6] = { id: "acp", label: "ACP 握手", status: "warning", detail: "等待认证和前置检查通过。", action: null };
+          return { ...base, authenticated: false, ready: false, checks,
+            actionableError: { code: "RUNTIME_LOGIN_FAILED", message: "Grok 尚未登录、认证已失效，或服务端拒绝了当前凭据。", action: "点击“登录 Grok”完成官方登录流程。", diagnostic: "[RUNTIME_LOGIN_FAILED] 认证失败" } };
+        }
+        if (scenario === "handshake") {
+          checks[3] = { id: "authentication", label: "认证", status: "warning", detail: "ACP 握手失败，无法确认认证状态。", code: null, action: "先重试；如仍失败，请复制脱敏诊断。" };
+          checks[6] = { id: "acp", label: "ACP 握手", status: "error", detail: "ACP 握手或会话初始化失败。", code: "ACP_HANDSHAKE_FAILED", action: "重新检测；如仍失败，请更新 Grok 并复制脱敏诊断。" };
+          return { ...base, authenticated: undefined, ready: false, checks,
+            actionableError: { code: "ACP_HANDSHAKE_FAILED", message: "ACP 握手或会话初始化失败。", action: "重新检测。", diagnostic: "[ACP_HANDSHAKE_FAILED] ACP 握手或会话初始化失败。" } };
+        }
+        if (scenario === "missing") {
+          checks[1] = { id: "grok", label: "Grok", status: "error", detail: "未找到 Grok CLI。", code: "RUNTIME_NOT_FOUND", action: "请按官方说明安装 Grok Build，然后重新检测。" };
+          checks[2] = { id: "version", label: "版本", status: "warning", detail: "尚未取得可验证的 Grok 版本。", code: null, action: null };
+          checks[3] = { id: "authentication", label: "认证", status: "warning", detail: "等待 Grok 安装、版本和目录检查通过。", code: null, action: null };
+          checks[6] = { id: "acp", label: "ACP 握手", status: "warning", detail: "等待认证和前置检查通过。", code: null, action: null };
+          return { ...base, installed: false, version: undefined, authenticated: undefined, ready: false, checks };
+        }
+        if (scenario === "version") {
+          checks[2] = { id: "version", label: "版本", status: "error", detail: "当前版本 0.1.0，最低要求 0.2.118。", code: "RUNTIME_PROBE_FAILED", action: "运行 `grok update` 升级后重新检测。" };
+          return { ...base, version: "0.1.0", ready: false, checks };
+        }
+        if (scenario === "database") {
+          checks[4] = { id: "database", label: "数据库", status: "error", detail: "应用数据库不可用。", code: "DB_QUERY_FAILED", action: "重启应用；如仍失败，请复制脱敏诊断并检查数据目录。" };
+          return { ...base, ready: false, checks };
+        }
+        if (scenario === "directory") {
+          checks[5] = { id: "directory", label: "工作目录", status: "error", detail: "工作目录不可写。", code: "DIR_NOT_WRITABLE", action: "修复目录访问权限后，可在这里立即复检。" };
+          return { ...base, ready: false, checks };
+        }
+        if (scenario === "env-missing") {
+          checks[3] = { id: "authentication", label: "认证", status: "error", detail: "Model 'profile' requires environment variable 'OPENAI_API_KEY'. Restart the app.", code: "RUNTIME_MODEL_ENV_MISSING", action: "设置所示环境变量后完全退出并重启应用。" };
+          checks[6] = { id: "acp", label: "ACP 握手", status: "warning", detail: "等待认证和前置检查通过。", code: null, action: null };
+          return { ...base, ready: false, checks };
+        }
+        return { ...base, checks };
+      }
+
+      function makeBridge(scenario) {
+        let loginRunning = false;
+        return createFakeDesktopBridge({
+          onExecute(command) {
+            if (command.type === "runtime.refresh") {
+              return { success: "true", data: snapshot(scenario) };
+            }
+            if (command.type === "runtime.login") {
+              const method = command.payload.method;
+              if (method === "oauth") {
+                loginRunning = true;
+                return { success: "true", data: { status: "running", message: "Grok 登录进程已启动，正在等待官方登录完成。", retryable: false } };
+              }
+              if (method === "cancel") {
+                loginRunning = false;
+                return { success: "true", data: { status: "failed", message: "登录已取消。", retryable: true } };
+              }
+              if (method === "status") {
+                if (loginRunning) {
+                  return { success: "true", data: { status: "running", message: "Grok 登录进程已启动，正在等待官方登录完成。", retryable: false } };
+                }
+                return { success: "true", data: { status: "succeeded", message: "Grok 登录成功。", exitCode: 0, retryable: false } };
+              }
+            }
+            return { success: "true", data: { acknowledged: command.type } };
+          },
+        });
+      }
+
+      const scenarios = [
+        ["ok", "全部通过"],
+        ["unauthenticated", "未认证"],
+        ["handshake", "握手失败"],
+        ["missing", "缺少 Grok"],
+        ["version", "版本过低"],
+        ["database", "数据库失败"],
+        ["directory", "目录失败"],
+        ["env-missing", "环境变量缺失"],
+      ];
+
+      const bar = document.getElementById("bar");
+      let app = null;
+
+      function mount(scenario) {
+        if (app) app.unmount();
+        const container = document.createElement("div");
+        document.getElementById("app").replaceChildren(container);
+        app = createApp(OnboardingView, { bridge: makeBridge(scenario) });
+        app.mount(container);
+      }
+
+      for (const [id, label] of scenarios) {
+        const btn = document.createElement("button");
+        btn.textContent = label;
+        btn.onclick = () => mount(id);
+        bar.appendChild(btn);
+      }
+
+      mount("unauthenticated");
+    </script>
+  </body>
+</html>

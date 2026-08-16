@@ -41,6 +41,7 @@ export function createFakeDesktopBridge(
     runtime: { status: "ready" },
     capabilities: { models: [], modes: [], slashCommands: [] },
     projects: [],
+    completedTasks: [],
     activeTasks: [],
     bindings: [],
     worktrees: [],

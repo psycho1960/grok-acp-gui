@@ -628,12 +628,9 @@ export const useTaskCenterStore = defineStore("task-center", () => {
       return { ok: false, message: createTaskError.value };
     }
     const prompt = input.prompt.trim();
-    if (!prompt) {
-      createTaskError.value = "请填写任务目标（必填）";
-      return { ok: false, message: createTaskError.value };
-    }
-    // Title is optional: derive it from the first sentence of the prompt.
-    const title = (input.title?.trim() || deriveTaskTitle(prompt)).slice(
+    // Keep an empty title as the persisted sentinel for "derive from the
+    // first conversation message". The UI presents it as “新任务”.
+    const title = (input.title?.trim() || (prompt ? deriveTaskTitle(prompt) : "")).slice(
       0,
       120,
     );
@@ -654,7 +651,7 @@ export const useTaskCenterStore = defineStore("task-center", () => {
         return { ok: false, message: createTaskError.value };
       }
       await refresh();
-      announce(`已创建任务「${title}」`, true);
+      announce(`已创建任务「${title || "新任务"}」`, true);
       return { ok: true, taskId: result.data.taskId };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
