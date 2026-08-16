@@ -762,6 +762,19 @@ async fn workspace_change_rebinds_next_session_and_rejects_an_active_turn() {
         )),
         Some(RuntimeState::Busy)
     );
+    let resumed = execute_impl(
+        active_repo.as_ref(),
+        active_runtime.as_ref(),
+        active_task_runtime.as_ref(),
+        serde_json::json!({ "type": "session.resume", "payload": { "taskId": "task-active" } }),
+    )
+    .await;
+    assert!(matches!(resumed, DesktopResult::Ok { .. }), "{resumed:?}");
+    assert_eq!(
+        active_repo.get_task("task-active").expect("task").status,
+        TaskStatus::Running,
+        "resuming an already-running session must not unlock the composer"
+    );
     let rejected = execute_impl(
         active_repo.as_ref(),
         active_runtime.as_ref(),

@@ -1938,6 +1938,10 @@ async fn session_resume(
     task_runtime: &dyn TaskRuntime,
     payload: &super::commands::SessionResumePayload,
 ) -> DesktopResult {
+    let task = match repo.get_task(&payload.task_id.0) {
+        Ok(task) => task,
+        Err(error) => return DesktopResult::err(AppError::new(error.code, error.message)),
+    };
     let should_increment_attempt = match repo.get_binding_by_task(&payload.task_id.0) {
         Ok(binding) => binding.is_some_and(|binding| {
             binding.state == crate::domain::types::SessionState::Disconnected
@@ -1951,8 +1955,10 @@ async fn session_resume(
     }
     match ensure_task_session(repo, task_runtime, &payload.task_id).await {
         Ok(session_id) => {
-            if let Err(error) = repo.update_task_status(&payload.task_id.0, "idle", None) {
-                return DesktopResult::err(AppError::new(error.code, error.message));
+            if !task.status.implies_live_process() {
+                if let Err(error) = repo.update_task_status(&payload.task_id.0, "idle", None) {
+                    return DesktopResult::err(AppError::new(error.code, error.message));
+                }
             }
             DesktopResult::ok(serde_json::json!({ "sessionId": session_id }))
         }
