@@ -31,7 +31,6 @@ test("GAG-007 provides Task Center feature modules", () => {
     "hash-route.ts",
     "list-rows.ts",
     "OpenProjectDialog.vue",
-    "CreateTaskDialog.vue",
     "stateful-fake-bridge.ts",
     "index.ts",
   ]) {

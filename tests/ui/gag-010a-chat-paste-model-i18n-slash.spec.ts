@@ -13,7 +13,6 @@ import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
 import type {
   ArtifactBlobInput,
   DesktopCommand,
-  ReasoningEffort,
   SlashCommandInfo,
 } from "../../src/bridge/types";
 import Composer from "../../src/features/conversation/Composer.vue";
@@ -30,7 +29,6 @@ import {
   insertSlashCommand,
   slashMenuState,
 } from "../../src/features/conversation/slash-commands";
-import CreateTaskDialog from "../../src/features/task-center/CreateTaskDialog.vue";
 import { deriveTaskTitle } from "../../src/features/task-center/title";
 
 // ---------------------------------------------------------------------------
@@ -545,75 +543,7 @@ describe("conversation model & reasoning settings", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 7. CreateTaskDialog: title optional + auto-generated from first sentence
-// ---------------------------------------------------------------------------
-
-describe("CreateTaskDialog optional title", () => {
-  it("creates an empty conversation when the initial message and title are omitted", async () => {
-    const wrapper = mount(CreateTaskDialog, {
-      props: { open: true },
-      attachTo: document.body,
-    });
-    await wrapper.vm.$nextTick();
-
-    await wrapper.get('[data-testid="create-task-submit"]').trigger("click");
-
-    expect(wrapper.find('[data-testid="create-task-error"]').exists()).toBe(false);
-    const emitted = wrapper.emitted("create")?.at(-1)?.[0] as {
-      title: string;
-      prompt: string;
-    };
-    expect(emitted).toMatchObject({ title: "", prompt: "" });
-    wrapper.unmount();
-  });
-
-  it("marks the title as optional and derives it from the first sentence", async () => {
-    const wrapper = mount(CreateTaskDialog, {
-      props: { open: true },
-      attachTo: document.body,
-    });
-    await wrapper.vm.$nextTick();
-
-    const label = wrapper.get('[data-testid="create-task-title"]');
-    expect(label.text()).toContain("标题（可选）");
-
-    await wrapper.get('[data-testid="create-task-prompt"] textarea').setValue(
-      "实现登录页面。包含邮箱和密码校验。",
-    );
-    await wrapper.vm.$nextTick();
-    // No required-field error is shown.
-    expect(wrapper.find('[data-testid="create-task-error"]').exists()).toBe(false);
-
-    await wrapper.get('[data-testid="create-task-submit"]').trigger("click");
-    const emitted = wrapper.emitted("create")?.at(-1)?.[0] as {
-      title: string;
-      prompt: string;
-      reasoning: ReasoningEffort;
-    };
-    expect(emitted.title).toBe("实现登录页面");
-    expect(emitted.title).not.toBe("未命名任务");
-    expect(emitted.prompt).toBe("实现登录页面。包含邮箱和密码校验。");
-    expect(emitted.reasoning).toBe("medium");
-    wrapper.unmount();
-  });
-
-  it("prefers an explicit title when provided", async () => {
-    const wrapper = mount(CreateTaskDialog, {
-      props: { open: true },
-      attachTo: document.body,
-    });
-    await wrapper.vm.$nextTick();
-    await wrapper.get('[data-testid="create-task-prompt"] textarea').setValue("优化启动性能");
-    await wrapper.get('[data-testid="create-task-title"] input').setValue("性能优化");
-    await wrapper.get('[data-testid="create-task-submit"]').trigger("click");
-    const emitted = wrapper.emitted("create")?.at(-1)?.[0] as { title: string };
-    expect(emitted.title).toBe("性能优化");
-    wrapper.unmount();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 8. Full-Chinese UI audit: no English residues in shipped templates
+// 7. Full-Chinese UI audit: no English residues in shipped templates
 // ---------------------------------------------------------------------------
 
 describe("全中文界面静态审计", () => {

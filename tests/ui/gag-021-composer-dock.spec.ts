@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
 import Composer from "../../src/features/conversation/Composer.vue";
+import { useConversationStore } from "../../src/features/conversation/conversation-store";
 import {
   FIX_SESSION,
   FIX_TASK,
@@ -61,6 +62,20 @@ describe("GAG-021 composer dock", () => {
     });
     expect(w.find('[data-testid="composer-stop"]').exists()).toBe(true);
     expect(w.find('[data-testid="composer-send"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it("shows the fixed legacy model-profile reasoning instead of a stale task setting", () => {
+    const w = mount(Composer, {
+      props: {
+        modelValue: "",
+        capabilities: { canSend: true, canCancel: false, bridgeOnline: true },
+        models: [{ modelId: "legacy", name: "Legacy", reasoningEffort: "high" }],
+        selectedModel: "legacy",
+        selectedReasoning: "max",
+      },
+    });
+    expect(w.get('[data-testid="composer-model-control"]').text()).toContain("Legacy · 高");
     w.unmount();
   });
 
@@ -346,7 +361,7 @@ describe("GAG-021 composer dock", () => {
     wrapper.unmount();
   });
 
-  it("resumes the ACP session when an empty conversation requests slash commands", async () => {
+  it("resumes the ACP session without discarding pending attachments", async () => {
     const executed: string[] = [];
     const bridge = createFakeDesktopBridge({
       onExecute(command) {
@@ -363,6 +378,19 @@ describe("GAG-021 composer dock", () => {
       attachTo: document.body,
     });
     await flushPromises();
+    const store = useConversationStore();
+    store.attachments = [
+      {
+        artifactId: "pending-image",
+        displayName: "pending.png",
+        mimeType: "image/png",
+        bytes: 1024,
+        state: "ready",
+        previewCapability: "inline",
+      },
+    ];
+    await flushPromises();
+    expect(wrapper.get('[aria-label="待发送附件"]').text()).toContain("pending.png");
 
     const input = wrapper.get('[data-testid="composer-input"]');
     await input.setValue("/");
@@ -372,6 +400,7 @@ describe("GAG-021 composer dock", () => {
     await flushPromises();
 
     expect(executed.filter((type) => type === "session.resume")).toHaveLength(1);
+    expect(wrapper.get('[aria-label="待发送附件"]').text()).toContain("pending.png");
     wrapper.unmount();
   });
 

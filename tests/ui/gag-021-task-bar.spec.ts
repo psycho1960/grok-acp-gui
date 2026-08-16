@@ -69,6 +69,24 @@ describe("GAG-021 task bar and breadcrumb", () => {
     w.unmount();
   });
 
+  it("does not imply an isolated workspace before its policy loads", () => {
+    const w = mount(ConversationHeader, {
+      props: {
+        title: "修对比度",
+        status: "idle",
+        modes: MODES,
+        selectedMode: "agent",
+        selectedWorkspaceStrategy: null,
+      },
+    });
+    const trigger = w
+      .get('[data-testid="conversation-workspace-select"]')
+      .get('[data-testid="header-select-trigger"]');
+    expect(trigger.text()).toContain("工作区策略");
+    expect(trigger.text()).not.toContain("隔离 Worktree");
+    w.unmount();
+  });
+
   it("locks mode and workspace badges without a chevron while running", () => {
     const w = mount(ConversationHeader, {
       props: {

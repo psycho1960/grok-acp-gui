@@ -10,7 +10,6 @@ import ConversationHeader from "../../src/features/conversation/ConversationHead
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
 import { useConversationStore } from "../../src/features/conversation/conversation-store";
 import { fixtureSessionSnapshot, FIX_TASK } from "../../src/features/conversation/fixtures";
-import CreateTaskDialog from "../../src/features/task-center/CreateTaskDialog.vue";
 import {
   isWorkspaceStrategy,
   workspaceStrategyForMode,
@@ -70,25 +69,6 @@ describe("conversation workspace strategy linkage", () => {
       "只读当前目录",
       "当前目录可写",
     ]);
-    wrapper.unmount();
-  });
-
-  it("Create Task shares the mapping and permits an explicit override", async () => {
-    const wrapper = mount(CreateTaskDialog, { props: { open: true } });
-    const mode = wrapper.get('[data-testid="create-task-mode"] select');
-    const workspace = wrapper.get('[data-testid="create-task-workspace"] select');
-    expect((workspace.element as HTMLSelectElement).value).toBe("direct");
-    await mode.setValue("agent");
-    expect((workspace.element as HTMLSelectElement).value).toBe("worktree");
-    expect(wrapper.text()).toContain(
-      "隔离 Worktree 尚未创建，本任务不会回落到原工作区。",
-    );
-    await workspace.setValue("readonly");
-    expect((workspace.element as HTMLSelectElement).value).toBe("readonly");
-    await mode.setValue("plan");
-    expect((workspace.element as HTMLSelectElement).value).toBe("worktree");
-    await mode.setValue("ask");
-    expect((workspace.element as HTMLSelectElement).value).toBe("direct");
     wrapper.unmount();
   });
 
