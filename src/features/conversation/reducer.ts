@@ -1,11 +1,7 @@
 // GAG-008: Snapshot + delta merge reducer for conversation timeline.
 // Dedup: (sessionId, seq). Tool merge by toolCallId. No completed→running.
 
-import type {
-  SessionId,
-  TaskId,
-  TypedDesktopEvent,
-} from "../../bridge/types";
+import type { SessionId, TaskId, TypedDesktopEvent } from "../../bridge/types";
 import { mergeToolCall, normalizeToolCall } from "./tool-normalize";
 import type {
   ActivityItem,
@@ -90,13 +86,17 @@ function mapTaskStatus(status: string): ConversationRunStatus {
 function freezeStreamingAssistant(state: ConversationState): ConversationState {
   if (!state.streamingAssistantId) return state;
   const items = state.items.map((it) => {
-    if (it.id !== state.streamingAssistantId || it.kind !== "assistant") return it;
+    if (it.id !== state.streamingAssistantId || it.kind !== "assistant")
+      return it;
     return { ...it, streaming: false, frozen: true };
   });
   return { ...state, items, streamingAssistantId: null };
 }
 
-function upsertItem(state: ConversationState, item: TimelineItem): ConversationState {
+function upsertItem(
+  state: ConversationState,
+  item: TimelineItem,
+): ConversationState {
   const idx = state.items.findIndex((i) => i.id === item.id);
   if (idx < 0) {
     return { ...state, items: [...state.items, item] };
@@ -233,7 +233,9 @@ function applyMessageDelta(
 
   if (typeof text === "string" && text.length > 0) {
     if (next.streamingAssistantId) {
-      const existing = next.items.find((i) => i.id === next.streamingAssistantId);
+      const existing = next.items.find(
+        (i) => i.id === next.streamingAssistantId,
+      );
       if (existing && existing.kind === "assistant" && !existing.frozen) {
         const updated: AssistantMessageItem = {
           ...existing,
@@ -326,7 +328,11 @@ function applyTaskState(
   const status = mapTaskStatus(event.payload.status);
   next = { ...next, status, taskId: event.taskId, sessionId: event.sessionId };
 
-  if (status === "idle" || status === "error" || status === "waiting_permission") {
+  if (
+    status === "idle" ||
+    status === "error" ||
+    status === "waiting_permission"
+  ) {
     next = freezeStreamingAssistant(next);
   }
 
@@ -494,7 +500,10 @@ export function updateApprovalDecision(
     ...state,
     status: update.decisionState === "resolved" ? "running" : state.status,
     items: state.items.map((item) => {
-      if (item.id !== itemId || (item.kind !== "permission" && item.kind !== "plan")) {
+      if (
+        item.id !== itemId ||
+        (item.kind !== "permission" && item.kind !== "plan")
+      ) {
         return item;
       }
       return {
@@ -504,7 +513,9 @@ export function updateApprovalDecision(
           decisionState: update.decisionState,
           selectedOptionId: update.optionId,
           errorMessage: update.errorMessage,
-          ...(item.kind === "plan" && update.status ? { status: update.status } : {}),
+          ...(item.kind === "plan" && update.status
+            ? { status: update.status }
+            : {}),
         },
       } as TimelineItem;
     }),
@@ -602,6 +613,7 @@ function applySequencedEvent(
       return applyArtifact(next, event);
     case "changes.updated":
       return applyChanges(next, event);
+    case "session.capabilities.updated":
     case "session.commands.updated":
       // Capability metadata — advance the sequence cursor but render nothing.
       return markSeen(next, sessionId, seq);
@@ -791,8 +803,10 @@ export function applySnapshot(
   // A snapshot is authoritative history; replay it by seq even if persistence
   // returned rows in an unexpected order.
   const orderedEvents = [...snapshot.events].sort((left, right) => {
-    const leftSeq = "seq" in left && typeof left.seq === "number" ? left.seq : 0;
-    const rightSeq = "seq" in right && typeof right.seq === "number" ? right.seq : 0;
+    const leftSeq =
+      "seq" in left && typeof left.seq === "number" ? left.seq : 0;
+    const rightSeq =
+      "seq" in right && typeof right.seq === "number" ? right.seq : 0;
     return leftSeq - rightSeq;
   });
   // Snapshot rows may be compacted (for example thousands of consecutive
@@ -801,7 +815,11 @@ export function applySnapshot(
   // authoritative gap boundary; strict contiguous sequencing is only for
   // live deltas received after this snapshot.
   next = orderedEvents.reduce((state, event) => {
-    if (!("sessionId" in event) || event.sessionId == null || event.seq == null) {
+    if (
+      !("sessionId" in event) ||
+      event.sessionId == null ||
+      event.seq == null
+    ) {
       return state;
     }
     return applySequencedEvent(state, event);
@@ -960,7 +978,10 @@ export function foldExploreTools(items: TimelineItem[]): TimelineItem[] {
           kind: "explore_batch",
           phase: allDone ? "completed" : "running",
           result: {
-            summary: batch.map((b) => b.tool.title).join(", ").slice(0, 200),
+            summary: batch
+              .map((b) => b.tool.title)
+              .join(", ")
+              .slice(0, 200),
             redacted: false,
           },
         },

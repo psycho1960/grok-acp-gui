@@ -37,6 +37,8 @@ export interface BootstrapSnapshot {
   capabilities: CapabilitySnapshot;
   // Domain entities (GAG-004) — may be empty when `ready=false`.
   projects?: Project[];
+  /** Non-active terminal tasks retained for Task Center history. */
+  completedTasks?: Task[];
   activeTasks?: Task[];
   bindings?: SessionBinding[];
   worktrees?: WorktreeRecord[];
@@ -59,7 +61,14 @@ export interface RuntimeBootstrapStatus {
 export type StartupCheckStatus = "checking" | "success" | "warning" | "error";
 
 export interface StartupCheck {
-  id: "git" | "grok" | "version" | "authentication" | "database" | "directory" | "acp";
+  id:
+    | "git"
+    | "grok"
+    | "version"
+    | "authentication"
+    | "database"
+    | "directory"
+    | "acp";
   label: string;
   status: StartupCheckStatus;
   detail: string;
@@ -68,7 +77,8 @@ export interface StartupCheck {
 }
 
 export interface RuntimeLoginResult {
-  status: "idle" | "running" | "succeeded" | "cancelled" | "timed_out" | "failed";
+  status:
+    "idle" | "running" | "succeeded" | "cancelled" | "timed_out" | "failed";
   exitCode?: number;
   message?: string;
   retryable: boolean;
@@ -122,6 +132,8 @@ export interface ModelInfo {
   description?: string;
   /** Default reasoning effort from the selected Grok config model profile. */
   reasoningEffort?: ReasoningEffort;
+  /** Reasoning efforts explicitly advertised by that Grok config profile. */
+  reasoningEfforts?: ReasoningEffort[];
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "max";
@@ -187,18 +199,10 @@ export type WorktreeState =
   | "deleted"
   | "unknown";
 
-export type SessionState =
-  | "active"
-  | "idle"
-  | "disconnected"
-  | "closed";
+export type SessionState = "active" | "idle" | "disconnected" | "closed";
 
 export type RecoveryState =
-  | "available"
-  | "expired"
-  | "restoring"
-  | "restored"
-  | "deleted";
+  "available" | "expired" | "restoring" | "restored" | "deleted";
 
 export interface Project {
   id: ProjectId;
@@ -396,7 +400,10 @@ export type DesktopCommand =
   | { type: "worktree.inspect"; payload: WorktreeTaskPayload }
   | { type: "worktree.reconcile"; payload: Record<string, never> }
   | { type: "worktree.prepareRemoval"; payload: WorktreeTaskPayload }
-  | { type: "worktree.prepareAdoption"; payload: WorktreePrepareAdoptionPayload }
+  | {
+      type: "worktree.prepareAdoption";
+      payload: WorktreePrepareAdoptionPayload;
+    }
   | { type: "worktree.remove"; payload: WorktreeRemovePayload }
   | { type: "worktree.adopt"; payload: WorktreeAdoptPayload }
   | { type: "review.status"; payload: WorktreeTaskPayload }
@@ -441,9 +448,9 @@ export interface ProjectForgetPayload {
 
 export interface TaskCreatePayload {
   projectId: ProjectId;
-  /** Optional — when empty the backend derives it from the prompt's first sentence. */
+  /** Optional — when empty the backend derives it from the first non-empty user message. */
   title?: string;
-  /** Initial prompt text (FR-TASK-001). Required. */
+  /** Optional initial message. Empty creates an idle conversation. */
   prompt: string;
   /** Attachments referenced by artifact ID. */
   attachments?: string[];
@@ -522,8 +529,13 @@ export interface ArtifactImportBlobPayload {
   blobs: ArtifactBlobInput[];
 }
 
-export interface ArtifactListPayload { taskId: TaskId; }
-export interface ArtifactIdPayload { taskId: TaskId; artifactId: string; }
+export interface ArtifactListPayload {
+  taskId: TaskId;
+}
+export interface ArtifactIdPayload {
+  taskId: TaskId;
+  artifactId: string;
+}
 export interface ArtifactRevealPayload extends ArtifactIdPayload {
   /** Destination returned by the native save dialog; omitted for managed copy. */
   targetPath?: string;
@@ -635,8 +647,13 @@ export interface IntegrationExecutePayload {
   approvalDigest: string;
 }
 
-export interface IntegrationAttemptPayload { attemptId: string; }
-export interface IntegrationPublishPayload { attemptId: string; approvalDigest: string; }
+export interface IntegrationAttemptPayload {
+  attemptId: string;
+}
+export interface IntegrationPublishPayload {
+  attemptId: string;
+  approvalDigest: string;
+}
 
 export interface WorktreeCleanupPayload {
   taskId: TaskId;
@@ -654,15 +671,26 @@ export interface RecoveryDeletePayload {
 export interface RecoveryScanPayload {
   triggerKind?: "startup" | "manual";
 }
-export interface RecoveryIssuePayload { issueId: string; revision?: number; }
+export interface RecoveryIssuePayload {
+  issueId: string;
+  revision?: number;
+}
 export interface RecoveryPrepareActionPayload {
   issueId: string;
   revision: number;
   action: RecoveryActionKind;
 }
-export interface RecoveryExecuteActionPayload { planId: string; approvalDigest: string; }
-export interface RecoveryCreateBundlePayload { issueId: string; revision: number; }
-export interface RecoveryVerifyBundlePayload { bundleId: string; }
+export interface RecoveryExecuteActionPayload {
+  planId: string;
+  approvalDigest: string;
+}
+export interface RecoveryCreateBundlePayload {
+  issueId: string;
+  revision: number;
+}
+export interface RecoveryVerifyBundlePayload {
+  bundleId: string;
+}
 
 // ---------------------------------------------------------------------------
 // DesktopEvent
@@ -684,19 +712,102 @@ export interface DesktopEvent {
  */
 export type TypedDesktopEvent =
   // non-session events
-  | { type: "runtime.updated"; timestamp: string; payload: RuntimeUpdatedPayload }
-  | { type: "resource.warning"; timestamp: string; payload: ResourceWarningPayload }
-  | { type: "diagnostic.notice"; timestamp: string; payload: DiagnosticNoticePayload }
+  | {
+      type: "runtime.updated";
+      timestamp: string;
+      payload: RuntimeUpdatedPayload;
+    }
+  | {
+      type: "resource.warning";
+      timestamp: string;
+      payload: ResourceWarningPayload;
+    }
+  | {
+      type: "diagnostic.notice";
+      timestamp: string;
+      payload: DiagnosticNoticePayload;
+    }
   // session-scoped events
-  | { type: "task.snapshot"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: TaskSnapshotPayload }
-  | { type: "task.state"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: TaskStatePayload }
-  | { type: "message.delta"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: MessageDeltaPayload }
-  | { type: "activity.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ActivityUpdatedPayload }
-  | { type: "permission.requested"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: PermissionRequestedPayload }
-  | { type: "plan.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: PlanUpdatedPayload }
-  | { type: "changes.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ChangesUpdatedPayload }
-  | { type: "artifact.available"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: ArtifactAvailablePayload }
-  | { type: "session.commands.updated"; taskId: TaskId; sessionId: SessionId; seq: number; timestamp: string; payload: SessionCommandsUpdatedPayload };
+  | {
+      type: "task.snapshot";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: TaskSnapshotPayload;
+    }
+  | {
+      type: "task.state";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: TaskStatePayload;
+    }
+  | {
+      type: "message.delta";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: MessageDeltaPayload;
+    }
+  | {
+      type: "activity.updated";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: ActivityUpdatedPayload;
+    }
+  | {
+      type: "permission.requested";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: PermissionRequestedPayload;
+    }
+  | {
+      type: "plan.updated";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: PlanUpdatedPayload;
+    }
+  | {
+      type: "changes.updated";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: ChangesUpdatedPayload;
+    }
+  | {
+      type: "artifact.available";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: ArtifactAvailablePayload;
+    }
+  | {
+      type: "session.capabilities.updated";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: SessionCapabilitiesUpdatedPayload;
+    }
+  | {
+      type: "session.commands.updated";
+      taskId: TaskId;
+      sessionId: SessionId;
+      seq: number;
+      timestamp: string;
+      payload: SessionCommandsUpdatedPayload;
+    };
 
 /**
  * Session-scoped event envelope with required taskId/sessionId/seq.
@@ -825,8 +936,7 @@ export interface DiagnosticNoticePayload {
 // ---------------------------------------------------------------------------
 
 export type DesktopResult<T = unknown> =
-  | { success: "true"; data: T }
-  | { success: "false"; error: AppError };
+  { success: "true"; data: T } | { success: "false"; error: AppError };
 
 /** Typed result DTOs mapped to each command category. */
 export interface RuntimeStatusResult {
@@ -866,6 +976,14 @@ export interface TurnSendResult {
   requestId?: number;
   /** Compatibility with the original mock response. */
   seq?: number;
+  /** Persisted title, including one derived from this first user message. */
+  taskTitle?: string;
+}
+
+/** Capabilities advertised by the ACP agent for one concrete session. */
+export interface SessionCapabilitiesUpdatedPayload {
+  models: ModelInfo[];
+  modes: ModeInfo[];
 }
 
 export interface ArtifactImportResult {
@@ -882,7 +1000,8 @@ export interface ArtifactPreviewResult {
   url: string;
 }
 
-export type ArtifactSaveStatus = "saved" | "cancelled" | "conflict" | "rejected" | "failed";
+export type ArtifactSaveStatus =
+  "saved" | "cancelled" | "conflict" | "rejected" | "failed";
 
 export interface ArtifactSaveResult {
   status: ArtifactSaveStatus;
@@ -901,7 +1020,14 @@ export interface WorkspaceInspectResult {
 export interface FileChange {
   path: string;
   oldPath?: string;
-  kind: "added" | "modified" | "deleted" | "renamed" | "mode_changed" | "untracked" | "conflicted";
+  kind:
+    | "added"
+    | "modified"
+    | "deleted"
+    | "renamed"
+    | "mode_changed"
+    | "untracked"
+    | "conflicted";
   binary: boolean;
   size: number;
   mode: "file" | "symlink" | "submodule" | "deleted" | string;
@@ -961,26 +1087,65 @@ export interface CheckpointRecord {
 }
 
 export interface IntegrationPlan {
-  attemptId: string; taskId: TaskId; sourceRef: string; sourceTipSha: string; sourceRange: string[];
-  sourceDirty: boolean; sourceWorktreeDigest: string;
+  attemptId: string;
+  taskId: TaskId;
+  sourceRef: string;
+  sourceTipSha: string;
+  sourceRange: string[];
+  sourceDirty: boolean;
+  sourceWorktreeDigest: string;
   expectedFiles: string[];
-  targetRef: string; expectedTargetSha: string; commitMessage: string; validationCommands: string[][];
-  validationDigest: string; approvalDigest: string;
+  targetRef: string;
+  expectedTargetSha: string;
+  commitMessage: string;
+  validationCommands: string[][];
+  validationDigest: string;
+  approvalDigest: string;
 }
 
 export interface IntegrationAttempt {
-  id: string; taskId: TaskId; repoRoot: string; repoIdentity: string; sourceRef: string; sourceTipSha: string; sourceRange: string;
-  sourceDirty: boolean; sourceWorktreeDigest: string;
-  targetRef: string; expectedTargetSha: string; commitMessage: string; validationCommandsJson: string;
-  validationDigest: string; approvalDigest: string; state: IntegrationState; temporaryWorktreeId?: string;
-  temporaryWorktreePath?: string; temporaryBranch?: string; conflictSummaryJson?: string; validationResultJson?: string;
-  resultCommitSha?: string; recoveryBundlePath?: string; cleanupStatus: string; createdAt: string; updatedAt: string;
+  id: string;
+  taskId: TaskId;
+  repoRoot: string;
+  repoIdentity: string;
+  sourceRef: string;
+  sourceTipSha: string;
+  sourceRange: string;
+  sourceDirty: boolean;
+  sourceWorktreeDigest: string;
+  targetRef: string;
+  expectedTargetSha: string;
+  commitMessage: string;
+  validationCommandsJson: string;
+  validationDigest: string;
+  approvalDigest: string;
+  state: IntegrationState;
+  temporaryWorktreeId?: string;
+  temporaryWorktreePath?: string;
+  temporaryBranch?: string;
+  conflictSummaryJson?: string;
+  validationResultJson?: string;
+  resultCommitSha?: string;
+  recoveryBundlePath?: string;
+  cleanupStatus: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type IntegrationState =
-  | "draft" | "preflight" | "staging" | "conflicted" | "validating"
-  | "ready_to_publish" | "publishing" | "completed" | "preflight_failed"
-  | "validation_failed" | "publish_rejected" | "cleanup_required" | "aborted";
+  | "draft"
+  | "preflight"
+  | "staging"
+  | "conflicted"
+  | "validating"
+  | "ready_to_publish"
+  | "publishing"
+  | "completed"
+  | "preflight_failed"
+  | "validation_failed"
+  | "publish_rejected"
+  | "cleanup_required"
+  | "aborted";
 
 export interface AcknowledgedResult {
   acknowledged: string;
@@ -1025,6 +1190,7 @@ export const EventTypes = {
   PLAN_UPDATED: "plan.updated",
   CHANGES_UPDATED: "changes.updated",
   ARTIFACT_AVAILABLE: "artifact.available",
+  SESSION_CAPABILITIES_UPDATED: "session.capabilities.updated",
   SESSION_COMMANDS_UPDATED: "session.commands.updated",
   RESOURCE_WARNING: "resource.warning",
   DIAGNOSTIC_NOTICE: "diagnostic.notice",

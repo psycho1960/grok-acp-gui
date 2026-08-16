@@ -23,7 +23,7 @@ export interface TaskStatusPresentation {
 
 const PRESENTATION: Record<TaskStatus, TaskStatusPresentation> = {
   draft: {
-    group: "running",
+    group: "completed",
     icon: "waiting",
     label: "草稿",
     capabilities: { canCancel: false, canRecover: false, canOpen: true },
@@ -47,7 +47,7 @@ const PRESENTATION: Record<TaskStatus, TaskStatusPresentation> = {
     capabilities: { canCancel: true, canRecover: false, canOpen: true },
   },
   idle: {
-    group: "running",
+    group: "completed",
     icon: "success",
     label: "空闲",
     capabilities: { canCancel: false, canRecover: false, canOpen: true },

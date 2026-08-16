@@ -111,14 +111,11 @@ function onCancel(): void {
 
 function onSubmit(): void {
   localError.value = null;
-  if (!prompt.value.trim()) {
-    localError.value = "任务目标为必填项";
-    return;
-  }
-  // 标题为可选字段：留空时由首句自动提炼生成。
-  const t = title.value.trim() || deriveTaskTitle(prompt.value);
+  const initialMessage = prompt.value.trim();
+  // 标题和初始消息都可留空；首轮对话发送后由后端补全标题。
+  const t = title.value.trim() || (initialMessage ? deriveTaskTitle(initialMessage) : "");
   emit("create", {
-    prompt: prompt.value.trim(),
+    prompt: initialMessage,
     title: t.slice(0, 120),
     mode: mode.value,
     model: model.value.trim() || undefined,
@@ -138,18 +135,18 @@ function onSubmit(): void {
   >
     <div class="form" data-testid="create-task-form">
       <section class="section">
-        <h3 class="section-title">目标与标题</h3>
+        <h3 class="section-title">初始对话</h3>
         <Textarea
           :model-value="prompt"
-          label="任务目标（必填）"
-          placeholder="描述你希望智能体完成的工作…"
+          label="初始消息（可选）"
+          placeholder="可稍后在对话中描述要完成的工作"
           data-testid="create-task-prompt"
           @update:model-value="prompt = $event"
         />
         <Input
           :model-value="title"
           label="标题（可选）"
-          placeholder="留空将根据首句自动生成"
+          placeholder="留空将根据首条对话自动生成"
           data-testid="create-task-title"
           @update:model-value="title = $event"
         />
@@ -257,17 +254,19 @@ function onSubmit(): void {
   text-transform: uppercase;
 }
 .field-with-help {
-  display: flex;
-  gap: var(--space-1);
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
   align-items: end;
 }
 .field-with-help :deep(.field) {
-  flex: 1;
+  min-width: 0;
 }
 .grid-2 {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-2);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-4);
 }
 .hint {
   margin: 0;

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import type { DesktopBridge, ReasoningEffort, TaskId, TaskStatus } from "../../bridge/types";
+import type { DesktopBridge, TaskId, TaskStatus } from "../../bridge/types";
 import Badge from "../../shared/ui/Badge.vue";
 import Button from "../../shared/ui/Button.vue";
 import Dialog from "../../shared/ui/Dialog.vue";
@@ -14,7 +14,6 @@ import {
   parseTaskCenterHash,
 } from "./hash-route";
 import { buildGroupedListRows, type TaskListRow } from "./list-rows";
-import CreateTaskDialog from "./CreateTaskDialog.vue";
 import OpenProjectDialog from "./OpenProjectDialog.vue";
 import TaskCard from "./TaskCard.vue";
 import TaskDetailDrawer from "./TaskDetailDrawer.vue";
@@ -37,7 +36,6 @@ const confirmCancelOpen = ref(false);
 const confirmCancelTaskId = ref<TaskId | null>(null);
 const cancelFeedback = ref<string | null>(null);
 const openProjectOpen = ref(false);
-const createTaskOpen = ref(false);
 const createAfterProjectSelection = ref(false);
 const nonGitNotice = ref<string | null>(null);
 const filtersOpen = ref(false);
@@ -201,6 +199,29 @@ function showOpenProject(): void {
   openProjectOpen.value = true;
 }
 
+async function createEmptyConversation(): Promise<void> {
+  if (store.createTaskPending) return;
+  const result = await store.createTask({
+    prompt: "",
+    title: "",
+    mode: "ask",
+    reasoning: "medium",
+    workspaceStrategy: "direct",
+  });
+  if (result.ok && result.taskId) {
+    toast.success("任务已创建");
+    openConversation(result.taskId);
+    return;
+  }
+  const friendly = mapErrorMessage(
+    result.message || store.createTaskError || "创建任务失败",
+    "创建任务失败",
+  );
+  toast.error(friendly.title, {
+    description: [friendly.summary, friendly.suggestion].filter(Boolean).join(" "),
+  });
+}
+
 function showCreateTask(): void {
   if (!store.hasActiveProject) {
     createAfterProjectSelection.value = true;
@@ -208,7 +229,7 @@ function showCreateTask(): void {
     openProjectOpen.value = true;
     return;
   }
-  createTaskOpen.value = true;
+  void createEmptyConversation();
 }
 
 async function onOpenProject(path: string): Promise<void> {
@@ -223,7 +244,7 @@ async function onOpenProject(path: string): Promise<void> {
     } else {
       toast.success("项目已打开");
     }
-    if (shouldCreate) createTaskOpen.value = true;
+    if (shouldCreate) await createEmptyConversation();
   } else {
     const friendly = mapErrorMessage(result.message || "请检查路径后重试", "打开项目失败");
     toast.error(friendly.title, {
@@ -235,30 +256,6 @@ async function onOpenProject(path: string): Promise<void> {
 function closeOpenProject(): void {
   openProjectOpen.value = false;
   createAfterProjectSelection.value = false;
-}
-
-async function onCreateTask(payload: {
-  prompt: string;
-  title: string;
-  mode: string;
-  model?: string;
-  reasoning: ReasoningEffort;
-  workspaceStrategy: "worktree" | "readonly" | "direct";
-}): Promise<void> {
-  const result = await store.createTask(payload);
-  if (result.ok && result.taskId) {
-    createTaskOpen.value = false;
-    toast.success("任务已创建");
-    openConversation(result.taskId);
-  } else if (!result.ok) {
-    const friendly = mapErrorMessage(
-      result.message || store.createTaskError || "创建任务失败",
-      "创建任务失败",
-    );
-    toast.error(friendly.title, {
-      description: [friendly.summary, friendly.suggestion].filter(Boolean).join(" "),
-    });
-  }
 }
 
 function onClearProject(): void {
@@ -339,6 +336,7 @@ watch(
           <Button
             variant="primary"
             data-testid="header-create-task"
+            :state="store.createTaskPending ? 'loading' : 'default'"
             @click="showCreateTask"
           >
             新建任务
@@ -506,6 +504,7 @@ watch(
         <Button
           variant="primary"
           data-testid="empty-create-task"
+          :state="store.createTaskPending ? 'loading' : 'default'"
           @click="showCreateTask"
         >
           新建任务
@@ -603,19 +602,6 @@ watch(
       @update:open="(open) => open ? (openProjectOpen = true) : closeOpenProject()"
       @open="onOpenProject"
       @cancel="closeOpenProject"
-    />
-
-    <CreateTaskDialog
-      :open="createTaskOpen"
-      :pending="store.createTaskPending"
-      :error="store.createTaskError"
-      :model-options="store.modelOptions"
-      :project-label="
-        store.activeProject?.displayPath || store.activeProject?.path || ''
-      "
-      @update:open="createTaskOpen = $event"
-      @create="onCreateTask"
-      @cancel="createTaskOpen = false"
     />
   </section>
 </template>

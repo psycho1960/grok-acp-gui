@@ -45,7 +45,12 @@ export function createStatefulTaskCenterBridge(
       capabilities: base.capabilities ?? {
         models: [
           { modelId: "grok-4.5", name: "grok-4.5", reasoningEffort: "high" },
-          { modelId: "deepseek", name: "deepseek (deepseek-v4-pro)", reasoningEffort: "max" },
+          {
+            modelId: "deepseek",
+            name: "deepseek (deepseek-v4-pro)",
+            reasoningEffort: "max",
+            reasoningEfforts: ["high", "max"],
+          },
         ],
         modes: [
           { id: "agent", name: "智能体" },
@@ -60,6 +65,7 @@ export function createStatefulTaskCenterBridge(
       },
       projects: [...projects],
       activeTasks: [...tasks],
+      completedTasks: [...(base.completedTasks ?? [])],
       bindings: base.bindings ?? [],
       worktrees: base.worktrees ?? [],
       recoveryItems: base.recoveryItems ?? [],
@@ -178,15 +184,6 @@ export function createStatefulTaskCenterBridge(
             code: "DB_QUERY_FAILED",
             message: "创建任务失败：数据库错误",
             retryable: true,
-          }),
-        };
-      }
-      if (!command.payload.prompt?.trim()) {
-        return {
-          success: "false",
-          error: fakeError({
-            code: "BRIDGE_VALIDATION_FAILED",
-            message: "任务目标不能为空",
           }),
         };
       }

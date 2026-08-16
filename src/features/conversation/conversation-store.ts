@@ -1,7 +1,7 @@
 // GAG-008: Pinia store — snapshot/delta merge, composer, cancel, drafts.
 
 import { computed, ref, shallowRef, watch } from "vue";
-import { defineStore } from "pinia";
+import { acceptHMRUpdate, defineStore } from "pinia";
 import type {
   ArtifactBlobInput,
   DesktopBridge,
@@ -71,7 +71,9 @@ function desktopErrorMessage(error: { code: string; message: string }): string {
 export const useConversationStore = defineStore("conversation", () => {
   const loadState = ref<ConversationLoadState>("idle");
   const errorMessage = ref<string | null>(null);
-  const timeline = shallowRef<ConversationState>(createEmptyConversationState());
+  const timeline = shallowRef<ConversationState>(
+    createEmptyConversationState(),
+  );
   const draft = ref("");
   const sendError = ref<string | null>(null);
   const sendPending = ref(false);
@@ -93,6 +95,8 @@ export const useConversationStore = defineStore("conversation", () => {
   const models = ref<ModelInfo[]>([]);
   /** Runtime session modes (from bootstrap capability snapshot). */
   const modes = ref<ModeInfo[]>([]);
+  /** Runtime capability baseline used before the current session advertises modes. */
+  const bootstrapModes = ref<ModeInfo[]>([]);
   /** Slash commands discovered from ACP `available_commands`. */
   const slashCommands = ref<SlashCommandInfo[]>([]);
   /** Runtime capability baseline used when a session has not published an override. */
@@ -142,7 +146,10 @@ export const useConversationStore = defineStore("conversation", () => {
   );
 
   const workspaceNotice = computed(() => {
-    if (workspaceStrategy.value === "worktree" && workspaceAvailable.value === false) {
+    if (
+      workspaceStrategy.value === "worktree" &&
+      workspaceAvailable.value === false
+    ) {
       return WORKTREE_NOT_READY_MESSAGE;
     }
     if (workspaceStrategy.value === "readonly") {
@@ -159,11 +166,18 @@ export const useConversationStore = defineStore("conversation", () => {
 
   const workspaceAttention = computed(() => {
     if (lifecycleStatus.value === "conflicted") return "conflicted";
-    if (workspaceStrategy.value === "worktree" && workspaceAvailable.value === false) {
+    if (
+      workspaceStrategy.value === "worktree" &&
+      workspaceAvailable.value === false
+    ) {
       return "not-created";
     }
     const state = worktreeRecord.value?.state;
-    if (state === "missing" || state === "creation_failed" || state === "allocating") {
+    if (
+      state === "missing" ||
+      state === "creation_failed" ||
+      state === "allocating"
+    ) {
       return "not-created";
     }
     if (worktreeRecord.value?.ownership === "external") {
@@ -200,10 +214,19 @@ export const useConversationStore = defineStore("conversation", () => {
     } catch {
       listedArtifacts.value = [];
     }
+    if (
+      workspaceStrategy.value !== "worktree" ||
+      workspaceAvailable.value === false
+    ) {
+      worktreeRecord.value = null;
+      return;
+    }
     try {
       const inspected = await current.inspectWorktree(id);
       worktreeRecord.value =
-        inspected.success === "true" ? (inspected.data?.worktree ?? null) : null;
+        inspected.success === "true"
+          ? (inspected.data?.worktree ?? null)
+          : null;
     } catch {
       worktreeRecord.value = null;
     }
@@ -321,6 +344,20 @@ export const useConversationStore = defineStore("conversation", () => {
       artifactRevision.value += 1;
       void refreshRailContext();
     }
+    if (
+      event.type === "session.capabilities.updated" &&
+      (!timeline.value.taskId || event.taskId === timeline.value.taskId) &&
+      (!timeline.value.sessionId ||
+        event.sessionId === timeline.value.sessionId)
+    ) {
+      if (Array.isArray(event.payload.modes)) modes.value = event.payload.modes;
+      if (
+        Array.isArray(event.payload.models) &&
+        event.payload.models.length > 0
+      ) {
+        models.value = event.payload.models;
+      }
+    }
     if (event.type === "session.commands.updated") {
       const commands = event.payload.commands;
       if (Array.isArray(commands)) slashCommands.value = commands;
@@ -331,6 +368,7 @@ export const useConversationStore = defineStore("conversation", () => {
   async function attach(bridge: DesktopBridge): Promise<void> {
     disposed = false;
     bootstrapSlashCommands.value = [];
+    bootstrapModes.value = [];
     slashCommands.value = [];
     facade = createConversationFacade(bridge);
     if (unsubscribe) {
@@ -354,10 +392,13 @@ export const useConversationStore = defineStore("conversation", () => {
         models.value = Array.isArray(snapshot.capabilities?.models)
           ? snapshot.capabilities.models
           : [];
-        modes.value = Array.isArray(snapshot.capabilities?.modes)
+        bootstrapModes.value = Array.isArray(snapshot.capabilities?.modes)
           ? snapshot.capabilities.modes
           : [];
-        bootstrapSlashCommands.value = Array.isArray(snapshot.capabilities?.slashCommands)
+        modes.value = bootstrapModes.value;
+        bootstrapSlashCommands.value = Array.isArray(
+          snapshot.capabilities?.slashCommands,
+        )
           ? snapshot.capabilities.slashCommands
           : [];
         slashCommands.value = bootstrapSlashCommands.value;
@@ -373,8 +414,7 @@ export const useConversationStore = defineStore("conversation", () => {
       bridgeOnline.value = true;
     } catch (error) {
       bridgeOnline.value = false;
-      errorMessage.value =
-        error instanceof Error ? error.message : "订阅失败";
+      errorMessage.value = error instanceof Error ? error.message : "订阅失败";
       loadState.value = "stale";
     }
   }
@@ -406,12 +446,38 @@ export const useConversationStore = defineStore("conversation", () => {
 
   function commitSnapshot(snapshot: SessionTimelineSnapshot): void {
     loadState.value = "loading";
-    const next = applySnapshot(createEmptyConversationState(snapshot.taskId), snapshot);
+    const next = applySnapshot(
+      createEmptyConversationState(snapshot.taskId),
+      snapshot,
+    );
     commit(next);
+    const latestCapabilities = [...snapshot.events]
+      .reverse()
+      .find(
+        (
+          event,
+        ): event is Extract<
+          TypedDesktopEvent,
+          { type: "session.capabilities.updated" }
+        > =>
+          event.type === "session.capabilities.updated" &&
+          event.sessionId === snapshot.sessionId,
+      );
+    modes.value = Array.isArray(latestCapabilities?.payload.modes)
+      ? latestCapabilities.payload.modes
+      : bootstrapModes.value;
+    if (
+      Array.isArray(latestCapabilities?.payload.models) &&
+      latestCapabilities.payload.models.length > 0
+    ) {
+      models.value = latestCapabilities.payload.models;
+    }
     const latestCommands = [...snapshot.events]
       .reverse()
       .find(
-        (event): event is Extract<
+        (
+          event,
+        ): event is Extract<
           TypedDesktopEvent,
           { type: "session.commands.updated" }
         > =>
@@ -438,7 +504,8 @@ export const useConversationStore = defineStore("conversation", () => {
     if (snapshot.workspaceAvailable !== undefined) {
       workspaceAvailable.value = snapshot.workspaceAvailable === true;
     }
-    if (snapshot.model !== undefined) selectedModel.value = snapshot.model ?? null;
+    if (snapshot.model !== undefined)
+      selectedModel.value = snapshot.model ?? null;
     if (snapshot.reasoning !== undefined) {
       selectedReasoning.value = normalizeReasoning(snapshot.reasoning);
     }
@@ -452,7 +519,7 @@ export const useConversationStore = defineStore("conversation", () => {
     commitSnapshot(snapshot);
   }
 
-  async function openTask(taskId: TaskId, title = "任务会话"): Promise<void> {
+  async function openTask(taskId: TaskId, title = "新任务"): Promise<void> {
     const version = ++openVersion;
     settingsVersion += 1;
     settingsPending.value = false;
@@ -474,6 +541,7 @@ export const useConversationStore = defineStore("conversation", () => {
     lifecycleStatus.value = null;
     selectedModel.value = null;
     selectedReasoning.value = null;
+    modes.value = bootstrapModes.value;
 
     if (!facade) {
       loadState.value = "ready";
@@ -530,7 +598,7 @@ export const useConversationStore = defineStore("conversation", () => {
           reasoning: data.reasoning,
           taskStatus: data.status,
         });
-      } else if (data?.title) {
+      } else if (data) {
         if (data.mode !== undefined) selectedMode.value = data.mode ?? null;
         if (data.workspaceStrategy !== undefined) {
           workspaceStrategy.value = isWorkspaceStrategy(data.workspaceStrategy)
@@ -547,7 +615,7 @@ export const useConversationStore = defineStore("conversation", () => {
         lifecycleStatus.value = data.status ?? null;
         commit({
           ...timeline.value,
-          title: data.title,
+          title: data.title?.trim() || title,
           status:
             data.status === "running" || data.status === "preparing"
               ? "running"
@@ -596,12 +664,17 @@ export const useConversationStore = defineStore("conversation", () => {
   }
 
   function removeAttachment(artifactId: string): void {
-    if (!sendPending.value) attachments.value = attachments.value.filter((item) => item.artifactId !== artifactId);
+    if (!sendPending.value)
+      attachments.value = attachments.value.filter(
+        (item) => item.artifactId !== artifactId,
+      );
   }
 
   /** Merge imported descriptors into the pending attachment list. */
   function mergeImported(imported: ArtifactDescriptor[]): void {
-    const indexed = new Map(attachments.value.map((item) => [item.artifactId, item]));
+    const indexed = new Map(
+      attachments.value.map((item) => [item.artifactId, item]),
+    );
     for (const item of imported) indexed.set(item.artifactId, item);
     attachments.value = Array.from(indexed.values());
     artifactRevision.value += 1;
@@ -611,7 +684,9 @@ export const useConversationStore = defineStore("conversation", () => {
    * Import clipboard image blobs (screenshots pasted without a filesystem
    * path) through the same managed-artifact pipeline as file imports.
    */
-  async function importAttachmentBlobs(blobs: ArtifactBlobInput[]): Promise<boolean> {
+  async function importAttachmentBlobs(
+    blobs: ArtifactBlobInput[],
+  ): Promise<boolean> {
     if (!blobs.length) return false;
     if (!timeline.value.taskId || !facade) {
       sendError.value = "请先打开任务，再粘贴图片";
@@ -620,7 +695,10 @@ export const useConversationStore = defineStore("conversation", () => {
     attachmentPending.value = true;
     sendError.value = null;
     try {
-      const result = await facade.importArtifactBlobs(timeline.value.taskId, blobs);
+      const result = await facade.importArtifactBlobs(
+        timeline.value.taskId,
+        blobs,
+      );
       if (result.success === "false") throw new Error(result.error.message);
       const imported = result.data?.artifacts ?? [];
       if (imported.length === 0) {
@@ -630,7 +708,8 @@ export const useConversationStore = defineStore("conversation", () => {
       mergeImported(imported);
       return true;
     } catch (error) {
-      sendError.value = error instanceof Error ? error.message : "剪贴板图片导入失败";
+      sendError.value =
+        error instanceof Error ? error.message : "剪贴板图片导入失败";
       return false;
     } finally {
       attachmentPending.value = false;
@@ -644,9 +723,13 @@ export const useConversationStore = defineStore("conversation", () => {
     reasoning?: ReasoningEffort;
   };
 
-  function applyStableSettings(source: Record<string, unknown>, fallback: StableSettings = {}): void {
+  function applyStableSettings(
+    source: Record<string, unknown>,
+    fallback: StableSettings = {},
+  ): void {
     const mode = source.mode !== undefined ? source.mode : fallback.mode;
-    if (mode !== undefined) selectedMode.value = typeof mode === "string" ? mode : null;
+    if (mode !== undefined)
+      selectedMode.value = typeof mode === "string" ? mode : null;
 
     const strategy = source.workspaceStrategy ?? fallback.workspaceStrategy;
     if (strategy !== undefined && isWorkspaceStrategy(strategy)) {
@@ -662,10 +745,12 @@ export const useConversationStore = defineStore("conversation", () => {
     }
 
     const model = source.model !== undefined ? source.model : fallback.model;
-    if (model !== undefined) selectedModel.value = typeof model === "string" ? model : null;
+    if (model !== undefined)
+      selectedModel.value = typeof model === "string" ? model : null;
 
     const reasoning = source.reasoning ?? fallback.reasoning;
-    if (reasoning !== undefined) selectedReasoning.value = normalizeReasoning(reasoning);
+    if (reasoning !== undefined)
+      selectedReasoning.value = normalizeReasoning(reasoning);
   }
 
   async function reloadStableSettings(taskId: TaskId): Promise<void> {
@@ -697,20 +782,23 @@ export const useConversationStore = defineStore("conversation", () => {
     sendError.value = null;
     try {
       const result = await activeFacade.configureSession(taskId, settings);
-      if (timeline.value.taskId !== taskId || version !== settingsVersion) return false;
+      if (timeline.value.taskId !== taskId || version !== settingsVersion)
+        return false;
       if (result.success === "false") {
         sendError.value = desktopErrorMessage(result.error);
         await reloadStableSettings(taskId);
         return false;
       }
-      const data = result.data && typeof result.data === "object"
-        ? result.data as Record<string, unknown>
-        : {};
+      const data =
+        result.data && typeof result.data === "object"
+          ? (result.data as Record<string, unknown>)
+          : {};
       applyStableSettings(data, settings);
       return true;
     } catch (error) {
       if (timeline.value.taskId === taskId && version === settingsVersion) {
-        sendError.value = error instanceof Error ? error.message : fallbackError;
+        sendError.value =
+          error instanceof Error ? error.message : fallbackError;
         await reloadStableSettings(taskId);
       }
       return false;
@@ -731,22 +819,40 @@ export const useConversationStore = defineStore("conversation", () => {
   }
 
   /** Persist an explicit user workspace-policy override. */
-  async function configureWorkspaceStrategy(strategy: WorkspaceStrategy): Promise<boolean> {
-    return configureStableSettings({ workspaceStrategy: strategy }, "工作区策略切换失败");
+  async function configureWorkspaceStrategy(
+    strategy: WorkspaceStrategy,
+  ): Promise<boolean> {
+    return configureStableSettings(
+      { workspaceStrategy: strategy },
+      "工作区策略切换失败",
+    );
   }
 
   async function configureModel(model: string | null): Promise<boolean> {
-    return configureStableSettings({ model }, "模型切换失败");
+    const reasoning = model
+      ? models.value.find((candidate) => candidate.modelId === model)
+          ?.reasoningEffort
+      : undefined;
+    return configureStableSettings(
+      reasoning ? { model, reasoning } : { model },
+      "模型切换失败",
+    );
   }
 
-  async function configureReasoning(reasoning: ReasoningEffort): Promise<boolean> {
+  async function configureReasoning(
+    reasoning: ReasoningEffort,
+  ): Promise<boolean> {
     return configureStableSettings({ reasoning }, "推理强度切换失败");
   }
 
   async function sendMessage(): Promise<boolean> {
     const text = draft.value.trim();
-    const outgoingAttachments = attachments.value.map((attachment) => ({ ...attachment }));
-    const attachmentIds = outgoingAttachments.map((attachment) => attachment.artifactId);
+    const outgoingAttachments = attachments.value.map((attachment) => ({
+      ...attachment,
+    }));
+    const attachmentIds = outgoingAttachments.map(
+      (attachment) => attachment.artifactId,
+    );
     if (!text && attachmentIds.length === 0) return false;
     if (!composerCapabilities.value.canSend) return false;
     if (!timeline.value.taskId) {
@@ -763,11 +869,15 @@ export const useConversationStore = defineStore("conversation", () => {
     const localId = `user-${Date.now()}`;
     pendingUserId = localId;
     commit(
-      appendUserMessage(timeline.value, redactVisibleText(text || `已添加 ${attachmentIds.length} 张图片附件`), {
-        id: localId,
-        pending: true,
-        attachments: outgoingAttachments,
-      }),
+      appendUserMessage(
+        timeline.value,
+        redactVisibleText(text || `已添加 ${attachmentIds.length} 张图片附件`),
+        {
+          id: localId,
+          pending: true,
+          attachments: outgoingAttachments,
+        },
+      ),
     );
     draft.value = "";
     attachments.value = [];
@@ -777,7 +887,11 @@ export const useConversationStore = defineStore("conversation", () => {
     commit(setRunStatus(timeline.value, "running"));
 
     try {
-      const result = await facade.sendTurn(timeline.value.taskId, text, attachmentIds);
+      const result = await facade.sendTurn(
+        timeline.value.taskId,
+        text,
+        attachmentIds,
+      );
       if (result.success === "false") {
         commit(
           markUserMessageFailed(
@@ -796,6 +910,16 @@ export const useConversationStore = defineStore("conversation", () => {
         return false;
       }
       commit(markUserMessageConfirmed(timeline.value, localId));
+      const response =
+        result.data && typeof result.data === "object"
+          ? (result.data as Record<string, unknown>)
+          : null;
+      if (
+        typeof response?.taskTitle === "string" &&
+        response.taskTitle.trim()
+      ) {
+        commit({ ...timeline.value, title: response.taskTitle.trim() });
+      }
       draft.value = "";
       clearDraft(timeline.value.taskId);
       pendingUserId = null;
@@ -830,8 +954,7 @@ export const useConversationStore = defineStore("conversation", () => {
       }
       return true;
     } catch (error) {
-      sendError.value =
-        error instanceof Error ? error.message : "停止失败";
+      sendError.value = error instanceof Error ? error.message : "停止失败";
       commit(setRunStatus(timeline.value, "running"));
       return false;
     } finally {
@@ -846,7 +969,11 @@ export const useConversationStore = defineStore("conversation", () => {
     if (composerCapabilities.value.canSend) return false;
     queuedFollowUps.value = [
       ...queuedFollowUps.value,
-      { id: `queue-${Date.now()}-${queuedFollowUps.value.length}`, text, attachments: outgoing },
+      {
+        id: `queue-${Date.now()}-${queuedFollowUps.value.length}`,
+        text,
+        attachments: outgoing,
+      },
     ];
     draft.value = "";
     attachments.value = [];
@@ -857,9 +984,13 @@ export const useConversationStore = defineStore("conversation", () => {
   function editFollowUp(id: string): boolean {
     const item = queuedFollowUps.value.find((entry) => entry.id === id);
     if (!item) return false;
-    queuedFollowUps.value = queuedFollowUps.value.filter((entry) => entry.id !== id);
+    queuedFollowUps.value = queuedFollowUps.value.filter(
+      (entry) => entry.id !== id,
+    );
     draft.value = item.text;
-    attachments.value = item.attachments.map((attachment) => ({ ...attachment }));
+    attachments.value = item.attachments.map((attachment) => ({
+      ...attachment,
+    }));
     if (timeline.value.taskId) saveDraft(timeline.value.taskId, item.text);
     return true;
   }
@@ -874,21 +1005,34 @@ export const useConversationStore = defineStore("conversation", () => {
   async function drainQueuedFollowUp(): Promise<void> {
     const status = timeline.value.status;
     if (status !== "idle" && status !== "error") return;
-    if (queueDrainPending || sendPending.value || !composerCapabilities.value.canSend) return;
+    if (
+      queueDrainPending ||
+      sendPending.value ||
+      !composerCapabilities.value.canSend
+    )
+      return;
     const next = interruptFollowUp ?? queuedFollowUps.value[0];
     if (!next) return;
     queueDrainPending = true;
     const preservedDraft = draft.value;
-    const preservedAttachments = attachments.value.map((attachment) => ({ ...attachment }));
+    const preservedAttachments = attachments.value.map((attachment) => ({
+      ...attachment,
+    }));
     try {
       if (interruptFollowUp?.id === next.id) interruptFollowUp = null;
-      else queuedFollowUps.value = queuedFollowUps.value.filter((entry) => entry.id !== next.id);
+      else
+        queuedFollowUps.value = queuedFollowUps.value.filter(
+          (entry) => entry.id !== next.id,
+        );
       draft.value = next.text;
-      attachments.value = next.attachments.map((attachment) => ({ ...attachment }));
+      attachments.value = next.attachments.map((attachment) => ({
+        ...attachment,
+      }));
       await sendMessage();
       draft.value = preservedDraft;
       attachments.value = preservedAttachments;
-      if (timeline.value.taskId) saveDraft(timeline.value.taskId, preservedDraft);
+      if (timeline.value.taskId)
+        saveDraft(timeline.value.taskId, preservedDraft);
     } finally {
       queueDrainPending = false;
     }
@@ -898,7 +1042,9 @@ export const useConversationStore = defineStore("conversation", () => {
     if (interruptFollowUp || cancelPending.value) return false;
     const item = queuedFollowUps.value.find((entry) => entry.id === id);
     if (!item) return false;
-    queuedFollowUps.value = queuedFollowUps.value.filter((entry) => entry.id !== id);
+    queuedFollowUps.value = queuedFollowUps.value.filter(
+      (entry) => entry.id !== id,
+    );
     interruptFollowUp = item;
     if (composerCapabilities.value.canCancel) {
       const cancelled = await cancelTurn();
@@ -921,24 +1067,37 @@ export const useConversationStore = defineStore("conversation", () => {
     },
   );
 
-  async function resolvePermission(itemId: string, optionId: string): Promise<boolean> {
+  async function resolvePermission(
+    itemId: string,
+    optionId: string,
+  ): Promise<boolean> {
     if (!facade) return false;
-    const item = timeline.value.items.find((candidate) => candidate.id === itemId);
-    if (!item || item.kind !== "permission" || item.slot.decisionState === "submitting") {
+    const item = timeline.value.items.find(
+      (candidate) => candidate.id === itemId,
+    );
+    if (
+      !item ||
+      item.kind !== "permission" ||
+      item.slot.decisionState === "submitting"
+    ) {
       return false;
     }
     const slot = item.slot;
     if (slot.expired || Date.now() / 1000 > slot.expiresAtEpochSeconds) {
-      commit(updateApprovalDecision(timeline.value, itemId, {
-        decisionState: "error",
-        errorMessage: "请求已失效",
-      }));
+      commit(
+        updateApprovalDecision(timeline.value, itemId, {
+          decisionState: "error",
+          errorMessage: "请求已失效",
+        }),
+      );
       return false;
     }
-    commit(updateApprovalDecision(timeline.value, itemId, {
-      decisionState: "submitting",
-      optionId,
-    }));
+    commit(
+      updateApprovalDecision(timeline.value, itemId, {
+        decisionState: "submitting",
+        optionId,
+      }),
+    );
     try {
       const result = await facade.resolvePermission({
         taskId: slot.taskId,
@@ -949,33 +1108,48 @@ export const useConversationStore = defineStore("conversation", () => {
         optionId,
       });
       if (result.success === "false") throw new Error(result.error.message);
-      commit(updateApprovalDecision(timeline.value, itemId, {
-        decisionState: "resolved",
-        optionId,
-      }));
+      commit(
+        updateApprovalDecision(timeline.value, itemId, {
+          decisionState: "resolved",
+          optionId,
+        }),
+      );
       return true;
     } catch (error) {
-      commit(updateApprovalDecision(timeline.value, itemId, {
-        decisionState: "error",
-        optionId,
-        errorMessage: error instanceof Error ? error.message : "权限处理失败",
-      }));
+      commit(
+        updateApprovalDecision(timeline.value, itemId, {
+          decisionState: "error",
+          optionId,
+          errorMessage: error instanceof Error ? error.message : "权限处理失败",
+        }),
+      );
       return false;
     }
   }
 
-  async function resolvePlan(itemId: string, optionId: string): Promise<boolean> {
+  async function resolvePlan(
+    itemId: string,
+    optionId: string,
+  ): Promise<boolean> {
     if (!facade) return false;
-    const item = timeline.value.items.find((candidate) => candidate.id === itemId);
-    if (!item || item.kind !== "plan" || item.slot.decisionState === "submitting") {
+    const item = timeline.value.items.find(
+      (candidate) => candidate.id === itemId,
+    );
+    if (
+      !item ||
+      item.kind !== "plan" ||
+      item.slot.decisionState === "submitting"
+    ) {
       return false;
     }
     const slot = item.slot;
     if (slot.approvalInvalidated) return false;
-    commit(updateApprovalDecision(timeline.value, itemId, {
-      decisionState: "submitting",
-      optionId,
-    }));
+    commit(
+      updateApprovalDecision(timeline.value, itemId, {
+        decisionState: "submitting",
+        optionId,
+      }),
+    );
     try {
       const result = await facade.resolvePlan({
         taskId: slot.taskId,
@@ -990,18 +1164,23 @@ export const useConversationStore = defineStore("conversation", () => {
         result.data && typeof result.data === "object" && "state" in result.data
           ? String(result.data.state)
           : "resolved";
-      commit(updateApprovalDecision(timeline.value, itemId, {
-        decisionState: "resolved",
-        optionId,
-        status: state,
-      }));
+      commit(
+        updateApprovalDecision(timeline.value, itemId, {
+          decisionState: "resolved",
+          optionId,
+          status: state,
+        }),
+      );
       return true;
     } catch (error) {
-      commit(updateApprovalDecision(timeline.value, itemId, {
-        decisionState: "error",
-        optionId,
-        errorMessage: error instanceof Error ? error.message : "Plan 处理失败",
-      }));
+      commit(
+        updateApprovalDecision(timeline.value, itemId, {
+          decisionState: "error",
+          optionId,
+          errorMessage:
+            error instanceof Error ? error.message : "Plan 处理失败",
+        }),
+      );
       return false;
     }
   }
@@ -1061,7 +1240,9 @@ export const useConversationStore = defineStore("conversation", () => {
     attachmentPending,
     attachments,
     queuedFollowUps,
-    queueInterruptPending: computed(() => interruptFollowUp != null || cancelPending.value),
+    queueInterruptPending: computed(
+      () => interruptFollowUp != null || cancelPending.value,
+    ),
     artifactRevision,
     cancelPending,
     bridgeOnline,
@@ -1112,3 +1293,9 @@ export const useConversationStore = defineStore("conversation", () => {
     pendingUserId: () => pendingUserId,
   };
 });
+
+if (import.meta.hot) {
+  import.meta.hot.accept(
+    acceptHMRUpdate(useConversationStore, import.meta.hot),
+  );
+}

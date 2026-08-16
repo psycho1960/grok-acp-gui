@@ -55,6 +55,76 @@ defineExpose({ copyVisible, html });
 .safe-md-body :deep(.md-p:last-child) {
   margin-bottom: 0;
 }
+.safe-md-body :deep(.md-heading) {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--ctp-text);
+  line-height: var(--leading-tight);
+  font-weight: var(--font-weight-semibold);
+}
+.safe-md-body :deep(.md-heading:first-child) {
+  margin-top: 0;
+}
+.safe-md-body :deep(.md-h1) {
+  font-size: var(--heading-page);
+}
+.safe-md-body :deep(.md-h2) {
+  font-size: var(--heading-panel);
+}
+.safe-md-body :deep(.md-h3),
+.safe-md-body :deep(.md-h4),
+.safe-md-body :deep(.md-h5),
+.safe-md-body :deep(.md-h6) {
+  font-size: var(--font-body);
+}
+.safe-md-body :deep(.md-table-wrap) {
+  max-width: 100%;
+  margin: var(--space-2) 0 var(--space-4);
+  overflow-x: auto;
+}
+.safe-md-body :deep(.md-table) {
+  width: 100%;
+  border-spacing: 0;
+  border-collapse: collapse;
+  font-size: var(--font-small);
+}
+.safe-md-body :deep(.md-table th),
+.safe-md-body :deep(.md-table td) {
+  padding: var(--space-2);
+  vertical-align: top;
+  border: 1px solid var(--ctp-surface1);
+}
+.safe-md-body :deep(.md-table th) {
+  color: var(--ctp-text);
+  font-weight: var(--font-weight-semibold);
+  background: var(--ctp-surface0);
+}
+.safe-md-body :deep(.md-align-left) {
+  text-align: left;
+}
+.safe-md-body :deep(.md-align-center) {
+  text-align: center;
+}
+.safe-md-body :deep(.md-align-right) {
+  text-align: right;
+}
+.safe-md-body :deep(.md-list) {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-6);
+}
+.safe-md-body :deep(.md-list li + li) {
+  margin-top: var(--space-1);
+}
+.safe-md-body :deep(.md-quote) {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-3);
+  color: var(--ctp-subtext0);
+  border-left: 3px solid var(--ctp-iris);
+}
+.safe-md-body :deep(.md-rule) {
+  margin: var(--space-4) 0;
+  border: 0;
+  border-top: 1px solid var(--ctp-surface1);
+}
 .safe-md-body :deep(.md-code) {
   margin: var(--space-2) 0;
   padding: var(--space-2);

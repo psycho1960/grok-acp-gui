@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { cloneVNode, computed, defineComponent, useId, type PropType, type VNode } from "vue";
 
-const props = defineProps<{ text: string }>();
+const props = withDefaults(
+  defineProps<{ text: string; placement?: "top" | "bottom" }>(),
+  { placement: "top" },
+);
 const slots = defineSlots<{ default?: () => VNode[] }>();
 const tooltipId = useId();
 const trigger = computed(() => {
@@ -20,7 +23,7 @@ const RenderVNode = defineComponent({
 </script>
 
 <template>
-  <span class="tooltip">
+  <span class="tooltip" :class="`is-${placement}`">
     <RenderVNode v-if="trigger" :node="trigger" />
     <span :id="tooltipId" class="tip" role="tooltip">{{ props.text }}</span>
   </span>
@@ -52,6 +55,10 @@ const RenderVNode = defineComponent({
     opacity var(--motion-fast) ease,
     visibility 0s linear var(--motion-fast);
   transition-delay: 0ms, 0ms;
+}
+.tooltip.is-bottom .tip {
+  top: calc(100% + 6px);
+  bottom: auto;
 }
 /* Delay show ~300ms so tooltips don't flash while moving the pointer. */
 .tooltip:hover .tip,

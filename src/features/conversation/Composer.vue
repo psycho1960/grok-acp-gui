@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import IconButton from "../../shared/ui/IconButton.vue";
 import NamedIcon from "../../shared/ui/NamedIcon.vue";
 import Select from "../../shared/ui/Select.vue";
@@ -45,6 +45,9 @@ const emit = defineEmits<{
 }>();
 
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const modelControl = ref<HTMLElement | null>(null);
+const slashMenu = ref<HTMLElement | null>(null);
+const slashTrigger = ref<HTMLElement | null>(null);
 const modelMenuOpen = ref(false);
 const hoverDropActive = ref(false);
 const slashOpen = ref(false);
@@ -72,12 +75,25 @@ const modelOptions = computed(() => [
     .map((model) => ({ value: model.modelId, label: model.name || model.modelId })),
 ]);
 
-const reasoningOptions = [
+const allReasoningOptions = [
   { value: "low", label: "低" },
   { value: "medium", label: "中" },
   { value: "high", label: "高" },
   { value: "max", label: "最高" },
-];
+] as const;
+
+const reasoningOptions = computed(() => {
+  if (!props.selectedModel) return allReasoningOptions;
+  const profile = (props.models ?? []).find((model) => model.modelId === props.selectedModel);
+  const configured = profile?.reasoningEfforts?.length
+    ? profile.reasoningEfforts
+    : profile?.reasoningEffort
+      ? [profile.reasoningEffort]
+      : [];
+  return configured.length
+    ? allReasoningOptions.filter((option) => configured.includes(option.value))
+    : allReasoningOptions;
+});
 
 const modelSummary = computed(() => {
   const model =
@@ -131,7 +147,11 @@ function closeSlashMenu(): void {
   slashRequestIssued = false;
 }
 
-function openSlashHelp(): void {
+function toggleSlashHelp(): void {
+  if (showSlashMenu.value) {
+    closeSlashMenu();
+    return;
+  }
   modelMenuOpen.value = false;
   slashHelpPinned.value = true;
   slashOpen.value = true;
@@ -223,6 +243,7 @@ function onKeydown(event: KeyboardEvent): void {
 
 function onInput(event: Event): void {
   slashEscapeLock = false;
+  slashHelpPinned.value = false;
   const value = (event.target as HTMLTextAreaElement).value;
   emit("update:modelValue", value);
   void nextTick(syncSlashMenu);
@@ -279,12 +300,32 @@ function toggleModelMenu(): void {
 }
 
 function pickModel(value: string): void {
+  modelMenuOpen.value = false;
   onModelChange(value);
 }
 
 function pickReasoning(value: string): void {
+  modelMenuOpen.value = false;
   onReasoningChange(value);
 }
+
+function closeMenusOnOutsideClick(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (modelMenuOpen.value && !modelControl.value?.contains(target)) {
+    modelMenuOpen.value = false;
+  }
+  if (
+    showSlashMenu.value &&
+    !slashMenu.value?.contains(target) &&
+    !slashTrigger.value?.contains(target)
+  ) {
+    closeSlashMenu();
+  }
+}
+
+onMounted(() => document.addEventListener("click", closeMenusOnOutsideClick));
+onBeforeUnmount(() => document.removeEventListener("click", closeMenusOnOutsideClick));
 
 defineExpose({ textarea, focus: () => textarea.value?.focus() });
 </script>
@@ -317,6 +358,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
       <div class="composer-input-wrap">
         <div
           v-if="showSlashMenu"
+          ref="slashMenu"
           class="slash-menu"
           data-testid="slash-menu"
           role="listbox"
@@ -378,15 +420,18 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
           >
             <NamedIcon name="paperclip" :size="16" />
           </IconButton>
-          <IconButton
-            label="/ 指令"
-            data-testid="composer-slash-help"
-            :disabled="!capabilities.canSend"
-            @click="openSlashHelp"
-          >
-            <span class="slash-glyph">/</span>
-          </IconButton>
+          <span ref="slashTrigger" class="slash-trigger">
+            <IconButton
+              label="/ 指令"
+              data-testid="composer-slash-help"
+              :disabled="!capabilities.canSend && !capabilities.canCancel"
+              @click="toggleSlashHelp"
+            >
+              <span class="slash-glyph">/</span>
+            </IconButton>
+          </span>
           <div
+            ref="modelControl"
             class="model-control"
             :class="{ locked: settingsLocked }"
             data-testid="composer-model-control"
@@ -413,6 +458,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
                 :key="`model-${option.value}`"
                 type="button"
                 class="menu-item"
+                data-testid="model-option"
                 :class="{ on: (selectedModel ?? '') === option.value }"
                 @click="pickModel(option.value)"
               >
@@ -424,6 +470,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
                 :key="`reason-${option.value}`"
                 type="button"
                 class="menu-item"
+                data-testid="reasoning-option"
                 :class="{ on: (selectedReasoning ?? 'medium') === option.value }"
                 @click="pickReasoning(option.value)"
               >
@@ -511,6 +558,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
   display: grid;
   gap: var(--space-1);
 }
+.slash-trigger { display: contents; }
 .slash-menu {
   position: absolute;
   bottom: calc(100% + 4px);

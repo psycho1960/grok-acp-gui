@@ -294,6 +294,21 @@ const turns = computed(() =>
     })),
 );
 
+/**
+ * ACP thought chunks are deliberately not rendered: they can contain private
+ * model reasoning. A running turn must still make progress visible before the
+ * first safe assistant delta or work card arrives.
+ */
+const showAgentProcessing = computed(() => {
+  if (store.status !== "running") return false;
+  const latest = store.items[store.items.length - 1];
+  if (!latest) return true;
+  if (latest.kind === "thinking") return false;
+  if (latest.kind === "assistant" && latest.streaming) return false;
+  if (latest.kind === "tool" && latest.tool.phase === "running") return false;
+  return true;
+});
+
 function onJumpTurn(id: string): void {
   focusedTurnId.value = id;
   const item = store.items.find((candidate) => candidate.id === id);
@@ -330,6 +345,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
     :style="conversationTheme"
   >
     <ConversationHeader
+      class="conversation-task-bar"
       :title="store.title"
       :status="store.status"
       :attempt="store.attempt"
@@ -367,6 +383,16 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
           title="会话加载失败"
           :detail="store.errorMessage ?? '未知错误'"
         />
+        <p
+          v-else-if="store.items.length === 0 && showAgentProcessing"
+          class="agent-processing initial"
+          data-testid="agent-processing"
+          role="status"
+          aria-live="polite"
+        >
+          <span class="processing-dot" aria-hidden="true" />
+          智能体正在处理
+        </p>
         <div
           v-else-if="store.items.length === 0"
           class="empty-conversation"
@@ -376,30 +402,41 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
           <h2>把目标发给智能体</h2>
           <p>下方输入；需要时用 / 看快捷指令，或点回形针加图</p>
         </div>
-        <TimelineVirtualList
-          v-else
-          ref="listRef"
-          :items="store.items"
-          :session-key="sessionKey"
-          :focus-seq="props.focusSeq ?? store.focusEventSeq"
-          :item-height="128"
-        >
-          <template #default="{ item }">
-            <TimelineItemView
-              :item="item"
-              :focused="item.id === focusedId"
-              :show-time="shouldShowRelativeTime(item)"
-              :thinking-done="isThinkingDone(item)"
-              :preview-urls="previewUrls"
-              :preview-missing="previewMissing"
-              @toggle-tool="store.toggleTool"
-              @toggle-thinking="store.toggleThinking"
-              @resolve-permission="store.resolvePermission"
-              @resolve-plan="store.resolvePlan"
-              @open-artifact="onOpenArtifact"
-            />
-          </template>
-        </TimelineVirtualList>
+        <div v-else class="timeline-body">
+          <TimelineVirtualList
+            ref="listRef"
+            :items="store.items"
+            :session-key="sessionKey"
+            :focus-seq="props.focusSeq ?? store.focusEventSeq"
+            :item-height="128"
+          >
+            <template #default="{ item }">
+              <TimelineItemView
+                :item="item"
+                :focused="item.id === focusedId"
+                :show-time="shouldShowRelativeTime(item)"
+                :thinking-done="isThinkingDone(item)"
+                :preview-urls="previewUrls"
+                :preview-missing="previewMissing"
+                @toggle-tool="store.toggleTool"
+                @toggle-thinking="store.toggleThinking"
+                @resolve-permission="store.resolvePermission"
+                @resolve-plan="store.resolvePlan"
+                @open-artifact="onOpenArtifact"
+              />
+            </template>
+          </TimelineVirtualList>
+          <p
+            v-if="showAgentProcessing"
+            class="agent-processing"
+            data-testid="agent-processing"
+            role="status"
+            aria-live="polite"
+          >
+            <span class="processing-dot" aria-hidden="true" />
+            智能体正在处理
+          </p>
+        </div>
       </div>
       <aside
         v-if="railOpen"
@@ -438,10 +475,46 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
           :focus-artifact-id="focusedArtifactId"
         />
         <WorktreePanel
-          v-if="store.taskId && railTab === 'workspace'"
+          v-if="
+            store.taskId &&
+              railTab === 'workspace' &&
+              store.workspaceStrategy === 'worktree' &&
+              store.workspaceAvailable !== false
+          "
           :bridge="props.bridge"
           :task-id="store.taskId"
         />
+        <section
+          v-else-if="
+            railTab === 'workspace' &&
+              store.workspaceStrategy === 'worktree' &&
+              store.workspaceAvailable === false
+          "
+          class="workspace-summary workspace-unavailable"
+          data-testid="worktree-not-created"
+          aria-labelledby="worktree-not-created-title"
+        >
+          <h2 id="worktree-not-created-title">隔离 Worktree 尚未创建</h2>
+          <p>为保护原工作区，当前任务不会自动回落到项目目录。</p>
+          <p>请改用可用的工作区策略，或从任务中心新建隔离任务。</p>
+        </section>
+        <section
+          v-else-if="railTab === 'workspace'"
+          class="workspace-summary"
+          data-testid="workspace-summary"
+          aria-labelledby="workspace-summary-title"
+        >
+          <h2 id="workspace-summary-title">
+            {{ store.workspaceStrategy === "readonly" ? "项目目录（只读）" : "当前项目目录" }}
+          </h2>
+          <p v-if="store.workspaceStrategy === 'readonly'">
+            此会话读取当前项目目录，但写入和未知操作保持禁止。
+          </p>
+          <p v-else-if="store.workspaceStrategy === 'direct'">
+            此会话直接使用项目工作目录，可按当前权限读写；未创建隔离 Worktree。
+          </p>
+          <p v-else>尚未获得此会话的工作区策略。</p>
+        </section>
       </aside>
     </div>
 
@@ -473,6 +546,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
     </div>
     <Composer
       ref="composerRegion"
+      class="conversation-composer"
       :model-value="store.draft"
       :capabilities="store.composerCapabilities"
       :send-error="store.sendError"
@@ -504,7 +578,13 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
 <style scoped>
 .conversation {
   display: grid;
-  grid-template-rows: auto auto 1fr auto auto;
+  grid-template-areas:
+    "task-bar"
+    "workspace-notice"
+    "content"
+    "queue"
+    "composer";
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   height: 100%;
   min-height: 0;
   color: var(--ctp-text);
@@ -523,7 +603,9 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
   --border-tone-warning: color-mix(in srgb, var(--ctp-yellow) 50%, var(--ctp-surface1));
   --border-tone-danger: color-mix(in srgb, var(--ctp-red) 55%, var(--ctp-surface1));
 }
+.conversation-task-bar { grid-area: task-bar; }
 .workspace-notice {
+  grid-area: workspace-notice;
   margin: 0;
   padding: var(--space-2) var(--space-3);
   color: var(--ctp-yellow);
@@ -531,7 +613,10 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
   border-bottom: 1px solid var(--ctp-surface0);
   font-size: var(--font-small);
 }
-.content-layout { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; overflow: hidden; }
+.workspace-unavailable {
+  border-left: 3px solid var(--ctp-yellow);
+}
+.content-layout { grid-area: content; display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; overflow: hidden; }
 .content-layout.has-rail { grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); }
 .conversation-rail {
   display: grid;
@@ -559,9 +644,60 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
   color: var(--ctp-text);
   background: color-mix(in srgb, var(--ctp-mauve) 18%, transparent);
 }
+.workspace-summary {
+  align-self: start;
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+.workspace-summary h2,
+.workspace-summary p {
+  margin: 0;
+}
+.workspace-summary h2 {
+  font-size: var(--heading-panel);
+}
+.workspace-summary p {
+  color: var(--ctp-subtext0);
+}
 .body {
   min-height: 0;
   overflow: hidden;
+}
+.timeline-body {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+}
+.timeline-body :deep(.virtual-wrap) {
+  min-height: 0;
+}
+.agent-processing {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  width: fit-content;
+  margin: 0 var(--space-4) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  color: var(--ctp-subtext0);
+  font-size: var(--font-small);
+}
+.agent-processing.initial {
+  margin-top: var(--space-6);
+}
+.processing-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--ctp-blue);
+  animation: processing-pulse 1.1s ease-in-out infinite;
+}
+@keyframes processing-pulse {
+  50% { opacity: 0.35; transform: scale(0.72); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .processing-dot { animation: none; }
 }
 .state-pad {
   display: grid;
@@ -583,10 +719,12 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
   margin: 0;
 }
 .queue-bar {
+  grid-area: queue;
   display: grid;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-3) 0;
 }
+.conversation-composer { grid-area: composer; }
 .queue-item {
   display: flex;
   gap: var(--space-2);

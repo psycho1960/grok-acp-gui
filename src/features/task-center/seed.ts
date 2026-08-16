@@ -35,6 +35,16 @@ export function createTaskCenterSeedSnapshot(): BootstrapSnapshot {
     project("proj-beta", "D:/work/beta"),
   ];
 
+  const completedTasks: Task[] = [
+    task({
+      id: "task-merged-1" as TaskId,
+      projectId: "proj-beta" as ProjectId,
+      title: "已完成的文档整理",
+      status: "merged",
+      updatedAt: "2026-04-01T11:00:00.000Z",
+    }),
+  ];
+
   const activeTasks: Task[] = [
     task({
       id: "task-wait-1" as TaskId,
@@ -59,13 +69,6 @@ export function createTaskCenterSeedSnapshot(): BootstrapSnapshot {
       updatedAt: "2026-04-01T12:20:00.000Z",
     }),
     task({
-      id: "task-merged-1" as TaskId,
-      projectId: "proj-beta" as ProjectId,
-      title: "已完成的文档整理",
-      status: "merged",
-      updatedAt: "2026-04-01T11:00:00.000Z",
-    }),
-    task({
       id: "task-int-1" as TaskId,
       projectId: "proj-alpha" as ProjectId,
       title: "中断的重构任务",
@@ -84,6 +87,7 @@ export function createTaskCenterSeedSnapshot(): BootstrapSnapshot {
     capabilities: { models: [], modes: [], slashCommands: [] },
     projects,
     activeTasks,
+    completedTasks,
     bindings: [
       {
         taskId: "task-run-1" as TaskId,
