@@ -152,9 +152,15 @@ Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该
 - `worktree.cleanup`、`recovery.restore`、`recovery.delete`
 - `recovery.scan`、`recovery.getIssue`、`recovery.prepareAction`、`recovery.executeAction`、`recovery.createBundle`、`recovery.verifyBundle`、`recovery.history`
 
-事件联合类型：`runtime.updated`、`task.snapshot`、`task.state`、`message.delta`、`activity.updated`、`permission.requested`、`plan.updated`、`changes.updated`、`artifact.available`、`resource.warning`、`diagnostic.notice`。
+`task.create.prompt` 与 `task.create.title` 均允许为空。两者为空时后端持久化空标题作为“待自动命名”哨兵，完成工作区准备后把任务置为 `idle`，不启动 ACP session；Renderer 仅将空标题显示为“新任务”。后续首个非空 `turn.send.message` 通过 Repository Interface 持久化首句派生标题。`turn.send` 成功结果兼容增加可选 `taskTitle`，供当前对话立即刷新任务栏标题；原有 `requestId` 字段保持不变。附件非空时仍按初始 Turn 路径处理。
 
-`BootstrapSnapshot.capabilities.models` 的 `ModelInfo` 包含 `modelId`、`name`、可选 `description` 和可选 `reasoningEffort`。`reasoningEffort` 只来自 Grok `config.toml` 对应 `[model.*]` profile 的 `reasoning_effort`，当前允许 `low`、`medium`、`high`、`max`；Renderer 选择 profile 时同步该默认值，字段缺失时保持兼容默认，不得按模型名称猜测。
+`BootstrapSnapshot.activeTasks` 只承载非 `merged|archived` 任务；`completedTasks` 单独承载这两个终态，供 Task Center 的“已完成”历史筛选使用。Renderer 合并两者用于列表和计数。Task Center 的“运行中”表示当前正在准备、执行或集成，仅含 `preparing|running|integrating`；“已完成”按当前是否执行定义，包含无需用户立即处理的 `draft|idle|merged|archived`；`waiting_permission|ready_for_review|conflicted` 归入“等待处理”，`failed|interrupted` 保持独立分组。
+
+事件联合类型：`runtime.updated`、`task.snapshot`、`task.state`、`message.delta`、`activity.updated`、`permission.requested`、`plan.updated`、`changes.updated`、`artifact.available`、`session.capabilities.updated`、`session.commands.updated`、`resource.warning`、`diagnostic.notice`。`session.capabilities.updated` 从已持久化的 `session_ready` 映射当前 ACP session 的 `models`/`modes`，Renderer 用它填充该任务的会话控件；当 Grok 未广告模式时，按下述兼容规则补齐产品模式。该事件必须保持 task/session 作用域，不能以全局 Runtime 状态覆盖并发任务。
+
+会话模式的产品 ID 固定为 `agent|plan|ask`，Renderer 在 ACP session 尚未创建时也必须显示三项。Grok ACP 的 wire 映射为 `agent → default`、`plan → plan`、`ask → ask`。Grok 1.0.4 的 `session/new` 不返回 `modes`，但其 `session/set_mode` 接受上述 legacy ID；Runtime 对空广告使用这组三值兼容集，仍须在发送正文前等待切换成功，拒绝或超时则 fail-closed。若 Agent 返回非空 `availableModes`，只允许映射到其实际广告 ID。
+
+`BootstrapSnapshot.capabilities.models` 的 `ModelInfo` 包含 `modelId`、`name`、可选 `description`、可选默认值 `reasoningEffort` 和可选列表 `reasoningEfforts`。这两个推理字段只来自 Grok `config.toml` 对应 `[model.*]` profile 的 `reasoning_effort` 与 `[[model.*.reasoning_efforts]]`，当前允许 `low`、`medium`、`high`、`max`；Renderer 选择 profile 时同步默认值，并仅展示该 profile 明确配置的推理档位，字段缺失时保持兼容默认，不得按模型名称猜测。
 
 所有会话事件携带 `taskId`、`sessionId`、单调 `seq` 和 timestamp。Renderer reducer 丢弃已处理 seq；缺口触发 snapshot refresh，不能猜测缺失内容。
 

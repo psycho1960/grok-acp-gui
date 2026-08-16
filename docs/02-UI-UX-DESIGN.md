@@ -106,7 +106,7 @@ flowchart LR
 
 ### 5.3 UI-TASK-001 任务中心
 
-任务按 Running、Needs attention、Review、Completed 分组。每行显示：状态图标、标题、Worktree/当前目录、分支、最后活动、Diff 统计。
+任务按 Running、Needs attention、Completed、Failed/Interrupted 分组。Running 只包含当前正在准备、执行或集成的任务；Completed 表示当前未执行且无需用户立即处理的任务，包括 draft、idle、merged 和 archived。每行显示：状态图标、标题、Worktree/当前目录、分支、最后活动、Diff 统计。
 
 状态表达：
 
@@ -118,14 +118,12 @@ flowchart LR
 
 ### 5.4 UI-TASK-002 新建任务
 
-弹窗宽 640 px，分三段：目标与附件、模式与模型、工作目录。
+“新建任务”采用一键创建：已有项目时直接建立空任务并进入对话；未选择项目时先完成项目选择，随后自动创建并进入对话，不显示任务配置弹窗。
 
-- Prompt 必填；标题可由首行生成并可编辑。
-- 图片 chip 显示缩略图、名称、大小、移除。
-- 模式选 Agent/Plan/Ask；模型与 reasoning 从 capability 获取。
-- 工作目录智能默认：Agent/Plan 为隔离，Ask 为当前目录。
-- 脏工作区切换“当前目录”时显示黄色风险说明。
-- 隔离模式显示基础分支、生成的分支预览和 Worktree 根目录。
+- 空任务先以“新任务”展示，用户发送首条有效消息后由其首句自动生成标题。
+- 默认使用 Ask、运行时默认模型、中等推理强度和当前目录；发送首轮消息前可在对话任务栏及 Composer 调整模式、工作区、模型和推理强度。
+- 图片在对话 Composer 中添加，并显示缩略图、名称、大小和移除入口。
+- 脏工作区选择“当前目录”时继续显示黄色风险说明。
 
 ### 5.5 UI-CONV-001 对话与工具时间线
 
