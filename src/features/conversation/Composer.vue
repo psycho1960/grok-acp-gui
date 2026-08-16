@@ -95,11 +95,25 @@ const reasoningOptions = computed(() => {
     : allReasoningOptions;
 });
 
+const effectiveReasoning = computed<ReasoningEffort>(() => {
+  const profile = (props.models ?? []).find((model) => model.modelId === props.selectedModel);
+  const configured = profile?.reasoningEfforts?.length
+    ? profile.reasoningEfforts
+    : profile?.reasoningEffort
+      ? [profile.reasoningEffort]
+      : [];
+  if (configured.length === 1) return configured[0] as ReasoningEffort;
+  if (props.selectedReasoning && configured.includes(props.selectedReasoning)) {
+    return props.selectedReasoning;
+  }
+  return (profile?.reasoningEffort ?? props.selectedReasoning ?? "medium") as ReasoningEffort;
+});
+
 const modelSummary = computed(() => {
   const model =
     modelOptions.value.find((option) => option.value === (props.selectedModel ?? ""))?.label ??
     "默认模型";
-  const reasoning = REASONING_LABEL[props.selectedReasoning ?? "medium"] ?? "中";
+  const reasoning = REASONING_LABEL[effectiveReasoning.value] ?? "中";
   return `${model} · ${reasoning}`;
 });
 
@@ -471,7 +485,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
                 type="button"
                 class="menu-item"
                 data-testid="reasoning-option"
-                :class="{ on: (selectedReasoning ?? 'medium') === option.value }"
+                :class="{ on: effectiveReasoning === option.value }"
                 @click="pickReasoning(option.value)"
               >
                 {{ option.label }}
@@ -492,7 +506,7 @@ defineExpose({ textarea, focus: () => textarea.value?.focus() });
                 class="settings-select"
                 data-testid="conversation-reasoning-select"
                 label="推理强度"
-                :model-value="selectedReasoning ?? 'medium'"
+                :model-value="effectiveReasoning"
                 :options="reasoningOptions"
                 :disabled="settingsLocked"
                 tabindex="-1"

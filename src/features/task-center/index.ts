@@ -20,7 +20,6 @@ export type { TaskListRow } from "./list-rows";
 export { createTaskCenterSeedSnapshot } from "./seed";
 export { createStatefulTaskCenterBridge } from "./stateful-fake-bridge";
 export { default as OpenProjectDialog } from "./OpenProjectDialog.vue";
-export { default as CreateTaskDialog } from "./CreateTaskDialog.vue";
 export type {
   TaskViewModel,
   TaskGroupId,

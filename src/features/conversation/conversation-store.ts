@@ -444,7 +444,10 @@ export const useConversationStore = defineStore("conversation", () => {
     queueDrainPending = false;
   }
 
-  function commitSnapshot(snapshot: SessionTimelineSnapshot): void {
+  function commitSnapshot(
+    snapshot: SessionTimelineSnapshot,
+    preserveComposer = false,
+  ): void {
     loadState.value = "loading";
     const next = applySnapshot(
       createEmptyConversationState(snapshot.taskId),
@@ -487,11 +490,13 @@ export const useConversationStore = defineStore("conversation", () => {
     slashCommands.value = Array.isArray(latestCommands?.payload.commands)
       ? latestCommands.payload.commands
       : bootstrapSlashCommands.value;
-    draft.value = loadDraft(snapshot.taskId);
-    attachments.value = [];
-    queuedFollowUps.value = [];
-    interruptFollowUp = null;
-    queueDrainPending = false;
+    if (!preserveComposer) {
+      draft.value = loadDraft(snapshot.taskId);
+      attachments.value = [];
+      queuedFollowUps.value = [];
+      interruptFollowUp = null;
+      queueDrainPending = false;
+    }
     sendError.value = null;
     loadState.value = "ready";
     errorMessage.value = null;
@@ -519,7 +524,11 @@ export const useConversationStore = defineStore("conversation", () => {
     commitSnapshot(snapshot);
   }
 
-  async function openTask(taskId: TaskId, title = "新任务"): Promise<void> {
+  async function openTask(
+    taskId: TaskId,
+    title = "新任务",
+    preserveComposer = false,
+  ): Promise<void> {
     const version = ++openVersion;
     settingsVersion += 1;
     settingsPending.value = false;
@@ -530,11 +539,13 @@ export const useConversationStore = defineStore("conversation", () => {
       title,
       status: "idle",
     });
-    draft.value = loadDraft(taskId);
-    attachments.value = [];
-    queuedFollowUps.value = [];
-    interruptFollowUp = null;
-    queueDrainPending = false;
+    if (!preserveComposer) {
+      draft.value = loadDraft(taskId);
+      attachments.value = [];
+      queuedFollowUps.value = [];
+      interruptFollowUp = null;
+      queueDrainPending = false;
+    }
     selectedMode.value = null;
     workspaceStrategy.value = null;
     workspaceAvailable.value = null;
@@ -583,21 +594,24 @@ export const useConversationStore = defineStore("conversation", () => {
           selectedReasoning.value = normalizeReasoning(data.reasoning);
         }
         lifecycleStatus.value = data.status ?? null;
-        commitSnapshot({
-          taskId: data.taskId,
-          sessionId: data.sessionId,
-          title: data.title || title,
-          status,
-          cursor,
-          events: data.events,
-          attempt: data.attempt,
-          mode: data.mode,
-          workspaceStrategy: data.workspaceStrategy,
-          workspaceAvailable: data.workspaceAvailable,
-          model: data.model,
-          reasoning: data.reasoning,
-          taskStatus: data.status,
-        });
+        commitSnapshot(
+          {
+            taskId: data.taskId,
+            sessionId: data.sessionId,
+            title: data.title || title,
+            status,
+            cursor,
+            events: data.events,
+            attempt: data.attempt,
+            mode: data.mode,
+            workspaceStrategy: data.workspaceStrategy,
+            workspaceAvailable: data.workspaceAvailable,
+            model: data.model,
+            reasoning: data.reasoning,
+            taskStatus: data.status,
+          },
+          preserveComposer,
+        );
       } else if (data) {
         if (data.mode !== undefined) selectedMode.value = data.mode ?? null;
         if (data.workspaceStrategy !== undefined) {
@@ -1194,7 +1208,7 @@ export const useConversationStore = defineStore("conversation", () => {
         sendError.value = desktopErrorMessage(result.error);
         return false;
       }
-      await openTask(timeline.value.taskId);
+      await openTask(timeline.value.taskId, "新任务", true);
       return true;
     } catch (error) {
       sendError.value = error instanceof Error ? error.message : "恢复会话失败";

@@ -31,7 +31,9 @@ const selectedIndex = computed(() =>
   ),
 );
 const selectedLabel = computed(
-  () => props.options[selectedIndex.value]?.label ?? props.label,
+  () =>
+    props.options.find((option) => option.value === props.modelValue)?.label ??
+    props.label,
 );
 
 function setOptionRef(element: Element | ComponentPublicInstance | null): void {
