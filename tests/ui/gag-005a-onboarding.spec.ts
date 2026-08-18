@@ -43,6 +43,20 @@ function bridge(handler: (command: DesktopCommand) => DesktopResult | Promise<De
 }
 
 describe("UI-ONBOARD-001", () => {
+  it("checks runtime readiness without showing or requiring model verification", async () => {
+    const runtimeBridge = bridge(() => ({ success: "true", data: readiness() }));
+    const wrapper = mount(OnboardingView, { props: { bridge: runtimeBridge } });
+    await flushPromises();
+
+    expect(runtimeBridge.execute).toHaveBeenCalledWith({
+      type: "runtime.refresh",
+      payload: {},
+    });
+    expect(wrapper.find('[data-testid="runtime-model-selection"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("验证模型");
+    expect(wrapper.emitted("ready")).toHaveLength(1);
+  });
+
   it("renders real ordered checks and emits ready after ACP validation", async () => {
     const runtimeBridge = bridge(() => ({ success: "true", data: readiness() }));
     const wrapper = mount(OnboardingView, { props: { bridge: runtimeBridge } });

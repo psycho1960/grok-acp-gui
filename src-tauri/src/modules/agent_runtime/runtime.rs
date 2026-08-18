@@ -68,6 +68,57 @@ enum SessionConfigChange {
     LegacyModel { value: String },
 }
 
+#[derive(Clone)]
+enum PendingPlanProtocol {
+    LegacyAcp,
+    GrokExitPlanMode,
+}
+
+#[derive(Clone)]
+struct PendingPlanRequest {
+    rpc_id: serde_json::Value,
+    protocol: PendingPlanProtocol,
+}
+
+impl PendingPlanRequest {
+    fn resolution_result(&self, option_id: &str) -> Result<serde_json::Value, DomainError> {
+        match self.protocol {
+            PendingPlanProtocol::LegacyAcp => Ok(serde_json::json!({
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": option_id,
+                }
+            })),
+            PendingPlanProtocol::GrokExitPlanMode => match option_id {
+                interpreter::GROK_EXIT_PLAN_APPROVE_OPTION_ID => {
+                    Ok(serde_json::json!({ "approved": true, "abandoned": false }))
+                }
+                interpreter::GROK_EXIT_PLAN_REVISE_OPTION_ID => {
+                    Ok(serde_json::json!({ "approved": false, "abandoned": false }))
+                }
+                interpreter::GROK_EXIT_PLAN_ABANDON_OPTION_ID => {
+                    Ok(serde_json::json!({ "approved": false, "abandoned": true }))
+                }
+                _ => Err(DomainError::new(
+                    codes::PERMISSION_DENIED,
+                    "unknown Grok exit-plan action",
+                )),
+            },
+        }
+    }
+
+    fn cancellation_result(&self) -> serde_json::Value {
+        match self.protocol {
+            PendingPlanProtocol::LegacyAcp => {
+                serde_json::json!({ "outcome": { "outcome": "cancelled" } })
+            }
+            PendingPlanProtocol::GrokExitPlanMode => {
+                serde_json::json!({ "approved": false, "abandoned": true })
+            }
+        }
+    }
+}
+
 /// Internal event sent from a session reader task to the central
 /// forwarder. Carries the session_id so the forwarder knows where it
 /// came from.
@@ -113,7 +164,7 @@ struct SessionSlot {
     pending_permission_requests: Arc<StdMutex<HashMap<String, serde_json::Value>>>,
     /// Legacy Plan proposals may also arrive as JSON-RPC requests. They use
     /// the same response shape and correlation rule as permission requests.
-    pending_plan_requests: Arc<StdMutex<HashMap<String, serde_json::Value>>>,
+    pending_plan_requests: Arc<StdMutex<HashMap<String, PendingPlanRequest>>>,
     /// Resolved executable path (for the handle).
     executable_path: String,
     /// Whether shutdown began while a turn was still in progress. Late
@@ -730,7 +781,16 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                                     match pending.entry(request_id) {
                                         std::collections::hash_map::Entry::Occupied(_) => true,
                                         std::collections::hash_map::Entry::Vacant(entry) => {
-                                            entry.insert(request.id.clone());
+                                            entry.insert(PendingPlanRequest {
+                                                rpc_id: request.id.clone(),
+                                                protocol: if request.method
+                                                    == "_x.ai/exit_plan_mode"
+                                                {
+                                                    PendingPlanProtocol::GrokExitPlanMode
+                                                } else {
+                                                    PendingPlanProtocol::LegacyAcp
+                                                },
+                                            });
                                             false
                                         }
                                     }
@@ -1271,32 +1331,37 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                 return Ok(SendAck { request_id });
             }
             ClientRequest::ResolvePlan(r) => {
-                let (pending, rpc_id) = {
+                let (pending, binding) = {
                     let sessions = self.sessions.lock().await;
                     let slot = sessions.get(&session_id).ok_or_else(|| {
                         DomainError::new(codes::DOMAIN_TASK_NOT_FOUND, "session not found")
                     })?;
                     let pending = slot.pending_plan_requests.clone();
-                    let rpc_id = pending.lock().unwrap().remove(&r.request_id);
-                    (pending, rpc_id)
+                    let binding = pending.lock().unwrap().remove(&r.request_id);
+                    (pending, binding)
                 };
-                let rpc_id = rpc_id.ok_or_else(|| {
+                let binding = binding.ok_or_else(|| {
                     DomainError::new(
                         codes::ACP_REQUEST_FAILED,
                         "Plan request is no longer pending at the ACP transport",
                     )
                 })?;
-                let encoded = encode_response_result(
-                    &rpc_id,
-                    &serde_json::json!({
-                        "outcome": {
-                            "outcome": "selected",
-                            "optionId": r.option_id,
-                        }
-                    }),
-                );
+                let result = match binding.resolution_result(&r.option_id) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        pending
+                            .lock()
+                            .unwrap()
+                            .insert(r.request_id.clone(), binding);
+                        return Err(error);
+                    }
+                };
+                let encoded = encode_response_result(&binding.rpc_id, &result);
                 if outbound.send(encoded).await.is_err() {
-                    pending.lock().unwrap().insert(r.request_id.clone(), rpc_id);
+                    pending
+                        .lock()
+                        .unwrap()
+                        .insert(r.request_id.clone(), binding);
                     return Err(DomainError::new(
                         codes::RUNTIME_PROCESS_DIED,
                         "failed to send to process",
@@ -1340,11 +1405,18 @@ impl<T: AcpTransport + 'static> AgentRuntime for AgentRuntimeImpl<T> {
                     // Agent-to-client requests must always receive a terminal
                     // response before cancelling the outer Prompt; otherwise a
                     // live ACP process can keep the previous turn suspended.
-                    for rpc_id in pending_permission_rpcs.into_iter().chain(pending_plan_rpcs) {
+                    for rpc_id in pending_permission_rpcs {
                         let encoded = encode_response_result(
                             &rpc_id,
                             &serde_json::json!({ "outcome": { "outcome": "cancelled" } }),
                         );
+                        if tx.send(encoded).await.is_err() {
+                            break;
+                        }
+                    }
+                    for binding in pending_plan_rpcs {
+                        let encoded =
+                            encode_response_result(&binding.rpc_id, &binding.cancellation_result());
                         if tx.send(encoded).await.is_err() {
                             break;
                         }
@@ -1659,6 +1731,38 @@ mod mode_compatibility_tests {
         );
         assert_eq!(visible.len(), 3);
         assert_eq!(resolve_grok_mode_id("unsupported", &wire_ids), None);
+    }
+
+    #[test]
+    fn grok_exit_plan_actions_use_vendor_response_shape() {
+        let binding = PendingPlanRequest {
+            rpc_id: serde_json::json!(37),
+            protocol: PendingPlanProtocol::GrokExitPlanMode,
+        };
+
+        assert_eq!(
+            binding
+                .resolution_result(interpreter::GROK_EXIT_PLAN_APPROVE_OPTION_ID)
+                .unwrap(),
+            serde_json::json!({ "approved": true, "abandoned": false })
+        );
+        assert_eq!(
+            binding
+                .resolution_result(interpreter::GROK_EXIT_PLAN_REVISE_OPTION_ID)
+                .unwrap(),
+            serde_json::json!({ "approved": false, "abandoned": false })
+        );
+        assert_eq!(
+            binding
+                .resolution_result(interpreter::GROK_EXIT_PLAN_ABANDON_OPTION_ID)
+                .unwrap(),
+            serde_json::json!({ "approved": false, "abandoned": true })
+        );
+        assert_eq!(
+            binding.cancellation_result(),
+            serde_json::json!({ "approved": false, "abandoned": true })
+        );
+        assert!(binding.resolution_result("untrusted.action").is_err());
     }
 }
 

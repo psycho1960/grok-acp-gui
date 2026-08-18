@@ -156,7 +156,7 @@ Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该
 
 `BootstrapSnapshot.activeTasks` 只承载非 `merged|archived` 任务；`completedTasks` 单独承载这两个终态，供 Task Center 的“已完成”历史筛选使用。Renderer 合并两者用于列表和计数。Task Center 的“运行中”表示当前正在准备、执行或集成，仅含 `preparing|running|integrating`；“已完成”按当前是否执行定义，包含无需用户立即处理的 `draft|idle|merged|archived`；`waiting_permission|ready_for_review|conflicted` 归入“等待处理”，`failed|interrupted` 保持独立分组。
 
-事件联合类型：`runtime.updated`、`task.snapshot`、`task.state`、`message.delta`、`activity.updated`、`permission.requested`、`plan.updated`、`changes.updated`、`artifact.available`、`session.capabilities.updated`、`session.commands.updated`、`resource.warning`、`diagnostic.notice`。`session.capabilities.updated` 从已持久化的 `session_ready` 映射当前 ACP session 的 `models`/`modes`，Renderer 用它填充该任务的会话控件；当 Grok 未广告模式时，按下述兼容规则补齐产品模式。该事件必须保持 task/session 作用域，不能以全局 Runtime 状态覆盖并发任务。
+事件联合类型：`runtime.updated`、`task.snapshot`、`task.state`、`message.delta`、`activity.updated`、`permission.requested`、`plan.updated`、`changes.updated`、`artifact.available`、`session.capabilities.updated`、`session.commands.updated`、`resource.warning`、`diagnostic.notice`。session 进程退出时，`runtime.updated` 以可选 `sessionId` 标识归属，并携带 `status=exited`、`reason` 与可选 `code`；Renderer 只终止匹配会话的回复态。`session.capabilities.updated` 从已持久化的 `session_ready` 映射当前 ACP session 的 `models`/`modes`，Renderer 用它填充该任务的会话控件；当 Grok 未广告模式时，按下述兼容规则补齐产品模式。该事件必须保持 task/session 作用域，不能以全局 Runtime 状态覆盖并发任务。
 
 会话模式的产品 ID 固定为 `agent|plan|ask`，Renderer 在 ACP session 尚未创建时也必须显示三项。Grok ACP 的 wire 映射为 `agent → default`、`plan → plan`、`ask → ask`。Grok 1.0.4 的 `session/new` 不返回 `modes`，但其 `session/set_mode` 接受上述 legacy ID；Runtime 对空广告使用这组三值兼容集，仍须在发送正文前等待切换成功，拒绝或超时则 fail-closed。若 Agent 返回非空 `availableModes`，只允许映射到其实际广告 ID。
 
@@ -164,9 +164,11 @@ Rust `bootstrap` command 返回同名字段并通过 `camelCase` 序列化；该
 
 所有会话事件携带 `taskId`、`sessionId`、单调 `seq` 和 timestamp。Renderer reducer 丢弃已处理 seq；缺口触发 snapshot refresh，不能猜测缺失内容。
 
-GAG-009 将 `permission.resolve` 固定为 `{ taskId, sessionId, requestId, correlationId, expectedVersion, optionId }`，其中非 Plan 请求使用 `expectedVersion=0`；`plan.resolve` 使用同一上下文字段且 `expectedVersion>0`。后端逐字段核对当前 Session、Workspace 和 Plan 版本，原样回传 `optionId`。Renderer 不接收审批令牌、operation digest 或持久 scope 规则。
+GAG-009 将 `permission.resolve` 固定为 `{ taskId, sessionId, requestId, correlationId, expectedVersion, optionId }`，其中非 Plan 请求使用 `expectedVersion=0`；`plan.resolve` 使用同一上下文字段且 `expectedVersion>0`。后端逐字段核对当前 Session、Workspace 和 Plan 版本；标准 ACP 与 legacy `updatePlan` 原样回传 `optionId`，已确认的 vendor 扩展按下述显式映射响应。Renderer 不接收审批令牌、operation digest 或持久 scope 规则。
 
 `permission.requested` 仅发送脱敏后的结构化操作视图：类别、可执行文件、脱敏参数、cwd、读写路径、风险、过期时间以及 ACP 原始 option ID/显式 kind。缺失或未知 kind 可以显示但不可授权，禁止从 label 猜测语义。`plan.updated` 的 proposed 载荷包含 request/correlation/version、摘要、步骤和原始选项；新版本把旧卡标记为 superseded。
+
+Grok 1.0.4 在 Plan 完成后使用 `_x.ai/exit_plan_mode` 请求（`planContent/sessionId/toolCallId`），该扩展不提供 option ID。Grok Adapter 只为此已知扩展生成命名空间动作 `grok.exit_plan.approve|revise|abandon`，并分别映射为 `{approved:true,abandoned:false}`、`{approved:false,abandoned:false}`、`{approved:false,abandoned:true}`。未知动作 fail-closed；取消未决请求使用 abandon 响应，不能套用标准 ACP outcome 结构。
 
 GAG-010C 将 `artifact.save` 固定为单文件契约 `{ taskId, artifactId, targetPath, overwrite }`。`targetPath` 只能来自 Renderer 通过系统保存对话框取得的用户选择；`overwrite` 首次必须为 `false`，后端返回 `conflict` 后由用户明确确认才可重试为 `true`。返回 `ArtifactSaveResult.status` 为 `saved|cancelled|conflict|rejected|failed`，不返回受管源路径或文件正文。`artifact.reveal` 可选携带同一已选择目标路径；后端验证该目标仍与受管 Artifact 的大小及 SHA-256 一致后，仅在资源管理器中定位，不执行文件。批量保存和目录替换不在该契约内。
 
@@ -176,7 +178,7 @@ GAG-014 的 `RecoveryService` 固定为 `scan`、`get_issue`、`prepare_action`�
 
 任务启动与清理使用 SQLite `IMMEDIATE` 事务协调：任务只能在登记 Worktree 为 `ready|dirty|active` 时进入运行态，清理只能在任务不含 live process 状态时把同一登记原子切换为 `closing`。先完成的一方阻止另一方，消除 ACP 启动与 `git worktree remove` 的 TOCTOU。对账同时返回未登记的外部 Worktree（只读、不可清理）；只有显式绑定到同仓库 Task 后才登记为 `adopted`。
 
-GAG-008 的规范化会话载荷如下：用户与 Assistant 文本使用 `message.delta` 的 `{ role, text }`；工具生命周期同样使用 `message.delta`，载荷为 `{ toolCall }`，其中只允许显示 `toolCallId`、标题、种类、状态、位置、脱敏后的输入/结果摘要、起止时间和耗时，不得包含 ACP `rawInput`/`rawOutput`。Turn 正常完成发布 `task.state(status="idle", detail.completed=true)`；用户停止发布 `task.state(status="idle", detail.reason="cancelled")`；请求失败发布 `activity.updated({ kind: "error", code, detail, retryable })` 并把 Renderer 会话终止为可恢复的 `error`；进程异常退出发布并持久化 `task.state(status="interrupted")`，包括空闲但仍可复用的 ACP 子进程异常退出；只有运行时已进入受管 shutdown 的 clean exit 才保留 idle。`task.open` 返回持久化后的 `{ taskId, sessionId?, title, status, mode?, model?, reasoning?, workspaceStrategy, workspaceAvailable, cursor, events, attempt }`；其中 `workspaceAvailable` 只能由后端对持久化策略和规范化路径进行验证后给出，Renderer 不推导真实 cwd。Renderer 必须先应用该快照再接收增量事件。为避免长回复的数千个流式 chunk 使快照失真或超限，后端读取完整 append-only 会话日志，把连续 Assistant delta 压缩成保留原始末尾序号的单个安全显示事件；因此快照内事件序号允许稀疏，`cursor` 才是快照与后续实时增量之间的权威连续性边界。
+GAG-008 的规范化会话载荷如下：用户与 Assistant 文本使用 `message.delta` 的 `{ role, text }`；工具生命周期同样使用 `message.delta`，载荷为 `{ toolCall }`，其中只允许显示 `toolCallId`、标题、种类、状态、位置、脱敏后的输入/结果摘要、起止时间和耗时，不得包含 ACP `rawInput`/`rawOutput`。Grok Build 的结构化 `agent_thought_chunk` 使用相同的凭据脱敏规则发布为 `activity.updated({ kind: "thinking", detail })`；连续 chunk 在 Renderer 中合并成一张默认折叠的 Thought Work Card，可展开查看脱敏后的原文。Turn 正常完成在实时通道发布 `message.delta({ completed: true, fullText })`，Renderer 必须将其视为 `idle` 终态；重连快照把同一持久化事实规范化为 `task.state(status="idle", detail.completed=true)`。用户停止发布 `task.state(status="idle", detail.reason="cancelled")`；请求失败发布 `activity.updated({ kind: "error", code, detail, retryable })` 并把 Renderer 会话终止为可恢复的 `error`；进程异常退出发布并持久化 `task.state(status="interrupted")`，包括空闲但仍可复用的 ACP 子进程异常退出；只有运行时已进入受管 shutdown 的 clean exit 才保留 idle。`task.open` 返回持久化后的 `{ taskId, sessionId?, title, status, mode?, model?, reasoning?, workspaceStrategy, workspaceAvailable, cursor, events, attempt }`；其中 `workspaceAvailable` 只能由后端对持久化策略和规范化路径进行验证后给出，Renderer 不推导真实 cwd。Renderer 必须先应用该快照再接收增量事件。为避免长回复的数千个流式 chunk 使快照失真或超限，后端读取完整 append-only 会话日志，把连续 Assistant delta 压缩成保留原始末尾序号的单个安全显示事件；因此快照内事件序号允许稀疏，`cursor` 才是快照与后续实时增量之间的权威连续性边界。
 
 ## 6. 信任边界与权限
 

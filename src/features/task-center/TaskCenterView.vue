@@ -41,8 +41,9 @@ const nonGitNotice = ref<string | null>(null);
 const filtersOpen = ref(false);
 const projectMenuOpen = ref(false);
 
-/** Fixed row height for headers + cards (allows localError line without clipping). */
-const ITEM_HEIGHT = 120;
+/** Task cards reserve room for inline error feedback; group labels stay compact. */
+const TASK_ROW_HEIGHT = 120;
+const GROUP_HEADER_HEIGHT = 36;
 
 const statusOptions = [
   { value: "all", label: "全部状态" },
@@ -92,6 +93,10 @@ const isStale = computed(() => store.loadState === "stale");
 
 function rowKey(item: TaskListRow): string {
   return item.key;
+}
+
+function rowHeight(item: TaskListRow): number {
+  return item.kind === "header" ? GROUP_HEADER_HEIGHT : TASK_ROW_HEIGHT;
 }
 
 function onQuery(value: string): void {
@@ -523,7 +528,8 @@ watch(
       <VirtualList
         v-else
         :items="listRows"
-        :item-height="ITEM_HEIGHT"
+        :item-height="TASK_ROW_HEIGHT"
+        :get-item-height="rowHeight"
         :get-key="rowKey"
         aria-label="任务列表"
         data-testid="task-list"
@@ -733,10 +739,10 @@ watch(
 }
 .group-header {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   height: 100%;
   box-sizing: border-box;
-  padding: var(--space-2) var(--space-1) var(--space-1);
+  padding: 0 var(--space-1);
 }
 .group-header h2 {
   margin: 0;

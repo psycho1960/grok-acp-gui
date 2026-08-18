@@ -69,6 +69,37 @@ describe("GAG-021 task bar and breadcrumb", () => {
     w.unmount();
   });
 
+  it("distinguishes a completed turn from a new idle conversation", () => {
+    const w = mount(ConversationHeader, {
+      props: { title: "修对比度", status: "idle", completed: true },
+    });
+    expect(w.get('[data-testid="conversation-status"]').text()).toBe("已完成");
+    w.unmount();
+  });
+
+  it("keeps mode help in its own compact control between the two setting badges", () => {
+    const w = mount(ConversationHeader, {
+      props: {
+        title: "修对比度",
+        status: "running",
+        modes: MODES,
+        selectedMode: "plan",
+        selectedWorkspaceStrategy: "direct",
+        settingsDisabled: true,
+      },
+    });
+
+    const helpControl = w.get('[data-testid="conversation-mode-help-control"]');
+    expect(helpControl.get('[data-testid="conversation-mode-help"]').exists()).toBe(true);
+    expect(
+      w
+        .get('[data-testid="conversation-workspace-select"]')
+        .find('[data-testid="conversation-mode-help"]')
+        .exists(),
+    ).toBe(false);
+    w.unmount();
+  });
+
   it("does not imply an isolated workspace before its policy loads", () => {
     const w = mount(ConversationHeader, {
       props: {

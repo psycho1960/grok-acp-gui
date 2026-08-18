@@ -16,6 +16,10 @@ use std::time::Instant;
 
 use super::codec::{AcpMessage, AcpNotification, AcpRequest};
 
+pub(crate) const GROK_EXIT_PLAN_APPROVE_OPTION_ID: &str = "grok.exit_plan.approve";
+pub(crate) const GROK_EXIT_PLAN_REVISE_OPTION_ID: &str = "grok.exit_plan.revise";
+pub(crate) const GROK_EXIT_PLAN_ABANDON_OPTION_ID: &str = "grok.exit_plan.abandon";
+
 #[derive(Debug, Clone)]
 struct NormalizedErrorHint {
     code: &'static str,
@@ -32,6 +36,9 @@ pub struct AcpSessionContext {
     /// Next sequence number to assign.
     pub next_sequence: Sequence,
     pub tool_started: HashMap<String, (String, Instant)>,
+    /// ACP may emit many chunks for one private thought phase.  Keep a single
+    /// renderer-safe progress card until the next visible work event arrives.
+    pub thinking_active: bool,
     /// Ignore buffered updates after a terminal turn until the next send.
     pub suppress_turn_updates: bool,
     pending_error_hint: Option<NormalizedErrorHint>,
@@ -115,24 +122,32 @@ pub fn interpret(
                 ctx.suppress_turn_updates = true;
                 InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
             } else if extract_id_as_u64(&resp.id) == ctx.current_request_id {
-                let full_text = if ctx.accumulated_text.is_empty() {
-                    None
-                } else {
-                    Some(std::mem::take(&mut ctx.accumulated_text))
-                };
-                let request_id = ctx.current_request_id.take();
-                ctx.suppress_turn_updates = true;
-                let event = AgentEvent::AssistantCompleted(AssistantCompletedPayload { full_text });
-                let meta = EventMeta::new(session_id.clone(), ctx.next_seq()).with_correlation(
-                    CorrelationId::new(format!("req-{}", request_id.unwrap_or(0))),
-                );
-                InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
+                complete_active_turn(session_id, ctx)
             } else {
                 InterpretationResult::Ack
             }
         }
         AcpMessage::Unknown(_) => InterpretationResult::NoEvent,
     }
+}
+
+fn complete_active_turn(
+    session_id: &SessionId,
+    ctx: &mut AcpSessionContext,
+) -> InterpretationResult {
+    let full_text = if ctx.accumulated_text.is_empty() {
+        None
+    } else {
+        Some(std::mem::take(&mut ctx.accumulated_text))
+    };
+    let request_id = ctx.current_request_id.take();
+    ctx.thinking_active = false;
+    ctx.suppress_turn_updates = true;
+    let event = AgentEvent::AssistantCompleted(AssistantCompletedPayload { full_text });
+    let meta = EventMeta::new(session_id.clone(), ctx.next_seq()).with_correlation(
+        CorrelationId::new(format!("req-{}", request_id.unwrap_or(0))),
+    );
+    InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
 }
 
 fn interpret_request(
@@ -179,6 +194,39 @@ fn interpret_request(
             InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
         }
 
+        "_x.ai/exit_plan_mode" => {
+            let request_id = plan_request_id(req).unwrap_or_default();
+            let summary = extract_string_field(&req.params, "planContent")
+                .map(|value| redact_visible_text(&value))
+                .unwrap_or_default();
+            let options = vec![
+                PermissionOptionDescriptor {
+                    option_id: GROK_EXIT_PLAN_APPROVE_OPTION_ID.into(),
+                    name: "批准计划".into(),
+                    kind: Some("approve".into()),
+                },
+                PermissionOptionDescriptor {
+                    option_id: GROK_EXIT_PLAN_REVISE_OPTION_ID.into(),
+                    name: "请求修改".into(),
+                    kind: Some("request_revision".into()),
+                },
+                PermissionOptionDescriptor {
+                    option_id: GROK_EXIT_PLAN_ABANDON_OPTION_ID.into(),
+                    name: "退出计划模式".into(),
+                    kind: Some("reject".into()),
+                },
+            ];
+
+            let event = AgentEvent::PlanProposed(PlanProposedPayload {
+                request_id,
+                summary,
+                options,
+            });
+            let meta = EventMeta::new(session_id.clone(), ctx.next_seq())
+                .with_correlation(CorrelationId::new(format!("plan-{}", req.id)));
+            InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
+        }
+
         _ => InterpretationResult::Unknown {
             method: req.method.clone(),
         },
@@ -204,7 +252,7 @@ pub(crate) fn permission_request_id(req: &AcpRequest) -> Option<String> {
 }
 
 pub(crate) fn plan_request_id(req: &AcpRequest) -> Option<String> {
-    if req.method != "updatePlan" {
+    if !matches!(req.method.as_str(), "updatePlan" | "_x.ai/exit_plan_mode") {
         return None;
     }
     extract_string_field(&req.params, "requestId")
@@ -234,9 +282,15 @@ fn interpret_notification(
             }
             InterpretationResult::NoEvent
         }
+        "_x.ai/session/prompt_complete" => {
+            if ctx.current_request_id.is_some() {
+                complete_active_turn(session_id, ctx)
+            } else {
+                InterpretationResult::NoEvent
+            }
+        }
         "_x.ai/sessions/changed"
         | "_x.ai/queue/changed"
-        | "_x.ai/session/prompt_complete"
         | "_x.ai/announcements/update"
         | "_x.ai/mcp/init_progress"
         | "_x.ai/mcp/server_status"
@@ -341,7 +395,20 @@ fn interpret_session_update(
     }
 
     match update_type.as_str() {
-        "agent_thought_chunk" => InterpretationResult::NoEvent,
+        "agent_thought_chunk" => {
+            // Grok Build makes these structured Thought updates user-visible.
+            // Forward the displayed text through the same credential redactor
+            // used for assistant messages; do not inspect terminal output.
+            let summary = extract_nested_string(update, &["content", "text"])
+                .or_else(|| extract_string_field(update, "text"))
+                .map(|text| redact_visible_text(&text))
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| "正在分析下一步".into());
+            ctx.thinking_active = true;
+            let event = AgentEvent::Thinking(ThinkingPayload { summary });
+            let meta = request_meta(session_id, ctx);
+            InterpretationResult::Events(vec![TimestampedEvent { meta, event }])
+        }
 
         "available_commands_update" | "available_commands" => {
             let commands = extract_available_commands(update, params);
@@ -351,6 +418,7 @@ fn interpret_session_update(
         }
 
         "user_message_chunk" => {
+            ctx.thinking_active = false;
             let text = extract_nested_string(update, &["content", "text"])
                 .or_else(|| extract_string_field(update, "text"))
                 .map(|text| redact_visible_text(&text))
@@ -364,6 +432,7 @@ fn interpret_session_update(
         }
 
         "agent_message_chunk" | "assistantMessage" | "assistant_message" | "text" | "delta" => {
+            ctx.thinking_active = false;
             let text = extract_string_field(update, "content")
                 .or_else(|| extract_string_field(update, "text"))
                 .or_else(|| extract_nested_string(update, &["content", "text"]))
@@ -379,6 +448,7 @@ fn interpret_session_update(
         }
 
         "assistantMessageComplete" | "assistant_message_complete" | "message_complete" => {
+            ctx.thinking_active = false;
             let full_text = if ctx.accumulated_text.is_empty() {
                 None
             } else {
@@ -391,10 +461,12 @@ fn interpret_session_update(
         }
 
         "toolCall" | "tool_call" | "toolCallStarted" => {
+            ctx.thinking_active = false;
             let mut tool_call = extract_tool_call(update);
             let started_at = crate::bridge::types::utc_now();
             tool_call.started_at = Some(started_at.clone());
-            tool_call.input_summary = update.get("rawInput").map(safe_tool_summary);
+            tool_call.input_summary =
+                extract_tool_payload_value(update, "rawInput").map(safe_tool_summary);
             if tool_call.input_summary.is_some() {
                 tool_call.input_redacted = false;
             }
@@ -406,6 +478,7 @@ fn interpret_session_update(
         }
 
         "toolCallUpdate" | "tool_call_update" => {
+            ctx.thinking_active = false;
             let tool_call = extract_tool_call(update);
             let terminal = tool_call
                 .status
@@ -417,8 +490,7 @@ fn interpret_session_update(
                 AgentEvent::ToolCompleted(ToolCompletedPayload {
                     tool_call_id,
                     outcome: tool_call.status.unwrap_or_else(|| "unknown".into()),
-                    summary: update
-                        .get("rawOutput")
+                    summary: extract_tool_payload_value(update, "rawOutput")
                         .map(safe_tool_summary)
                         .or_else(|| Some("工具调用已结束".into())),
                     ended_at: Some(crate::bridge::types::utc_now()),
@@ -433,6 +505,7 @@ fn interpret_session_update(
         }
 
         "toolCallComplete" | "tool_call_complete" => {
+            ctx.thinking_active = false;
             let tool_call_id = extract_tool_call_id(update);
             let outcome = extract_string_field(update, "outcome")
                 .or_else(|| extract_string_field(update, "status"))
@@ -453,6 +526,7 @@ fn interpret_session_update(
         }
 
         "artifact" | "artifactAvailable" => {
+            ctx.thinking_active = false;
             let artifact_id = extract_string_field(params, "artifactId")
                 .or_else(|| extract_string_field(params, "id"))
                 .unwrap_or_default();
@@ -624,6 +698,19 @@ fn extract_tool_call_id(params: &serde_json::Value) -> String {
         .or_else(|| extract_string_field(params, "tool_call_id"))
         .or_else(|| extract_string_field(params, "id"))
         .unwrap_or_default()
+}
+/// ACP v1 commonly nests the input and output under `toolCall`, while older
+/// updates put them directly on the update object. Both shapes describe the
+/// same user-visible tool action.
+fn extract_tool_payload_value<'a>(
+    params: &'a serde_json::Value,
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    params.get(field).or_else(|| {
+        params
+            .get("toolCall")
+            .and_then(|tool_call| tool_call.get(field))
+    })
 }
 
 fn extract_tool_call(params: &serde_json::Value) -> ToolEventPayload {
@@ -983,6 +1070,27 @@ mod tests {
             other => panic!("expected Events, got {other:?}"),
         }
     }
+    #[test]
+    fn nested_tool_call_input_is_not_marked_redacted() {
+        let mut context = ctx();
+        let result = interpret(
+            &AcpMessage::Notification(AcpNotification {
+                jsonrpc: "2.0".into(),
+                method: "session/update".into(),
+                params: json!({ "update": { "sessionUpdate": "toolCall", "toolCall": { "toolCallId": "tc-nested", "rawInput": { "path": "src" } } } }),
+            }),
+            &sid(),
+            &mut context,
+        );
+        let InterpretationResult::Events(events) = result else {
+            panic!("expected Events")
+        };
+        let AgentEvent::ToolStarted(tool) = &events[0].event else {
+            panic!("expected ToolStarted")
+        };
+        assert_eq!(tool.input_summary.as_deref(), Some(r#"{"path":"src"}"#));
+        assert!(!tool.input_redacted);
+    }
 
     #[test]
     fn tool_event_safe_summaries_still_remove_secrets() {
@@ -1086,6 +1194,47 @@ mod tests {
     }
 
     #[test]
+    fn grok_exit_plan_mode_request_becomes_actionable_plan() {
+        let req = AcpRequest {
+            jsonrpc: "2.0".into(),
+            id: json!(37),
+            method: "_x.ai/exit_plan_mode".into(),
+            params: json!({
+                "sessionId": "agent-session",
+                "toolCallId": "tool-plan-exit",
+                "planContent": "1. Inspect the failing flow\n2. Apply the fix"
+            }),
+        };
+
+        assert_eq!(plan_request_id(&req).as_deref(), Some("37"));
+
+        let mut c = ctx();
+        let result = interpret(&AcpMessage::Request(req), &sid(), &mut c);
+        let InterpretationResult::Events(events) = result else {
+            panic!("Grok exit-plan request must produce an actionable Plan event")
+        };
+        let AgentEvent::PlanProposed(plan) = &events[0].event else {
+            panic!("expected PlanProposed")
+        };
+        assert_eq!(plan.request_id, "37");
+        assert_eq!(
+            plan.summary,
+            "1. Inspect the failing flow\n2. Apply the fix"
+        );
+        assert_eq!(
+            plan.options
+                .iter()
+                .map(|option| (option.option_id.as_str(), option.kind.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("grok.exit_plan.approve", Some("approve")),
+                ("grok.exit_plan.revise", Some("request_revision")),
+                ("grok.exit_plan.abandon", Some("reject")),
+            ]
+        );
+    }
+
+    #[test]
     fn interpret_unknown_method_does_not_crash() {
         let notif = AcpNotification {
             jsonrpc: "2.0".into(),
@@ -1100,6 +1249,29 @@ mod tests {
             }
             other => panic!("expected Unknown, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn vendor_prompt_complete_finishes_the_active_turn() {
+        let mut c = ctx();
+        c.current_request_id = Some(42);
+        c.accumulated_text = "answer".into();
+        let notification = AcpNotification {
+            jsonrpc: "2.0".into(),
+            method: "_x.ai/session/prompt_complete".into(),
+            params: json!({ "sessionId": "agent-session" }),
+        };
+
+        let result = interpret(&AcpMessage::Notification(notification), &sid(), &mut c);
+        let InterpretationResult::Events(events) = result else {
+            panic!("active prompt completion must create a terminal event")
+        };
+        let AgentEvent::AssistantCompleted(completed) = &events[0].event else {
+            panic!("expected AssistantCompleted")
+        };
+        assert_eq!(completed.full_text.as_deref(), Some("answer"));
+        assert!(c.current_request_id.is_none());
+        assert!(c.suppress_turn_updates);
     }
 
     #[test]
@@ -1124,19 +1296,29 @@ mod tests {
     }
 
     #[test]
-    fn non_user_visible_session_updates_are_ignored_without_consuming_sequence() {
+    fn visible_thought_chunks_forward_display_text_and_redact_credentials() {
         let mut c = ctx();
         let update_type = "agent_thought_chunk";
         let notif = AcpNotification {
             jsonrpc: "2.0".into(),
             method: "session/update".into(),
-            params: json!({"type": update_type, "content": {"text": "private"}}),
+            params: json!({
+                "type": update_type,
+                "content": {"text": "Inspect files. XAI_API_KEY=super-secret-value"}
+            }),
         };
-        assert!(matches!(
-            interpret(&AcpMessage::Notification(notif), &sid(), &mut c),
-            InterpretationResult::NoEvent
-        ));
-        assert_eq!(c.next_sequence, 0);
+        let result = interpret(&AcpMessage::Notification(notif.clone()), &sid(), &mut c);
+        let InterpretationResult::Events(events) = result else {
+            panic!("visible thought must create a renderer event");
+        };
+        assert!(matches!(events[0].event, AgentEvent::Thinking(_)));
+        let serialized = serde_json::to_string(&events[0]).unwrap();
+        assert!(serialized.contains("Inspect files."));
+        assert!(serialized.contains("[redacted]"));
+        assert!(!serialized.contains("super-secret-value"));
+        let next = interpret(&AcpMessage::Notification(notif), &sid(), &mut c);
+        assert!(matches!(next, InterpretationResult::Events(_)));
+        assert_eq!(c.next_sequence, 2);
     }
 
     #[test]

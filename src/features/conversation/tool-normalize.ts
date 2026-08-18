@@ -72,13 +72,13 @@ function redactedField(
   redactedFlag: unknown,
   fallback: string,
 ): { summary: string; redacted: boolean } {
+  const hasSummary = Boolean(summary && summary.length > 0);
   const flag =
-    redactedFlag === true ||
-    redactedFlag === "true" ||
-    summary === "[redacted]";
+    summary === "[redacted]" ||
+    (hasSummary && (redactedFlag === true || redactedFlag === "true"));
   return {
     summary: flag ? "[redacted]" : summary && summary.length > 0 ? summary : fallback,
-    redacted: flag || !summary,
+    redacted: flag,
   };
 }
 
@@ -133,17 +133,34 @@ export function normalizeToolCall(
   const resultRedacted =
     obj.resultRedacted ?? obj.result_redacted ?? obj.redacted;
 
-  const input = redactedField(inputRaw, inputRedacted, "参数已隐藏");
+  // Locations are already a backend-sanitized, user-visible part of the tool
+  // event. Older ACP updates omitted rawInput while still marking that missing
+  // field redacted; use the known targets instead of showing a blanket marker.
+  const visibleInput =
+    inputRaw ?? (locations.length > 0 ? locations.join(", ") : undefined);
+  const input = redactedField(
+    visibleInput,
+    inputRaw == null && locations.length > 0 ? false : inputRedacted,
+    "参数未提供",
+  );
   const result = redactedField(
     resultRaw,
     resultRedacted,
     phase === "completed" || phase === "failed" ? "结果摘要不可用" : "…",
   );
 
-  // Force redaction when backend marks the whole payload.
+  // A payload-level marker may accompany a sparse lifecycle update. Only
+  // redact fields that are actually present; absence means “not provided”,
+  // not “sensitive value hidden”.
   if (obj.redacted === true) {
-    input.redacted = true;
-    result.redacted = true;
+    if (inputRaw) {
+      input.summary = "[redacted]";
+      input.redacted = true;
+    }
+    if (resultRaw) {
+      result.summary = "[redacted]";
+      result.redacted = true;
+    }
   }
 
   let detailsSafe: string | undefined;
@@ -198,7 +215,9 @@ export function mergeToolCall(
     locations:
       incoming.locations.length > 0 ? incoming.locations : existing.locations,
     input:
-      incoming.input.summary !== "参数已隐藏" || !incoming.input.redacted
+      incoming.input.summary !== "参数已隐藏" &&
+      incoming.input.summary !== "参数未提供" &&
+      incoming.input.summary !== "[redacted]"
         ? incoming.input
         : existing.input,
     result:
@@ -212,6 +231,89 @@ export function mergeToolCall(
   };
 }
 
+const HIDDEN_SUMMARIES = new Set(["参数已隐藏", "…", "结果摘要不可用", "[redacted]"]);
+
+const EXPLORE_KINDS = new Set(["read", "search", "explore", "explore_batch"]);
+
+const EXPLORE_TITLES = new Set([
+  "read_file",
+  "read",
+  "list_dir",
+  "ls",
+  "glob",
+  "grep",
+  "search",
+  "codebase_search",
+  "find",
+]);
+
+/** Read-only Grok Build tools that should collapse into one explore batch. */
+export function isExploreTool(tool: Pick<ToolCallView, "kind" | "title" | "foldGroup">): boolean {
+  if (tool.foldGroup === "explore") return true;
+  if (EXPLORE_KINDS.has(tool.kind.toLowerCase())) return true;
+  return EXPLORE_TITLES.has(tool.title.trim().toLowerCase());
+}
+
+function looksLikeJsonDump(value: string): boolean {
+  const trimmed = value.trim();
+  return (trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length > 24;
+}
+function displayStructuredValue(value: unknown, indent = ""): string {
+  if (typeof value === "string") return value;
+  if (value == null || typeof value !== "object") return String(value);
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => `${indent}- ${displayStructuredValue(entry, `${indent}  `)}`)
+      .join("\n");
+  }
+
+  return Object.entries(value as Record<string, unknown>)
+    .map(([key, entry]) => {
+      const rendered = displayStructuredValue(entry, `${indent}  `);
+      return rendered.includes("\n")
+        ? `${indent}${key}:\n${rendered}`
+        : `${indent}${key}: ${rendered}`;
+    })
+    .join("\n");
+}
+
+/**
+ * Render ACP's JSON-encoded raw input/output as readable text. JSON decoding
+ * restores embedded newlines so they respect the tool card's `pre-wrap` CSS.
+ */
+export function displayToolSummary(summary: string): string {
+  try {
+    return displayStructuredValue(JSON.parse(summary));
+  } catch {
+    return summary;
+  }
+}
+
+export function shortenPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 2) return parts.join("/") || path;
+  return parts.slice(-2).join("/");
+}
+
+/**
+ * One-line process target for a collapsed Grok-style tool row.
+ * Prefers a short path; never dumps raw JSON input.
+ */
+export function collapsedToolSummary(tool: ToolCallView): string {
+  if (tool.kind === "explore_batch" && tool.result.summary && !tool.result.redacted) {
+    return tool.result.summary;
+  }
+  if (tool.locations[0]) return shortenPath(tool.locations[0]);
+  for (const candidate of [tool.result.summary, tool.input.summary]) {
+    if (!candidate || HIDDEN_SUMMARIES.has(candidate) || looksLikeJsonDump(candidate)) {
+      continue;
+    }
+    return candidate.split(/\r?\n/, 1)[0]?.trim() ?? "";
+  }
+  return "";
+}
+
 export function formatDuration(ms: number | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
   if (ms < 1000) return `${Math.round(ms)}ms`;
@@ -220,4 +322,71 @@ export function formatDuration(ms: number | undefined): string {
   const m = Math.floor(s / 60);
   const rem = Math.round(s % 60);
   return `${m}m ${rem}s`;
+}
+
+export interface AgentQuestionChoice {
+  label: string;
+  value: string;
+}
+
+export interface AgentQuestion {
+  prompt: string;
+  choices: AgentQuestionChoice[];
+}
+
+/** Grok currently exposes human clarification as an Ask tool call. */
+export function isAskTool(
+  tool: Pick<ToolCallView, "kind" | "title">,
+): boolean {
+  const kind = tool.kind.trim().toLowerCase();
+  return (
+    kind === "ask" ||
+    kind === "question" ||
+    kind === "ask_user" ||
+    /^ask\s*[:：]/i.test(tool.title.trim())
+  );
+}
+
+function questionChoice(value: unknown): AgentQuestionChoice | null {
+  if (typeof value === "string" && value.trim()) {
+    return { label: value.trim(), value: value.trim() };
+  }
+  const record = asRecord(value);
+  if (!record) return null;
+  const label =
+    asString(record.label) ?? asString(record.name) ?? asString(record.title);
+  if (!label?.trim()) return null;
+  const answer =
+    asString(record.value) ?? asString(record.answer) ?? asString(record.id) ?? label;
+  return { label: label.trim(), value: answer.trim() };
+}
+
+/** Recover the safe question/options already carried by the tool summary. */
+export function agentQuestion(tool: ToolCallView): AgentQuestion | null {
+  if (!isAskTool(tool)) return null;
+  let source: Record<string, unknown> | null = null;
+  try {
+    const parsed: unknown = JSON.parse(tool.input.summary);
+    source = asRecord(parsed);
+    const questions = source?.questions;
+    if (Array.isArray(questions)) source = asRecord(questions[0]) ?? source;
+  } catch {
+    // A plain-text question is valid and falls back to the title/summary.
+  }
+  const prompt = (
+    asString(source?.question) ??
+    asString(source?.prompt) ??
+    asString(source?.message) ??
+    asString(source?.text) ??
+    tool.title.replace(/^ask\s*[:：]?\s*/i, "") ??
+    tool.input.summary
+  ).trim();
+  const rawChoices = source?.choices ?? source?.options;
+  const choices = Array.isArray(rawChoices)
+    ? rawChoices
+        .map(questionChoice)
+        .filter((choice): choice is AgentQuestionChoice => choice != null)
+        .slice(0, 12)
+    : [];
+  return { prompt: prompt || "智能体需要你的确认", choices };
 }

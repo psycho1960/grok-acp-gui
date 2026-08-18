@@ -51,7 +51,9 @@ use grok_acp_gui_lib::modules::task_runtime::permission::{
     OperationCategory, PermissionOptionAction, PermissionRecord, PermissionResolutionRequest,
     PermissionState,
 };
-use grok_acp_gui_lib::modules::task_runtime::plan::{PlanRecord, PlanResolutionRequest, PlanState};
+use grok_acp_gui_lib::modules::task_runtime::plan::{
+    PlanOptionAction, PlanRecord, PlanResolutionRequest, PlanState,
+};
 use grok_acp_gui_lib::modules::task_runtime::{TaskRuntime, TaskRuntimeImpl};
 
 // ---------------------------------------------------------------------------
@@ -683,6 +685,69 @@ async fn p1_06_fake_acp_plan_approve_round_trip_and_task_continues() {
     })
     .await;
     assert!(matches!(task_status(&env), TaskStatus::Idle));
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn p1_grok_exit_plan_extension_approve_round_trip_and_task_continues() {
+    let env = setup(FakeScenario::GrokExitPlan, "plan", Duration::from_secs(300)).await;
+    boot_and_prompt(&env).await;
+
+    // Grok's extension has no business requestId, so the adapter exposes the
+    // original JSON-RPC id as the stable local request key.
+    let plan = wait_for(|| pending_plan(&env, "1001")).await;
+    let rpc_id = agent_request_rpc_id(&env, "_x.ai/exit_plan_mode");
+    assert_eq!(plan.request_id, rpc_id);
+    assert_eq!(plan.state, PlanState::Proposed);
+    assert_eq!(
+        plan.summary_redacted,
+        "1. Inspect the failing flow\n2. Apply the fix"
+    );
+    assert!(plan.options.iter().any(|option| {
+        option.option_id == "grok.exit_plan.approve" && option.action == PlanOptionAction::Approve
+    }));
+
+    let approved = plan_resolve(&env, &plan, "grok.exit_plan.approve").await;
+    assert_eq!(approved.unwrap(), PlanState::Approved);
+
+    wait_for(|| {
+        outbound_responses(&env).into_iter().find(|response| {
+            response["id"].as_u64().map(|value| value.to_string()) == Some(rpc_id.clone())
+                && response["result"]["approved"] == serde_json::json!(true)
+                && response["result"]["abandoned"] == serde_json::json!(false)
+        })
+    })
+    .await;
+    wait_for(|| {
+        (env.agent_runtime.session_state(&env.session_id) == Some(RuntimeState::Ready))
+            .then_some(())
+    })
+    .await;
+    assert!(matches!(task_status(&env), TaskStatus::Idle));
+
+    shutdown(&env).await;
+}
+
+#[tokio::test]
+async fn p1_grok_exit_plan_extension_cancel_abandons_pending_request() {
+    let env = setup(FakeScenario::GrokExitPlan, "plan", Duration::from_secs(300)).await;
+    boot_and_prompt(&env).await;
+    wait_for(|| pending_plan(&env, "1001")).await;
+
+    env.task_runtime
+        .cancel_session(env.task_id.clone())
+        .await
+        .expect("cancel task");
+
+    wait_for(|| {
+        outbound_responses(&env).into_iter().find(|response| {
+            response["id"] == serde_json::json!(1001)
+                && response["result"]["approved"] == serde_json::json!(false)
+                && response["result"]["abandoned"] == serde_json::json!(true)
+        })
+    })
+    .await;
 
     shutdown(&env).await;
 }

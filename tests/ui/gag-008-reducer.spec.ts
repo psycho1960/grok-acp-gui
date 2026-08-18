@@ -22,7 +22,48 @@ import {
 } from "../../src/features/conversation/reducer";
 import type { SessionId, TaskId, TypedDesktopEvent } from "../../src/bridge/types";
 
+function fixtureUserDelta(seq: number, text: string): TypedDesktopEvent {
+  return {
+    type: "message.delta",
+    taskId: FIX_TASK,
+    sessionId: FIX_SESSION,
+    seq,
+    timestamp: `2026-08-05T12:00:0${seq}.000Z`,
+    payload: { role: "user", text },
+  };
+}
+
 describe("GAG-008 conversation reducer", () => {
+  it("ignores a live user chunk that was not sent by the local composer", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = appendUserMessage(state, "检查项目", {
+      id: "local-user",
+      pending: true,
+    });
+    state = applyEvent(state, fixtureUserDelta(1, "检查项目"), {
+      acceptUnmatchedUserMessages: false,
+    });
+    state = applyEvent(
+      state,
+      fixtureUserDelta(2, "探索子目录并向父 Agent 报告，不要修改文件"),
+      { acceptUnmatchedUserMessages: false },
+    );
+
+    const users = state.items.filter((item) => item.kind === "user");
+    expect(users).toHaveLength(1);
+    expect(users[0]?.kind === "user" && users[0].text).toBe("检查项目");
+  });
+
+  it("keeps user chunks when rebuilding an authoritative history snapshot", () => {
+    const snapshot = fixtureSessionSnapshot({
+      cursor: 1,
+      events: [fixtureUserDelta(1, "历史用户消息")],
+    });
+    const state = applySnapshot(createEmptyConversationState(FIX_TASK), snapshot);
+
+    expect(state.items.filter((item) => item.kind === "user")).toHaveLength(1);
+  });
+
   it("dedupes by sessionId+seq", () => {
     let state = createEmptyConversationState(FIX_TASK);
     const e = fixtureAssistantDelta(1, "Hi");
@@ -30,6 +71,44 @@ describe("GAG-008 conversation reducer", () => {
     state = applyEvent(state, e);
     expect(state.items.filter((i) => i.kind === "assistant")).toHaveLength(1);
     expect(state.cursor.lastSeq).toBe(1);
+  });
+
+  it("does not create a blank assistant message from whitespace-only deltas", () => {
+    const state = applyEvents(createEmptyConversationState(FIX_TASK), [
+      fixtureAssistantDelta(1, "\n\n"),
+    ]);
+
+    expect(state.items.filter((item) => item.kind === "assistant")).toHaveLength(0);
+    expect(state.cursor.lastSeq).toBe(1);
+  });
+
+  it("keeps whitespace chunks inside a visible assistant message", () => {
+    const state = applyEvents(createEmptyConversationState(FIX_TASK), [
+      fixtureAssistantDelta(1, "Hello"),
+      fixtureAssistantDelta(2, " "),
+      fixtureAssistantDelta(3, "world"),
+    ]);
+
+    const assistant = state.items.find((item) => item.kind === "assistant");
+    expect(assistant?.kind === "assistant" && assistant.text).toBe("Hello world");
+  });
+
+  it("does not replace streamed text with a whitespace-only completion", () => {
+    const state = applyEvents(createEmptyConversationState(FIX_TASK), [
+      fixtureAssistantDelta(1, "已有正文"),
+      {
+        type: "message.delta",
+        taskId: FIX_TASK,
+        sessionId: FIX_SESSION,
+        seq: 2,
+        timestamp: "2026-08-05T12:00:02.000Z",
+        payload: { completed: true, fullText: "\n\n" },
+      },
+    ]);
+
+    const assistant = state.items.find((item) => item.kind === "assistant");
+    expect(assistant?.kind === "assistant" && assistant.text).toBe("已有正文");
+    expect(assistant?.kind === "assistant" && assistant.frozen).toBe(true);
   });
 
   it("appends assistant deltas into one streaming message then freezes on task idle", () => {
@@ -48,6 +127,28 @@ describe("GAG-008 conversation reducer", () => {
     expect(assistants[0].streaming).toBe(false);
     expect(assistants[0].frozen).toBe(true);
     expect(state.status).toBe("idle");
+  });
+
+  it("finishes a running turn from the live assistant-completed message", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = applyEvents(state, [
+      fixtureTaskState(1, "running"),
+      fixtureAssistantDelta(2, "最终答复"),
+      {
+        type: "message.delta",
+        taskId: FIX_TASK,
+        sessionId: FIX_SESSION,
+        seq: 3,
+        timestamp: "2026-08-05T12:00:03.000Z",
+        payload: { completed: true, fullText: "最终答复" },
+      },
+    ]);
+
+    expect(state.status).toBe("idle");
+    const assistant = state.items.find((item) => item.kind === "assistant");
+    expect(assistant?.kind === "assistant" && assistant.text).toBe("最终答复");
+    expect(assistant?.kind === "assistant" && assistant.streaming).toBe(false);
+    expect(assistant?.kind === "assistant" && assistant.frozen).toBe(true);
   });
 
   it("keeps late buffered deltas in one assistant message while cancellation is pending", () => {
@@ -126,6 +227,28 @@ describe("GAG-008 conversation reducer", () => {
     expect(serialized).not.toContain("must-never-render");
     expect(serialized).not.toContain("must-never-copy");
     expect(serialized).toContain("[redacted]");
+  });
+
+  it("leaves running state when the active ACP session process exits", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = applyEvents(state, [
+      fixtureTaskState(1, "running"),
+      fixtureAssistantDelta(2, "partial response"),
+    ]);
+
+    state = applyEvent(state, {
+      type: "runtime.updated",
+      timestamp: "2026-08-05T00:00:03.000Z",
+      payload: {
+        status: "exited",
+        sessionId: FIX_SESSION,
+        reason: "session disconnected",
+      },
+    });
+
+    expect(state.status).toBe("disconnected");
+    const assistant = state.items.find((item) => item.kind === "assistant");
+    expect(assistant?.kind === "assistant" && assistant.frozen).toBe(true);
   });
 
   it("turns a terminal request failure into a coded recoverable error state", () => {
@@ -384,6 +507,38 @@ describe("GAG-008 conversation reducer", () => {
     expect(folded[1].kind).toBe("tool");
     if (folded[1].kind === "tool") {
       expect(folded[1].tool.kind).toBe("execute");
+    }
+  });
+
+  it("folds consecutive Grok Build read-only tool titles into one explore batch", () => {
+    let state = createEmptyConversationState(FIX_TASK);
+    state = applyEvents(state, [
+      fixtureToolDelta(1, {
+        toolCallId: "a",
+        title: "list_dir",
+        kind: "other",
+        status: "completed",
+      }),
+      fixtureToolDelta(2, {
+        toolCallId: "b",
+        title: "grep",
+        kind: "other",
+        status: "completed",
+      }),
+      fixtureToolDelta(3, {
+        toolCallId: "c",
+        title: "search_replace",
+        kind: "edit",
+        status: "completed",
+      }),
+    ]);
+    const folded = foldExploreTools(state.items);
+    expect(folded).toHaveLength(2);
+    if (folded[0].kind === "tool") {
+      expect(folded[0].tool.title).toBe("已查看 2 项");
+    }
+    if (folded[1].kind === "tool") {
+      expect(folded[1].tool.title).toBe("search_replace");
     }
   });
 

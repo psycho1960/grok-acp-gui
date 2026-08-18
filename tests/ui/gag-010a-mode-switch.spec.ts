@@ -300,4 +300,59 @@ describe("conversation mode switching", () => {
     expect(store.selectedMode).toBe("plan");
     wrapper.unmount();
   });
+
+  it("applies 问答 immediately and keeps the mode menu above the timeline", async () => {
+    const commands: DesktopCommand[] = [];
+    const wrapper = mount(ConversationView, {
+      props: {
+        bridge: createFakeDesktopBridge({
+          bootstrapSnapshot: {
+            capabilities: { modes: MODES, models: [], slashCommands: [] },
+          },
+          onExecute(command) {
+            commands.push(command);
+            if (command.type === "session.configure") {
+              return {
+                success: "true",
+                data: {
+                  mode: "ask",
+                  workspaceStrategy: "direct",
+                  workspaceAvailable: true,
+                },
+              };
+            }
+            return { success: "true", data: { acknowledged: command.type } };
+          },
+        }),
+        taskId: FIX_TASK,
+        snapshot: fixtureSessionSnapshot({
+          status: "idle",
+          cursor: 0,
+          events: [],
+          mode: "plan",
+          workspaceStrategy: "direct",
+        }),
+      },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    const modeSelect = wrapper.get('[data-testid="conversation-mode-select"]');
+    await modeSelect.get('[data-testid="header-select-trigger"]').trigger("click");
+    await modeSelect.get('[data-value="ask"]').trigger("click");
+    await flushPromises();
+
+    const store = useConversationStore();
+    expect(store.selectedMode).toBe("ask");
+    expect(store.workspaceStrategy).toBe("direct");
+    expect(
+      commands.some(
+        (command) =>
+          command.type === "session.configure" &&
+          (command.payload as { settings: Record<string, string> }).settings.mode ===
+            "ask",
+      ),
+    ).toBe(true);
+    wrapper.unmount();
+  });
 });

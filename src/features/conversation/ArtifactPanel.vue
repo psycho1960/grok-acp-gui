@@ -27,6 +27,17 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
+function stateLabel(state: string): string {
+  return {
+    importing: "导入中",
+    ready: "可用",
+    rejected: "已拒绝",
+    failed: "失败",
+    missing: "缺失",
+    quarantined: "已隔离",
+  }[state] ?? state;
+}
+
 async function refresh(): Promise<void> {
   if (!props.taskId) {
     artifacts.value = [];
@@ -221,7 +232,7 @@ defineExpose({ openArtifact, refresh });
         <div class="metadata">
           <strong>{{ artifact.displayName }}</strong>
           <span>{{ artifact.mimeType }} · {{ formatBytes(artifact.bytes) }}</span>
-          <span :class="`state state-${artifact.state}`">{{ artifact.state }}</span>
+          <span :class="`state state-${artifact.state}`">{{ stateLabel(artifact.state) }}</span>
         </div>
         <img
           v-if="urls[artifact.artifactId]"

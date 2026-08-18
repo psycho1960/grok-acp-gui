@@ -10,6 +10,7 @@ import {
   saveScrollAnchor,
   type ScrollAnchor,
 } from "./scroll";
+import { estimateTimelineItemHeight } from "./timeline-density";
 
 const props = withDefaults(
   defineProps<{
@@ -37,8 +38,11 @@ const scrollTop = ref(0);
 const viewportHeight = ref(400);
 const anchor = ref<ScrollAnchor>(loadScrollAnchor(props.sessionKey));
 let prevCount = props.items.length;
+let prevLastId = props.items[props.items.length - 1]?.id ?? null;
 let pendingRestoredScrollTop: number | null = null;
 let restoreReleaseFrame: number | null = null;
+let smoothScrollReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+let smoothScrollingToBottom = false;
 const layoutRevision = ref(0);
 const measuredHeights = new Map<string, number>();
 
@@ -49,10 +53,9 @@ const layout = computed(() => {
   let top = 0;
   for (const item of props.items) {
     tops.push(top);
-    const height = Math.max(
-      props.itemHeight,
-      measuredHeights.get(item.id) ?? props.itemHeight,
-    );
+    const height =
+      measuredHeights.get(item.id) ??
+      estimateTimelineItemHeight(item, props.itemHeight);
     heights.push(height);
     top += height;
   }
@@ -93,6 +96,7 @@ const windowItems = computed(() => {
       key: item.id,
       top: layout.value.tops[index] ?? 0,
       height: layout.value.heights[index] ?? props.itemHeight,
+      measured: measuredHeights.has(item.id),
     };
   });
 });
@@ -107,6 +111,22 @@ function persist(): void {
 function onScroll(): void {
   if (!root.value) return;
   scrollTop.value = root.value.scrollTop;
+  if (smoothScrollingToBottom) {
+    if (
+      isNearBottom(
+        root.value.scrollTop,
+        root.value.clientHeight,
+        root.value.scrollHeight,
+      )
+    ) {
+      smoothScrollingToBottom = false;
+      if (smoothScrollReleaseTimer != null) {
+        clearTimeout(smoothScrollReleaseTimer);
+        smoothScrollReleaseTimer = null;
+      }
+    }
+    return;
+  }
   if (pendingRestoredScrollTop != null) return;
   const topIndex = indexAt(root.value.scrollTop);
   const itemTop = layout.value.tops[topIndex] ?? 0;
@@ -158,8 +178,15 @@ function scrollToBottom(smooth = false): void {
   pendingRestoredScrollTop = null;
   const top = Math.max(0, root.value.scrollHeight - root.value.clientHeight);
   if (smooth && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    smoothScrollingToBottom = true;
+    if (smoothScrollReleaseTimer != null) clearTimeout(smoothScrollReleaseTimer);
+    smoothScrollReleaseTimer = setTimeout(() => {
+      smoothScrollingToBottom = false;
+      smoothScrollReleaseTimer = null;
+    }, 700);
     root.value.scrollTo({ top, behavior: "smooth" });
   } else {
+    smoothScrollingToBottom = false;
     root.value.scrollTop = top;
   }
   scrollTop.value = top;
@@ -207,7 +234,10 @@ watch(
   async (revision, previous) => {
     const len = props.items.length;
     const appended = len - prevCount;
+    const lastItem = props.items[len - 1];
+    const sameLastRow = lastItem?.id === prevLastId;
     prevCount = len;
+    prevLastId = lastItem?.id ?? null;
     if (appended > 0) {
       anchor.value = onItemsAppended(anchor.value, appended);
       persist();
@@ -219,7 +249,11 @@ watch(
         restoreSavedPosition();
       }
     } else if (previous != null && revision !== previous) {
-      anchor.value = onItemsAppended(anchor.value, 1);
+      const unreadDelta =
+        lastItem?.kind === "process" && sameLastRow && anchor.value.unreadCount > 0
+          ? 0
+          : 1;
+      anchor.value = onItemsAppended(anchor.value, unreadDelta);
       persist();
       if (anchor.value.stickToBottom) {
         await nextTick();
@@ -237,6 +271,7 @@ watch(
   (key) => {
     anchor.value = loadScrollAnchor(key);
     prevCount = props.items.length;
+    prevLastId = props.items[props.items.length - 1]?.id ?? null;
     nextTick(() => {
       if (anchor.value.stickToBottom) scrollToBottom(false);
       else restoreSavedPosition();
@@ -274,7 +309,12 @@ onMounted(() => {
   if (!root.value) return;
   viewportHeight.value = root.value.clientHeight || 400;
   resizeObserver = new ResizeObserver(() => {
-    if (root.value) viewportHeight.value = root.value.clientHeight || 400;
+    if (!root.value) return;
+    viewportHeight.value = root.value.clientHeight || 400;
+    // A processing/footer row can appear outside the scroll container and
+    // shrink its viewport. Preserve the user's bottom anchor after that grid
+    // reflow so the final timeline row is not clipped behind the footer.
+    if (anchor.value.stickToBottom) nextTick(() => scrollToBottom(false));
   });
   resizeObserver.observe(root.value);
   rowResizeObserver = new ResizeObserver((entries) => {
@@ -299,6 +339,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (restoreReleaseFrame != null) cancelAnimationFrame(restoreReleaseFrame);
+  if (smoothScrollReleaseTimer != null) clearTimeout(smoothScrollReleaseTimer);
   resizeObserver?.disconnect();
   rowResizeObserver?.disconnect();
   persist();
@@ -347,7 +388,7 @@ defineExpose({
           :data-index="row.index"
           :data-row-key="row.item.id"
           :style="{
-            minHeight: `${itemHeight}px`,
+            minHeight: row.measured ? undefined : `${row.height}px`,
             transform: `translateY(${row.top}px)`,
           }"
         >
@@ -383,12 +424,16 @@ defineExpose({
 }
 .virtual-list {
   position: relative;
+  display: flex;
+  flex-direction: column;
   overflow: auto;
   height: 100%;
 }
 .virtual-spacer {
   position: relative;
+  flex: 0 0 auto;
   width: 100%;
+  margin-top: auto;
 }
 .virtual-row {
   position: absolute;

@@ -15,6 +15,16 @@ describe("GAG-019 error map", () => {
     expect(mapped.raw).toContain("handshake");
   });
 
+  it("maps GROK_AUTH_REQUIRED to a localized recovery message", () => {
+    const mapped = mapErrorMessage(
+      "[GROK_AUTH_REQUIRED] Grok authentication is required. Run 'grok login', then retry.",
+    );
+    expect(mapped.title).toBe("Grok 未登录");
+    expect(mapped.summary).toContain("Grok 身份");
+    expect(mapped.suggestion).toContain("grok login");
+    expect(mapped.raw).toContain("GROK_AUTH_REQUIRED");
+  });
+
   it("ErrorState exposes copy detail action", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", {

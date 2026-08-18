@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
 import { createFakeDesktopBridge } from "../../bridge/fake-bridge";
-import type { TaskId, TypedDesktopEvent } from "../../bridge/types";
+import type { ArtifactDescriptor, TaskId, TypedDesktopEvent } from "../../bridge/types";
 import {
   FIX_TASK,
   fixtureConversationEvents,
@@ -74,6 +74,7 @@ let configuredWorkspace: string | null = snapshot.workspaceStrategy ?? null;
 let configuredModel: string | null = snapshot.model ?? null;
 let configuredReasoning: string | null = snapshot.reasoning ?? null;
 let blobImportCount = 0;
+const fixtureArtifacts: ArtifactDescriptor[] = [];
 
 function nextInteractiveSeq(): number {
   interactiveSeq += 1;
@@ -113,21 +114,26 @@ const bridge = createFakeDesktopBridge({
         },
       };
     }
+    if (command.type === "artifact.list") {
+      return { success: "true", data: { artifacts: [...fixtureArtifacts] } };
+    }
     if (command.type === "artifact.import.blob") {
       blobImportCount += 1;
       const blobs = Array.isArray(command.payload.blobs) ? command.payload.blobs : [];
+      const artifacts: ArtifactDescriptor[] = blobs.map(
+        (blob: { displayName?: string }, index: number) => ({
+          artifactId: `artifact-clip-${blobImportCount}-${index}`,
+          displayName: blob.displayName ?? "剪贴板图片.png",
+          mimeType: "image/png",
+          bytes: 1024,
+          state: "ready",
+          previewCapability: "inline",
+        }),
+      );
+      fixtureArtifacts.push(...artifacts);
       return {
         success: "true",
-        data: {
-          artifacts: blobs.map((blob: { displayName?: string }, index: number) => ({
-            artifactId: `artifact-clip-${blobImportCount}-${index}`,
-            displayName: blob.displayName ?? "剪贴板图片.png",
-            mimeType: "image/png",
-            bytes: 1024,
-            state: "ready",
-            previewCapability: "inline",
-          })),
-        },
+        data: { artifacts },
       };
     }
     if (command.type === "turn.send") {
@@ -220,6 +226,19 @@ const playIndex = ref(0);
 function push(event: TypedDesktopEvent): void {
   if ("seq" in event && typeof event.seq === "number") {
     interactiveSeq = Math.max(interactiveSeq, event.seq);
+  }
+  if (
+    event.type === "artifact.available" &&
+    !fixtureArtifacts.some((artifact) => artifact.artifactId === event.payload.artifactId)
+  ) {
+    fixtureArtifacts.push({
+      artifactId: event.payload.artifactId,
+      displayName: event.payload.displayName,
+      mimeType: event.payload.mimeType,
+      bytes: 2048,
+      state: "ready",
+      previewCapability: "inline",
+    });
   }
   bridge.pushEvent(event);
 }

@@ -827,6 +827,10 @@ export interface SessionEvent {
 
 export interface RuntimeUpdatedPayload {
   status: string;
+  /** Present for a session-owned runtime process transition. */
+  sessionId?: SessionId;
+  reason?: string;
+  code?: number | null;
 }
 
 export interface TaskSnapshotPayload {
@@ -843,6 +847,10 @@ export interface MessageDeltaPayload {
   role?: "user" | "assistant";
   text?: string;
   toolCall?: unknown;
+  /** Live AssistantCompleted marker emitted by the ACP bridge. */
+  completed?: boolean;
+  /** Authoritative final assistant text carried by AssistantCompleted. */
+  fullText?: string | null;
 }
 
 export interface ActivityUpdatedPayload {

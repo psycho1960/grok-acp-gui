@@ -66,9 +66,10 @@ pub struct ResolvePermissionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvePlanRequest {
-    /// ACP request ID from `PlanProposedPayload`.
+    /// Stable request ID from `PlanProposedPayload`.
     pub request_id: String,
-    /// ACP option ID — passed verbatim.
+    /// Plan option ID. Agent-provided IDs are passed verbatim; adapter-owned
+    /// vendor action IDs are translated only by their originating adapter.
     pub option_id: String,
 }
 

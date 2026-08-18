@@ -361,4 +361,36 @@ describe("GAG-007 VirtualList", () => {
     expect(ids.some((id) => Number(id.replace("id-", "")) >= 15)).toBe(true);
     wrapper.unmount();
   });
+
+  it("positions variable-height rows without leaving fixed-height gaps", async () => {
+    const { h } = await import("vue");
+    const items = [
+      { id: "header", height: 36 },
+      { id: "task", height: 120 },
+      { id: "next-header", height: 36 },
+    ];
+    const wrapper = mount(VirtualList, {
+      props: {
+        items,
+        itemHeight: 120,
+        getItemHeight: (item: { height: number }) => item.height,
+        getKey: (item: { id: string }) => item.id,
+      },
+      slots: {
+        default: ({ item }: { item: { id: string } }) =>
+          h("div", { "data-id": item.id }, item.id),
+      },
+      attachTo: document.body,
+    });
+    await nextTick();
+
+    const rows = wrapper.findAll(".virtual-list-row");
+    expect(rows).toHaveLength(3);
+    expect(rows[0].attributes("style")).toMatch(/height:\s*36px/);
+    expect(rows[1].attributes("style")).toMatch(/translateY\(36px\)/);
+    expect(rows[2].attributes("style")).toMatch(/translateY\(156px\)/);
+    expect(wrapper.get('[data-testid="virtual-list-spacer"]').attributes("style"))
+      .toMatch(/height:\s*192px/);
+    wrapper.unmount();
+  });
 });

@@ -31,6 +31,7 @@ const props = defineProps<{
 }>();
 
 const store = useConversationStore();
+const attachmentOwner = Symbol("conversation-view");
 const listRef = ref<InstanceType<typeof TimelineVirtualList> | null>(null);
 const artifactPanel = ref<InstanceType<typeof ArtifactPanel> | null>(null);
 const railForced = ref(false);
@@ -116,9 +117,17 @@ const focusedId = computed(() => {
   return item?.id ?? null;
 });
 
+const latestRecoverableErrorId = computed(() => {
+  if (store.status !== "error") return null;
+  const latest = [...store.items]
+    .reverse()
+    .find((item) => item.kind === "error" && item.retryable !== false);
+  return latest?.id ?? null;
+});
+
 onMounted(async () => {
   window.addEventListener("keydown", focusPendingApproval);
-  await store.attach(props.bridge);
+  await store.attach(props.bridge, attachmentOwner);
   if (props.snapshot) {
     store.openFromSnapshot(props.snapshot);
   } else if (props.taskId) {
@@ -147,7 +156,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", focusPendingApproval);
   unsubscribeImageDrops?.();
   unsubscribeImageDrops = null;
-  store.detach();
+  store.detach(attachmentOwner);
 });
 
 function focusPendingApproval(event: KeyboardEvent): void {
@@ -204,6 +213,14 @@ watch(
 
 async function onSend(): Promise<void> {
   await store.sendMessage();
+}
+
+async function onAnswerAsk(
+  answer: string,
+  complete: (success: boolean) => void,
+): Promise<void> {
+  if (!store.facadeReady) await store.attach(props.bridge, attachmentOwner);
+  complete(await store.answerAgentQuestion(answer));
 }
 
 async function onCancel(): Promise<void> {
@@ -304,6 +321,7 @@ const showAgentProcessing = computed(() => {
   const latest = store.items[store.items.length - 1];
   if (!latest) return true;
   if (latest.kind === "thinking") return false;
+  if (latest.kind === "process" && latest.phase === "running") return false;
   if (latest.kind === "assistant" && latest.streaming) return false;
   if (latest.kind === "tool" && latest.tool.phase === "running") return false;
   return true;
@@ -348,6 +366,10 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       class="conversation-task-bar"
       :title="store.title"
       :status="store.status"
+      :completed="
+        store.status === 'idle' &&
+          (store.lifecycleStatus === 'merged' || store.lifecycleStatus === 'archived')
+      "
       :attempt="store.attempt"
       :needs-refresh="store.needsRefresh"
       :modes="store.modes"
@@ -355,6 +377,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
       :selected-workspace-strategy="store.workspaceStrategy"
       :settings-disabled="store.sendPending || store.settingsPending || store.isRunning"
       :turns="turns"
+      :resume-in-timeline="Boolean(latestRecoverableErrorId)"
       @back="onBack"
       @jump-turn="onJumpTurn"
       @refresh="props.taskId && store.openTask(props.taskId as TaskId)"
@@ -383,16 +406,17 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
           title="会话加载失败"
           :detail="store.errorMessage ?? '未知错误'"
         />
-        <p
+        <article
           v-else-if="store.items.length === 0 && showAgentProcessing"
-          class="agent-processing initial"
+          class="agent-processing initial surface-card"
           data-testid="agent-processing"
           role="status"
           aria-live="polite"
         >
           <span class="processing-dot" aria-hidden="true" />
           智能体正在处理
-        </p>
+          <span class="processing-detail">等待可安全展示的工作详情</span>
+        </article>
         <div
           v-else-if="store.items.length === 0"
           class="empty-conversation"
@@ -408,7 +432,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
             :items="store.items"
             :session-key="sessionKey"
             :focus-seq="props.focusSeq ?? store.focusEventSeq"
-            :item-height="128"
+            :item-height="36"
           >
             <template #default="{ item }">
               <TimelineItemView
@@ -418,24 +442,29 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
                 :thinking-done="isThinkingDone(item)"
                 :preview-urls="previewUrls"
                 :preview-missing="previewMissing"
+                :can-resume="item.id === latestRecoverableErrorId"
                 @toggle-tool="store.toggleTool"
                 @toggle-thinking="store.toggleThinking"
+                @toggle-process="store.toggleProcess"
+                @answer-ask="onAnswerAsk"
                 @resolve-permission="store.resolvePermission"
                 @resolve-plan="store.resolvePlan"
                 @open-artifact="onOpenArtifact"
+                @resume="onResume"
               />
             </template>
           </TimelineVirtualList>
-          <p
+          <article
             v-if="showAgentProcessing"
-            class="agent-processing"
+            class="agent-processing surface-card"
             data-testid="agent-processing"
             role="status"
             aria-live="polite"
           >
             <span class="processing-dot" aria-hidden="true" />
             智能体正在处理
-          </p>
+            <span class="processing-detail">等待可安全展示的工作详情</span>
+          </article>
         </div>
       </div>
       <aside
@@ -603,7 +632,11 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
   --border-tone-warning: color-mix(in srgb, var(--ctp-yellow) 50%, var(--ctp-surface1));
   --border-tone-danger: color-mix(in srgb, var(--ctp-red) 55%, var(--ctp-surface1));
 }
-.conversation-task-bar { grid-area: task-bar; }
+.conversation-task-bar {
+  position: relative;
+  z-index: 6;
+  grid-area: task-bar;
+}
 .workspace-notice {
   grid-area: workspace-notice;
   margin: 0;
@@ -678,7 +711,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
   gap: var(--space-2);
   align-items: center;
   width: fit-content;
-  margin: 0 var(--space-4) var(--space-3);
+  margin: var(--space-2) var(--space-4) var(--space-3);
   padding: var(--space-2) var(--space-3);
   color: var(--ctp-subtext0);
   font-size: var(--font-small);
@@ -686,6 +719,7 @@ function isThinkingDone(item: { id: string; kind: string; durationMs?: number })
 .agent-processing.initial {
   margin-top: var(--space-6);
 }
+.processing-detail { color: var(--ctp-overlay0); }
 .processing-dot {
   width: 0.5rem;
   height: 0.5rem;

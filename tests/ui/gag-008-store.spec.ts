@@ -8,6 +8,7 @@ import {
   fixtureAssistantDelta,
   fixtureSessionSnapshot,
   fixtureTaskState,
+  fixtureToolDelta,
 } from "../../src/features/conversation/fixtures";
 
 describe("GAG-008 conversation store", () => {
@@ -74,6 +75,32 @@ describe("GAG-008 conversation store", () => {
     expect(store.sendError).toContain("network");
   });
 
+  it("clears a stale Bridge send error when the user starts a new draft", async () => {
+    const bridge = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type === "turn.send") {
+          return {
+            success: "false",
+            error: fakeError({ message: "Bridge 不可用", retryable: true }),
+          };
+        }
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    });
+    const store = useConversationStore();
+    await store.attach(bridge);
+    store.openFromSnapshot(
+      fixtureSessionSnapshot({ status: "idle", cursor: 0, events: [] }),
+    );
+    store.setDraft("第一次发送");
+
+    expect(await store.sendMessage()).toBe(false);
+    expect(store.sendError).toBe("Bridge 不可用");
+
+    store.setDraft("/session-info");
+    expect(store.sendError).toBeNull();
+  });
+
   it("updates a provisional task title from the first successful turn", async () => {
     const bridge = createFakeDesktopBridge({
       onExecute(command) {
@@ -111,6 +138,67 @@ describe("GAG-008 conversation store", () => {
     expect(store.composerCapabilities.canSend).toBe(false);
     expect(store.composerCapabilities.disabledReason).toMatch(/离线/);
     expect(store.draft).toBe("keep me");
+  });
+
+  it("does not resurrect a terminated turn from a stale running snapshot", async () => {
+    const bridge = createFakeDesktopBridge();
+    const store = useConversationStore();
+    await store.attach(bridge);
+
+    store.openFromSnapshot(
+      fixtureSessionSnapshot({
+        status: "running",
+        cursor: 3,
+        events: [
+          fixtureTaskState(1, "running"),
+          fixtureToolDelta(2, {
+            toolCallId: "tc-plan",
+            title: "写入计划",
+            kind: "edit",
+            status: "running",
+          }),
+          fixtureTaskState(3, "interrupted", {
+            reason: "session disconnected",
+          }),
+        ],
+      }),
+    );
+
+    expect(store.status).toBe("error");
+    expect(store.composerCapabilities.canCancel).toBe(false);
+    const tool = store.items.find((item) => item.kind === "tool");
+    expect(tool?.kind === "tool" && tool.tool.phase).toBe("cancelled");
+  });
+
+  it("projects a terminal task state immediately even when an earlier event is missing", async () => {
+    const bridge = createFakeDesktopBridge();
+    const store = useConversationStore();
+    await store.attach(bridge);
+    store.openFromSnapshot(
+      fixtureSessionSnapshot({
+        status: "running",
+        cursor: 2,
+        events: [
+          fixtureTaskState(1, "running"),
+          fixtureToolDelta(2, {
+            toolCallId: "tc-plan-gap",
+            title: "写入计划",
+            kind: "edit",
+            status: "running",
+          }),
+        ],
+      }),
+    );
+
+    store.injectEventForTest(
+      fixtureTaskState(4, "interrupted", {
+        reason: "session disconnected",
+      }),
+    );
+
+    expect(store.needsRefresh).toBe(true);
+    expect(store.status).toBe("error");
+    expect(store.composerCapabilities.canCancel).toBe(false);
   });
 
   it("batches high-frequency text deltas without reordering", async () => {
@@ -391,5 +479,31 @@ describe("GAG-008 conversation store", () => {
     expect(store.title).toBe("Title B");
     expect(JSON.stringify(store.items)).toContain("only B");
     expect(JSON.stringify(store.items)).not.toContain("only A");
+  });
+
+  it("ignores detach from an obsolete conversation view owner", async () => {
+    const sentByLatest = vi.fn();
+    const first = createFakeDesktopBridge();
+    const latest = createFakeDesktopBridge({
+      onExecute(command) {
+        if (command.type === "turn.send") sentByLatest(command.payload.message);
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    });
+    const store = useConversationStore();
+    const oldOwner = Symbol("old-view");
+    const latestOwner = Symbol("latest-view");
+
+    await store.attach(first, oldOwner);
+    await store.attach(latest, latestOwner);
+    store.detach(oldOwner);
+
+    expect(store.facadeReady).toBe(true);
+    store.openFromSnapshot(
+      fixtureSessionSnapshot({ status: "idle", cursor: 0, events: [] }),
+    );
+    store.setDraft("仍然可以发送");
+    expect(await store.sendMessage()).toBe(true);
+    expect(sentByLatest).toHaveBeenCalledWith("仍然可以发送");
   });
 });

@@ -353,7 +353,6 @@ async fn verify_authentication_with_minimal_turn(
         return AuthenticationVerification::Failed;
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut saw_content = false;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
@@ -364,31 +363,26 @@ async fn verify_authentication_with_minimal_turn(
             Ok(Some(_)) => continue,
             Ok(None) | Err(_) => return AuthenticationVerification::Failed,
         };
-        match event.event {
-            AgentEvent::AssistantDelta(delta) => saw_content |= !delta.text.trim().is_empty(),
-            AgentEvent::AssistantCompleted(completed) => {
-                return if saw_content
-                    || completed
-                        .full_text
-                        .as_deref()
-                        .is_some_and(|text| !text.trim().is_empty())
-                {
-                    AuthenticationVerification::Authenticated
-                } else {
-                    AuthenticationVerification::Failed
-                };
-            }
-            AgentEvent::RequestFailed(failure) => {
-                return if failure.code == "GROK_AUTH_REQUIRED"
-                    || is_authentication_failure(&failure.message)
-                {
-                    AuthenticationVerification::AuthenticationRequired
-                } else {
-                    AuthenticationVerification::Failed
-                };
-            }
-            _ => {}
+        if let Some(verification) = terminal_authentication_verification(&event.event) {
+            return verification;
         }
+    }
+}
+
+fn terminal_authentication_verification(event: &AgentEvent) -> Option<AuthenticationVerification> {
+    match event {
+        // ACP reports request failures separately. A completed Turn therefore
+        // proves that the service accepted the current credentials even when
+        // the agent intentionally returns no user-visible text.
+        AgentEvent::AssistantCompleted(_) => Some(AuthenticationVerification::Authenticated),
+        AgentEvent::RequestFailed(failure) => Some(
+            if failure.code == "GROK_AUTH_REQUIRED" || is_authentication_failure(&failure.message) {
+                AuthenticationVerification::AuthenticationRequired
+            } else {
+                AuthenticationVerification::Failed
+            },
+        ),
+        _ => None,
     }
 }
 
@@ -478,5 +472,21 @@ fn check_working_directory() -> (StartupCheck, Option<std::path::PathBuf>) {
             },
             None,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{terminal_authentication_verification, AuthenticationVerification};
+    use crate::modules::agent_runtime::{events::AssistantCompletedPayload, AgentEvent};
+
+    #[test]
+    fn successful_empty_completion_proves_authentication() {
+        let event = AgentEvent::AssistantCompleted(AssistantCompletedPayload { full_text: None });
+
+        assert!(matches!(
+            terminal_authentication_verification(&event),
+            Some(AuthenticationVerification::Authenticated)
+        ));
     }
 }
