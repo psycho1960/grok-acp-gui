@@ -15,6 +15,8 @@
 //   - "unknown-method": responds to initialize but sends unknown notifications
 //   - "permission": sends a requestPermission after the first prompt
 //   - "plan":       sends an updatePlan after the first prompt
+//   - "grok-exit-plan": sends Grok's `_x.ai/exit_plan_mode` extension
+//                        after the first prompt
 //   - "plan-permission": sends updatePlan first, then a standard ACP v1
 //                        requestPermission whose toolCall.rawInput carries
 //                        a plain command (no private "operation" field)
@@ -518,6 +520,21 @@ function handlePrompt(id, params) {
     pendingGates.push('plan');
   }
 
+  if (SCENARIO === 'grok-exit-plan') {
+    pendingPlanResponseId = ++serverRequestCounter;
+    send({
+      jsonrpc: '2.0',
+      id: pendingPlanResponseId,
+      method: '_x.ai/exit_plan_mode',
+      params: {
+        sessionId: activeSessionId,
+        toolCallId: 'tool-plan-exit',
+        planContent: '1. Inspect the failing flow\n2. Apply the fix',
+      },
+    });
+    pendingGates.push('plan');
+  }
+
   if (SCENARIO === 'unknown-method') {
     // Send an unknown notification.
     sendNotification('some/future/method', { foo: 'bar' });
@@ -649,10 +666,19 @@ rl.on('line', (line) => {
       resolvedGates.add('permission');
     }
     if (msg.id === pendingPlanResponseId) {
-      const selected = msg.result?.outcome;
-      if (selected?.outcome !== 'selected' || typeof selected.optionId !== 'string') {
-        logErr('invalid plan response outcome');
-        process.exitCode = 3;
+      if (SCENARIO === 'grok-exit-plan') {
+        const approved = msg.result?.approved === true && msg.result?.abandoned === false;
+        const abandoned = msg.result?.approved === false && msg.result?.abandoned === true;
+        if (!approved && !abandoned) {
+          logErr('invalid Grok exit-plan response');
+          process.exitCode = 3;
+        }
+      } else {
+        const selected = msg.result?.outcome;
+        if (selected?.outcome !== 'selected' || typeof selected.optionId !== 'string') {
+          logErr('invalid plan response outcome');
+          process.exitCode = 3;
+        }
       }
       pendingPlanResponseId = null;
       resolvedGates.add('plan');

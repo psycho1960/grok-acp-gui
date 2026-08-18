@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
+import { createFakeDesktopBridge, fakeError } from "../../src/bridge/fake-bridge";
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
 import Composer from "../../src/features/conversation/Composer.vue";
 import { useConversationStore } from "../../src/features/conversation/conversation-store";
@@ -50,6 +50,59 @@ describe("GAG-021 composer dock", () => {
     expect(
       (w.get('[data-testid="composer-send"]').element as HTMLButtonElement).disabled,
     ).toBe(true);
+    w.unmount();
+  });
+
+  it("removes a previous Bridge send error as soon as the user edits the draft", async () => {
+    const w = mount(ConversationView, {
+      props: {
+        bridge: createFakeDesktopBridge({
+          onExecute(command) {
+            if (command.type === "turn.send") {
+              return {
+                success: "false",
+                error: fakeError({ message: "Bridge 不可用", retryable: true }),
+              };
+            }
+            return { success: "true", data: { acknowledged: command.type } };
+          },
+        }),
+        taskId: FIX_TASK,
+        snapshot: fixtureSessionSnapshot({
+          status: "idle",
+          cursor: 1,
+          events: [
+            {
+              type: "session.commands.updated",
+              taskId: FIX_TASK,
+              sessionId: FIX_SESSION,
+              seq: 1,
+              timestamp: "2026-04-01T12:00:01.000Z",
+              payload: {
+                commands: [
+                  {
+                    name: "session-info",
+                    description: "查看会话信息",
+                    acceptsInput: false,
+                  },
+                ],
+              },
+            } as TypedDesktopEvent,
+          ],
+        }),
+      },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    const input = w.get('[data-testid="composer-input"]');
+    await input.setValue("第一次发送");
+    await input.trigger("keydown", { key: "Enter" });
+    await flushPromises();
+    expect(w.get('[data-testid="send-error"]').text()).toBe("Bridge 不可用");
+
+    await input.setValue("/session-info");
+    await flushPromises();
+    expect(w.find('[data-testid="send-error"]').exists()).toBe(false);
     w.unmount();
   });
 

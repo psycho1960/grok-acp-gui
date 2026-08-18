@@ -2,7 +2,7 @@
 // Dedup: (sessionId, seq). Tool merge by toolCallId. No completed→running.
 
 import type { SessionId, TaskId, TypedDesktopEvent } from "../../bridge/types";
-import { mergeToolCall, normalizeToolCall } from "./tool-normalize";
+import { isExploreTool, mergeToolCall, normalizeToolCall } from "./tool-normalize";
 import type {
   ActivityItem,
   ArtifactItem,
@@ -93,6 +93,24 @@ function freezeStreamingAssistant(state: ConversationState): ConversationState {
   return { ...state, items, streamingAssistantId: null };
 }
 
+function stopActiveTools(state: ConversationState): ConversationState {
+  let changed = false;
+  const items = state.items.map((item) => {
+    if (
+      item.kind !== "tool" ||
+      (item.tool.phase !== "pending" && item.tool.phase !== "running")
+    ) {
+      return item;
+    }
+    changed = true;
+    return {
+      ...item,
+      tool: { ...item.tool, phase: "cancelled" as const },
+    };
+  });
+  return changed ? { ...state, items } : state;
+}
+
 function upsertItem(
   state: ConversationState,
   item: TimelineItem,
@@ -115,6 +133,24 @@ function replaceItem(
     ...state,
     items: state.items.map((i) => (i.id === id ? next : i)),
   };
+}
+
+/** Ends visible thought phases when the turn advances to another event. */
+function completeThinking(
+  state: ConversationState,
+  completedAt: string,
+): ConversationState {
+  const completedAtMs = Date.parse(completedAt);
+  if (!Number.isFinite(completedAtMs)) return state;
+  let changed = false;
+  const items = state.items.map((item) => {
+    if (item.kind !== "thinking" || item.durationMs != null) return item;
+    const startedAtMs = Date.parse(item.timestamp);
+    if (!Number.isFinite(startedAtMs)) return item;
+    changed = true;
+    return { ...item, durationMs: Math.max(0, completedAtMs - startedAtMs) };
+  });
+  return changed ? { ...state, items } : state;
 }
 
 function markSeen(
@@ -150,9 +186,57 @@ function markSeen(
 function applyMessageDelta(
   state: ConversationState,
   event: Extract<TypedDesktopEvent, { type: "message.delta" }>,
+  allowHistoricalUserMessage = false,
 ): ConversationState {
   let next = markSeen(state, event.sessionId, event.seq);
-  const { role, text, toolCall } = event.payload;
+  const { role, text, toolCall, completed, fullText } = event.payload;
+  const hasTextChunk = typeof text === "string" && text.length > 0;
+  const hasVisibleText = hasTextChunk && text.trim().length > 0;
+
+  // The live bridge represents AssistantCompleted as a final message.delta,
+  // while reconnect snapshots represent the same fact as task.state=idle.
+  // Treat both shapes as terminal so the header and Composer cannot remain
+  // stuck in running after the ACP session has already returned to idle.
+  if (completed === true) {
+    const finalText =
+      typeof fullText === "string" && fullText.trim().length > 0
+        ? fullText
+        : typeof text === "string" && text.trim().length > 0
+          ? text
+          : "";
+    next = completeThinking(next, event.timestamp);
+    if (finalText.length > 0) {
+      const existing = next.streamingAssistantId
+        ? next.items.find((item) => item.id === next.streamingAssistantId)
+        : undefined;
+      if (existing?.kind === "assistant") {
+        next = replaceItem(next, existing.id, {
+          ...existing,
+          seq: event.seq,
+          timestamp: event.timestamp,
+          text: finalText,
+          streaming: false,
+          frozen: true,
+        });
+      } else {
+        const id = itemId("assistant", event.seq);
+        next = upsertItem(next, {
+          id,
+          kind: "assistant",
+          seq: event.seq,
+          sessionId: event.sessionId,
+          timestamp: event.timestamp,
+          eventKey: eventKey(event.sessionId, event.seq),
+          text: finalText,
+          streaming: false,
+          frozen: true,
+        });
+      }
+    }
+    next = stopActiveTools(next);
+    next = freezeStreamingAssistant(next);
+    return { ...next, status: "idle" };
+  }
 
   if (role === "user" && typeof text === "string" && text.length > 0) {
     const visibleText = stripInternalVisualContext(text);
@@ -163,8 +247,15 @@ function applyMessageDelta(
           item.kind === "user" &&
           item.text === visibleText &&
           item.eventKey.startsWith("user:") &&
+          item.pending === true &&
           !item.failed,
       );
+    // Live user chunks are server echoes. The Composer is the only source of
+    // a new top-level user turn, so an unmatched echo may belong to a nested
+    // agent session and must not become a user bubble. Snapshot replay is the
+    // one exception because it reconstructs authoritative history.
+    if (!optimistic && !allowHistoricalUserMessage) return next;
+    next = completeThinking(next, event.timestamp);
     const confirmed: UserMessageItem = {
       id: optimistic?.id ?? itemId("user", event.seq),
       kind: "user",
@@ -181,6 +272,10 @@ function applyMessageDelta(
     return optimistic
       ? replaceItem(next, optimistic.id, confirmed)
       : upsertItem(next, confirmed);
+  }
+
+  if (toolCall != null || hasVisibleText) {
+    next = completeThinking(next, event.timestamp);
   }
 
   if (toolCall != null) {
@@ -231,7 +326,7 @@ function applyMessageDelta(
     return upsertItem(next, toolItem);
   }
 
-  if (typeof text === "string" && text.length > 0) {
+  if (hasTextChunk) {
     if (next.streamingAssistantId) {
       const existing = next.items.find(
         (i) => i.id === next.streamingAssistantId,
@@ -248,6 +343,11 @@ function applyMessageDelta(
         return replaceItem(next, existing.id, updated);
       }
     }
+
+    // Providers can emit separator-only chunks around tool calls. Preserve
+    // them inside an existing message, but never let them create an empty
+    // Markdown bubble with only a Copy button.
+    if (!hasVisibleText) return next;
 
     const id = itemId("assistant", event.seq);
     const assistant: AssistantMessageItem = {
@@ -276,6 +376,17 @@ function applyActivity(
   const { kind, detail, code, retryable } = event.payload;
 
   if (kind === "thinking" || kind === "thought") {
+    const active = [...next.items]
+      .reverse()
+      .find((item) => item.kind === "thinking" && item.durationMs == null);
+    if (active && active.kind === "thinking") {
+      return replaceItem(next, active.id, {
+        ...active,
+        seq: event.seq,
+        timestamp: event.timestamp,
+        summary: `${active.summary}${detail || ""}`,
+      });
+    }
     const id = itemId("thinking", event.seq);
     const thinking = {
       id,
@@ -291,6 +402,7 @@ function applyActivity(
   }
 
   if (kind === "error" || kind === "failed") {
+    next = completeThinking(next, event.timestamp);
     const err: ErrorItem = {
       id: itemId("error", event.seq),
       kind: "error",
@@ -325,16 +437,7 @@ function applyTaskState(
   event: Extract<TypedDesktopEvent, { type: "task.state" }>,
 ): ConversationState {
   let next = markSeen(state, event.sessionId, event.seq);
-  const status = mapTaskStatus(event.payload.status);
-  next = { ...next, status, taskId: event.taskId, sessionId: event.sessionId };
-
-  if (
-    status === "idle" ||
-    status === "error" ||
-    status === "waiting_permission"
-  ) {
-    next = freezeStreamingAssistant(next);
-  }
+  next = projectTaskState(next, event);
 
   // Terminal interrupt → system line
   if (event.payload.status === "interrupted") {
@@ -378,6 +481,28 @@ function applyTaskState(
     next = upsertItem(next, stopped);
   }
 
+  return next;
+}
+
+function projectTaskState(
+  state: ConversationState,
+  event: Extract<TypedDesktopEvent, { type: "task.state" }>,
+): ConversationState {
+  let next = state;
+  const status = mapTaskStatus(event.payload.status);
+  if (status !== "running") next = completeThinking(next, event.timestamp);
+  if (status === "error" || status === "idle") {
+    next = stopActiveTools(next);
+  }
+  next = { ...next, status, taskId: event.taskId, sessionId: event.sessionId };
+
+  if (
+    status === "idle" ||
+    status === "error" ||
+    status === "waiting_permission"
+  ) {
+    next = freezeStreamingAssistant(next);
+  }
   return next;
 }
 
@@ -586,6 +711,7 @@ function applyUnknownSessionEvent(
 function applySequencedEvent(
   state: ConversationState,
   event: TypedDesktopEvent,
+  allowHistoricalUserMessage = false,
 ): ConversationState {
   if (!("sessionId" in event) || event.sessionId == null || event.seq == null) {
     return state;
@@ -600,7 +726,7 @@ function applySequencedEvent(
 
   switch (event.type) {
     case "message.delta":
-      return applyMessageDelta(next, event);
+      return applyMessageDelta(next, event, allowHistoricalUserMessage);
     case "activity.updated":
       return applyActivity(next, event);
     case "task.state":
@@ -635,7 +761,10 @@ function applySequencedEvent(
 export function applyEvent(
   state: ConversationState,
   event: TypedDesktopEvent,
+  options: { acceptUnmatchedUserMessages?: boolean } = {},
 ): ConversationState {
+  const acceptUnmatchedUserMessages =
+    options.acceptUnmatchedUserMessages ?? true;
   // Non-session diagnostics — only surface as system if we have an open session
   if (event.type === "diagnostic.notice") {
     if (!state.sessionId) return state;
@@ -666,10 +795,30 @@ export function applyEvent(
   }
 
   if (event.type === "runtime.updated") {
-    if (event.payload.status === "unavailable") {
-      return { ...state, status: "offline" };
+    if (
+      event.payload.sessionId &&
+      state.sessionId &&
+      event.payload.sessionId !== state.sessionId
+    ) {
+      return state;
     }
-    if (state.status === "offline" || state.status === "disconnected") {
+    if (event.payload.status === "unavailable") {
+      let next = completeThinking(state, event.timestamp);
+      next = freezeStreamingAssistant(next);
+      next = stopActiveTools(next);
+      return { ...next, status: "offline" };
+    }
+    if (
+      event.payload.status === "exited" ||
+      event.payload.status === "disconnected" ||
+      event.payload.status === "stopped"
+    ) {
+      let next = completeThinking(state, event.timestamp);
+      next = freezeStreamingAssistant(next);
+      next = stopActiveTools(next);
+      return { ...next, status: "disconnected" };
+    }
+    if (state.status === "offline" && event.payload.status === "ready") {
       return { ...state, status: "idle" };
     }
     return state;
@@ -699,12 +848,26 @@ export function applyEvent(
   if (event.seq > expected) {
     const pendingEvents = new Map(bound.pendingEvents);
     pendingEvents.set(event.seq, event);
-    return {
+    const waitingForSnapshot = {
       ...bound,
       pendingEvents,
       needsSnapshotRefresh: true,
       gapFromSeq: expected,
     };
+    // A terminal task fact must stop the visible turn immediately even when
+    // an earlier presentation event was missed. Keep the event pending so a
+    // later snapshot can still rebuild the complete, ordered audit trail.
+    if (
+      event.type === "task.state" &&
+      (event.payload.status === "failed" ||
+        event.payload.status === "interrupted" ||
+        event.payload.status === "conflicted" ||
+        event.payload.status === "merged" ||
+        event.payload.status === "archived")
+    ) {
+      return projectTaskState(waitingForSnapshot, event);
+    }
+    return waitingForSnapshot;
   }
   if (event.seq < expected) {
     return {
@@ -714,12 +877,20 @@ export function applyEvent(
     };
   }
 
-  let next = applySequencedEvent(bound, event);
+  let next = applySequencedEvent(
+    bound,
+    event,
+    acceptUnmatchedUserMessages,
+  );
   const pendingEvents = new Map(next.pendingEvents);
   let queued = pendingEvents.get(next.cursor.lastSeq + 1);
   while (queued) {
     pendingEvents.delete(next.cursor.lastSeq + 1);
-    next = applySequencedEvent({ ...next, pendingEvents }, queued);
+    next = applySequencedEvent(
+      { ...next, pendingEvents },
+      queued,
+      acceptUnmatchedUserMessages,
+    );
     queued = pendingEvents.get(next.cursor.lastSeq + 1);
   }
 
@@ -822,7 +993,7 @@ export function applySnapshot(
     ) {
       return state;
     }
-    return applySequencedEvent(state, event);
+    return applySequencedEvent(state, event, true);
   }, next);
   next = freezeStreamingAssistant(next);
   next = {
@@ -832,7 +1003,6 @@ export function applySnapshot(
       snapshotSeq: snapshot.cursor,
     },
     title: snapshot.title,
-    status: snapshot.status,
     attempt: snapshot.attempt ?? next.attempt,
     needsSnapshotRefresh: false,
     gapFromSeq: null,
@@ -991,12 +1161,7 @@ export function foldExploreTools(items: TimelineItem[]): TimelineItem[] {
   };
 
   for (const item of items) {
-    if (
-      item.kind === "tool" &&
-      (item.tool.kind === "read" ||
-        item.tool.kind === "search" ||
-        item.tool.foldGroup === "explore")
-    ) {
+    if (item.kind === "tool" && isExploreTool(item.tool)) {
       batch.push(item);
     } else {
       flush();

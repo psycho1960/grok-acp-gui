@@ -1,13 +1,14 @@
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
+import { createFakeDesktopBridge, fakeError } from "../../src/bridge/fake-bridge";
 import type { DesktopCommand } from "../../src/bridge/types";
 import ConversationView from "../../src/features/conversation/ConversationView.vue";
 import {
   FIX_SESSION,
   FIX_TASK,
   fixtureActivity,
+  fixtureAssistantDelta,
   fixtureChanges,
   fixtureSessionSnapshot,
   fixtureTaskState,
@@ -201,8 +202,68 @@ describe("GAG-021 hybrid timeline", () => {
 
     const processing = w.get('[data-testid="agent-processing"]');
     expect(processing.text()).toContain("正在处理");
+    expect(processing.classes()).toContain("surface-card");
     expect(processing.attributes("role")).toBe("status");
     expect(processing.attributes("aria-live")).toBe("polite");
+    w.unmount();
+  });
+
+  it("stops showing a reply when a stale running snapshot contains a terminal event", async () => {
+    const w = await mountConversation({
+      status: "running",
+      cursor: 3,
+      events: [
+        fixtureTaskState(1, "running"),
+        fixtureToolDelta(2, {
+          toolCallId: "tc-plan-stopped",
+          title: "写入计划",
+          kind: "edit",
+          status: "running",
+        }),
+        fixtureTaskState(3, "interrupted", {
+          reason: "session disconnected",
+        }),
+      ],
+    });
+
+    expect(w.find('[data-testid="agent-processing"]').exists()).toBe(false);
+    expect(w.text()).not.toContain("Agent 正在回复");
+    expect(w.get('[data-testid="resume-session"]').text()).toContain("恢复会话");
+    w.unmount();
+  });
+
+  it("localizes an authentication failure and keeps recovery beside the latest error", async () => {
+    const commands: DesktopCommand[] = [];
+    const w = await mountConversation(
+      {
+        status: "error",
+        cursor: 2,
+        events: [],
+        items: [
+          itemBase("user", 1, { text: "回归测试" }),
+          itemBase("error", 2, {
+            code: "GROK_AUTH_REQUIRED",
+            message:
+              "[GROK_AUTH_REQUIRED] Grok authentication is required. Run 'grok login', then retry.",
+            retryable: true,
+          }),
+        ],
+      },
+      (command) => {
+        commands.push(command);
+        return { success: "true", data: { acknowledged: command.type } };
+      },
+    );
+
+    const error = w.get('[data-testid="error-item"]');
+    expect(error.text()).toContain("Grok 未登录");
+    expect(error.text()).toContain("grok login");
+    expect(w.findAll('[data-testid="resume-session"]')).toHaveLength(1);
+    expect(w.get('[data-testid="conversation-header"]').text()).not.toContain("恢复会话");
+
+    await error.get('[data-testid="resume-session"]').trigger("click");
+    await flushPromises();
+    expect(commands).toContainEqual(expect.objectContaining({ type: "session.resume" }));
     w.unmount();
   });
 
@@ -220,13 +281,81 @@ describe("GAG-021 hybrid timeline", () => {
       ],
     });
     const toggle = w.get('[data-testid="thinking-toggle"]');
+    expect(w.get('[data-testid="thinking-card"]').classes()).not.toContain("surface-card");
     expect(toggle.text()).toContain("思考中");
     expect(toggle.text()).not.toContain("Thinking");
+    expect(toggle.text()).not.toContain("正在规划方案");
     expect(w.find('[data-testid="agent-processing"]').exists()).toBe(false);
     expect(w.find('[data-testid="thinking-body"]').exists()).toBe(false);
     await toggle.trigger("click");
     await flushPromises();
     expect(w.get('[data-testid="thinking-body"]').text()).toBe("正在规划方案");
+    w.unmount();
+  });
+
+  it("merges consecutive Grok Build thought chunks into one expandable work card", async () => {
+    const w = await mountConversation({
+      cursor: 3,
+      items: undefined,
+      events: [
+        fixtureActivity(1, "thinking", "先检查工作区。"),
+        fixtureActivity(2, "thinking", "然后读取项目说明。"),
+        fixtureAssistantDelta(3, "我已经确认项目结构。"),
+      ],
+    });
+
+    expect(w.findAll('[data-testid="thinking-card"]')).toHaveLength(1);
+    const toggle = w.get('[data-testid="thinking-toggle"]');
+    expect(toggle.text()).toContain("已思考");
+    expect(toggle.text()).not.toContain("先检查工作区");
+    expect(toggle.text()).not.toContain("然后读取项目说明");
+    await toggle.trigger("click");
+    await flushPromises();
+    expect(w.get('[data-testid="thinking-body"]').text()).toBe(
+      "先检查工作区。然后读取项目说明。",
+    );
+    w.unmount();
+  });
+
+  it("collapses interleaved thinking and tools into one process activity row", async () => {
+    const w = await mountConversation({
+      cursor: 6,
+      items: undefined,
+      events: [
+        fixtureActivity(1, "thinking", "先查看项目。"),
+        fixtureToolDelta(2, {
+          toolCallId: "read-1",
+          title: "read_file",
+          kind: "read",
+          status: "completed",
+          locations: ["D:\\codex\\grok acp gui\\src\\App.vue"],
+        }),
+        fixtureActivity(3, "thinking", "再运行测试。"),
+        fixtureToolDelta(4, {
+          toolCallId: "exec-1",
+          title: "npm test",
+          kind: "execute",
+          status: "completed",
+          durationMs: 1200,
+        }),
+        fixtureActivity(5, "thinking", "整理结论。"),
+        fixtureAssistantDelta(6, "检查完成。"),
+      ],
+    });
+
+    expect(w.findAll('[data-testid="process-activity"]')).toHaveLength(1);
+    const process = w.get('[data-testid="process-activity"]');
+    expect(process.text()).toContain("过程活动");
+    expect(process.text()).toContain("查看 1");
+    expect(process.text()).toContain("执行 1");
+    expect(w.find('[data-testid="tool-card"]').exists()).toBe(false);
+    expect(w.find('[data-testid="thinking-card"]').exists()).toBe(false);
+
+    await process.get('[data-testid="process-activity-toggle"]').trigger("click");
+    await flushPromises();
+    expect(w.findAll('[data-testid="tool-card"]')).toHaveLength(2);
+    expect(w.findAll('[data-testid="thinking-card"]')).toHaveLength(3);
+    expect(w.get('[data-testid="assistant-message"]').text()).toContain("检查完成");
     w.unmount();
   });
 
@@ -250,6 +379,87 @@ describe("GAG-021 hybrid timeline", () => {
     });
     expect(w.get('[data-testid="tool-card"]').text()).toContain("已查看 2 项");
     expect(w.get('[data-testid="tool-card"]').text()).not.toContain("Explored");
+    w.unmount();
+  });
+
+  it("renders Ask as a user decision card and submits the selected answer", async () => {
+    const commands: DesktopCommand[] = [];
+    const w = await mountConversation(
+      {
+        cursor: 1,
+        status: "idle",
+        events: [
+          fixtureToolDelta(1, {
+            toolCallId: "ask-1",
+            title: "Ask: 是否包含模拟器 E2E？",
+            kind: "ask",
+            status: "running",
+            inputSummary: JSON.stringify({
+              question: "是否包含模拟器 E2E？",
+              choices: ["包含", "暂不包含"],
+            }),
+            inputRedacted: false,
+          }),
+        ],
+      },
+      (command) => {
+        commands.push(command);
+        return { success: "true", data: { acknowledged: true } };
+      },
+    );
+
+    const card = w.get('[data-testid="ask-card"]');
+    expect(card.text()).toContain("需要你的确认");
+    expect(card.text()).toContain("是否包含模拟器 E2E？");
+    expect(card.findAll('[data-testid="ask-choice"]').map((item) => item.text())).toEqual([
+      "包含",
+      "暂不包含",
+    ]);
+
+    await card.findAll('[data-testid="ask-choice"]')[0]!.trigger("click");
+    await flushPromises();
+    expect(card.text()).toContain("已提交：包含");
+    expect(commands).toContainEqual(
+      expect.objectContaining({
+        type: "turn.send",
+        payload: expect.objectContaining({ message: "包含" }),
+      }),
+    );
+    w.unmount();
+  });
+
+  it("keeps Ask choices available when the answer fails to send", async () => {
+    const w = await mountConversation(
+      {
+        cursor: 1,
+        status: "idle",
+        events: [
+          fixtureToolDelta(1, {
+            toolCallId: "ask-failed",
+            title: "Ask: 是否继续？",
+            kind: "ask",
+            status: "running",
+            inputSummary: JSON.stringify({ question: "是否继续？", choices: ["继续"] }),
+            inputRedacted: false,
+          }),
+        ],
+      },
+      (command) =>
+        command.type === "turn.send"
+          ? {
+              success: "false",
+              error: fakeError({ message: "Bridge 暂时不可用", retryable: true }),
+            }
+          : { success: "true", data: { acknowledged: true } },
+    );
+
+    const choice = w.get('[data-testid="ask-choice"]');
+    await choice.trigger("click");
+    await flushPromises();
+
+    expect(w.get('[data-testid="ask-card"]').text()).not.toContain("已提交：");
+    expect(choice.attributes("disabled")).toBeUndefined();
+    expect(w.text()).toContain("Bridge 暂时不可用");
     w.unmount();
   });
 
@@ -292,6 +502,92 @@ describe("GAG-021 hybrid timeline", () => {
     expect(cluster.get('[data-testid="tool-toggle"]').attributes("aria-label")).toMatch(/展开|收起/);
     expect(card.text()).not.toContain("复制摘要");
     expect(card.text()).not.toContain("展开");
+    w.unmount();
+  });
+
+  it("keeps a collapsed process row to a short path instead of the raw input dump", async () => {
+    const w = await mountConversation({
+      cursor: 1,
+      events: [
+        fixtureToolDelta(1, {
+          toolCallId: "read-1",
+          title: "read_file",
+          kind: "read",
+          status: "completed",
+          locations: ["D:\\codex\\grok acp gui\\docs\\02-UI-UX-DESIGN.md"],
+          inputSummary:
+            '{"path":"D:\\\\codex\\\\grok acp gui\\\\docs\\\\02-UI-UX-DESIGN.md","limit":100}',
+          resultSummary: "ok",
+        }),
+      ],
+    });
+    const card = w.get('[data-testid="tool-card"]');
+    expect(card.classes()).not.toContain("surface-card");
+    expect(card.text()).toContain("read_file");
+    expect(card.text()).toContain("docs/02-UI-UX-DESIGN.md");
+    expect(card.text()).not.toContain("limit");
+    expect(card.text()).not.toContain('{"path"');
+    await card.get('[data-testid="tool-toggle"]').trigger("click");
+    await flushPromises();
+    expect(w.get('[data-testid="tool-input-summary"]').text()).toContain("limit");
+    w.unmount();
+  });
+
+  it("packs process rows tighter than the old 128px work-card slot", async () => {
+    const w = await mountConversation({
+      cursor: 3,
+      events: [
+        fixtureToolDelta(1, {
+          toolCallId: "a",
+          title: "list_dir",
+          kind: "other",
+          status: "completed",
+        }),
+        fixtureActivity(2, "thinking", "下一步"),
+        fixtureToolDelta(3, {
+          toolCallId: "b",
+          title: "npm test",
+          kind: "execute",
+          status: "completed",
+        }),
+      ],
+    });
+    const rows = w.findAll(".virtual-row");
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      const style = row.attributes("style") ?? "";
+      const minHeight = Number(/min-height:\s*(\d+)px/.exec(style)?.[1] ?? 999);
+      expect(minHeight).toBeLessThanOrEqual(48);
+    }
+    w.unmount();
+  });
+
+  it("folds consecutive Grok Build read-only tool titles as one explore batch", async () => {
+    const w = await mountConversation({
+      cursor: 3,
+      events: [
+        fixtureToolDelta(1, {
+          toolCallId: "a",
+          title: "list_dir",
+          kind: "other",
+          status: "completed",
+        }),
+        fixtureToolDelta(2, {
+          toolCallId: "b",
+          title: "grep",
+          kind: "other",
+          status: "completed",
+        }),
+        fixtureToolDelta(3, {
+          toolCallId: "c",
+          title: "read_file",
+          kind: "other",
+          status: "completed",
+        }),
+      ],
+    });
+    expect(w.findAll('[data-testid="tool-card"]')).toHaveLength(1);
+    expect(w.get('[data-testid="tool-card"]').text()).toContain("已查看 3 项");
     w.unmount();
   });
 

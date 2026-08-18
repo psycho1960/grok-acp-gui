@@ -2120,6 +2120,20 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
             )
         }
 
+        AgentEvent::Thinking(p) => Some(
+            super::events::SessionEvent::new(
+                super::events::event_types::ACTIVITY_UPDATED,
+                super::types::TaskId::new(""),
+                session_id,
+                seq,
+                serde_json::json!({
+                    "kind": "thinking",
+                    "detail": p.summary,
+                }),
+            )
+            .build(),
+        ),
+
         AgentEvent::AssistantCompleted(p) => {
             // AssistantCompleted also maps to message.delta with the
             // full text; the Renderer uses it to finalise the message.
@@ -2326,6 +2340,7 @@ pub fn map_agent_event(event: TimestampedEvent) -> Option<DesktopEvent> {
             // Emit a runtime.updated event with the exit info.
             let payload = serde_json::json!({
                 "status": "exited",
+                "sessionId": session_id,
                 "reason": p.reason,
                 "code": p.code,
             });
@@ -2413,6 +2428,50 @@ mod tests {
             "已更新 src/App.vue"
         );
         assert_eq!(completed.payload["toolCall"]["durationMs"], 1500);
+    }
+
+    #[test]
+    fn private_thinking_maps_to_a_safe_progress_card_event() {
+        use crate::modules::agent_runtime::events::ThinkingPayload;
+        use crate::modules::agent_runtime::EventMeta;
+
+        let mapped = map_agent_event(TimestampedEvent {
+            meta: EventMeta::new(super::super::types::SessionId::new("session-thinking"), 7),
+            event: AgentEvent::Thinking(ThinkingPayload {
+                summary: "正在分析下一步".into(),
+            }),
+        })
+        .expect("thinking progress must be visible to the renderer");
+
+        assert_eq!(
+            mapped.event_type,
+            super::super::events::event_types::ACTIVITY_UPDATED
+        );
+        assert_eq!(mapped.payload["kind"], "thinking");
+        assert_eq!(mapped.payload["detail"], "正在分析下一步");
+    }
+
+    #[test]
+    fn process_exit_runtime_update_keeps_session_identity() {
+        use crate::modules::agent_runtime::events::ProcessExitedPayload;
+        use crate::modules::agent_runtime::EventMeta;
+
+        let mapped = map_agent_event(TimestampedEvent {
+            meta: EventMeta::new(super::super::types::SessionId::new("session-exited"), 9),
+            event: AgentEvent::ProcessExited(ProcessExitedPayload {
+                code: Some(1),
+                signal: None,
+                reason: "session disconnected".into(),
+            }),
+        })
+        .expect("process exit must be visible to the renderer");
+
+        assert_eq!(
+            mapped.event_type,
+            super::super::events::event_types::RUNTIME_UPDATED
+        );
+        assert_eq!(mapped.payload["status"], "exited");
+        assert_eq!(mapped.payload["sessionId"], "session-exited");
     }
 
     #[tokio::test]

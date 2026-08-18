@@ -26,6 +26,7 @@ export type TimelineItemKind =
   | "assistant"
   | "thinking"
   | "tool"
+  | "process"
   | "activity"
   | "error"
   | "system"
@@ -148,6 +149,24 @@ export interface ToolItem extends TimelineItemBase {
   expanded: boolean;
 }
 
+export type ProcessActivityEntry = ThinkingItem | ToolItem | ActivityItem;
+
+/** Presentation-only fold of noisy work events. The source items stay intact. */
+export interface ProcessActivityItem extends TimelineItemBase {
+  kind: "process";
+  entries: ProcessActivityEntry[];
+  expanded: boolean;
+  phase: "running" | "completed" | "attention";
+  durationMs?: number;
+  counts: {
+    total: number;
+    thinking: number;
+    reads: number;
+    executes: number;
+    failed: number;
+  };
+}
+
 export interface ActivityItem extends TimelineItemBase {
   kind: "activity";
   activityKind: string;
@@ -192,6 +211,7 @@ export type TimelineItem =
   | AssistantMessageItem
   | ThinkingItem
   | ToolItem
+  | ProcessActivityItem
   | ActivityItem
   | ErrorItem
   | SystemItem

@@ -26,6 +26,7 @@ export interface ConversationTurn {
 const props = defineProps<{
   title: string;
   status: ConversationRunStatus;
+  completed?: boolean;
   attempt?: number;
   needsRefresh?: boolean;
   modes?: ModeInfo[];
@@ -33,6 +34,7 @@ const props = defineProps<{
   selectedWorkspaceStrategy?: WorkspaceStrategy | null;
   settingsDisabled?: boolean;
   turns?: ConversationTurn[];
+  resumeInTimeline?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -65,7 +67,7 @@ function statusIcon(
 
 function statusLabel(s: ConversationRunStatus): string {
   const map: Record<ConversationRunStatus, string> = {
-    idle: "空闲",
+    idle: props.completed ? "已完成" : "空闲",
     running: "运行中",
     waiting_permission: "等待权限",
     waiting_plan: "等待计划审批",
@@ -296,11 +298,16 @@ onBeforeUnmount(() => {
               </template>
             </HeaderSelect>
           </div>
-          <Tooltip :text="modeHelpFor(selectedMode)" placement="bottom">
-            <IconButton label="模式说明" data-testid="conversation-mode-help">
-              <NamedIcon name="help" :size="14" />
-            </IconButton>
-          </Tooltip>
+          <span
+            class="mode-help-control"
+            data-testid="conversation-mode-help-control"
+          >
+            <Tooltip :text="modeHelpFor(selectedMode)" placement="bottom">
+              <IconButton label="模式说明" data-testid="conversation-mode-help">
+                <NamedIcon name="help" :size="14" />
+              </IconButton>
+            </Tooltip>
+          </span>
         </div>
         <div
           class="session-badge"
@@ -332,7 +339,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <Button
-        v-if="status === 'error' || status === 'disconnected'"
+        v-if="status === 'disconnected' || (status === 'error' && !resumeInTimeline)"
         variant="primary"
         data-testid="resume-session"
         @click="emit('resume')"
@@ -361,6 +368,8 @@ onBeforeUnmount(() => {
   padding: var(--space-3);
   border-bottom: 1px solid var(--ctp-surface0);
   background: var(--ctp-mantle);
+  position: relative;
+  z-index: 6;
 }
 .left,
 .right {
@@ -380,12 +389,26 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
-  align-items: end;
+  align-items: center;
 }
 .mode-field {
   display: flex;
-  gap: var(--space-1);
-  align-items: end;
+  gap: var(--space-2);
+  align-items: center;
+}
+.mode-help-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding: 2px;
+  color: var(--ctp-subtext0);
+  background: var(--ctp-surface0);
+  border: 1px solid var(--ctp-surface1);
+  border-radius: 999px;
+}
+.mode-help-control :deep(.icon-button) {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
 }
 .settings-select {
   min-width: 132px;
@@ -407,6 +430,7 @@ onBeforeUnmount(() => {
 }
 .session-badge .is-visually-hidden {
   position: absolute;
+  min-width: 0;
   width: 1px;
   height: 1px;
   overflow: hidden;

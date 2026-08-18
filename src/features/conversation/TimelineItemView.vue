@@ -1,11 +1,17 @@
 <script setup lang="ts">
 import SafeMarkdown from "./SafeMarkdown.vue";
 import ToolCard from "./ToolCard.vue";
+import AskCard from "./AskCard.vue";
 import ArtifactSlot from "./slots/ArtifactSlot.vue";
 import PermissionSlot from "./slots/PermissionSlot.vue";
 import PlanSlot from "./slots/PlanSlot.vue";
+import ProcessActivity from "./ProcessActivity.vue";
+import NamedIcon from "../../shared/ui/NamedIcon.vue";
+import Button from "../../shared/ui/Button.vue";
+import ErrorState from "../../shared/ui/ErrorState.vue";
 import { ref } from "vue";
 import { formatDuration } from "./tool-normalize";
+import { isAskTool } from "./tool-normalize";
 import type { TimelineItem } from "./types";
 
 const props = defineProps<{
@@ -15,6 +21,7 @@ const props = defineProps<{
   thinkingDone?: boolean;
   previewUrls?: Record<string, string>;
   previewMissing?: Record<string, boolean>;
+  canResume?: boolean;
 }>();
 
 const brokenThumbs = ref<Record<string, boolean>>({});
@@ -35,10 +42,19 @@ function onThumbError(artifactId: string): void {
 const emit = defineEmits<{
   toggleTool: [id: string];
   toggleThinking: [id: string];
+  toggleProcess: [id: string];
+  answerAsk: [answer: string, complete: (success: boolean) => void];
   resolvePermission: [itemId: string, optionId: string];
   resolvePlan: [itemId: string, optionId: string];
   openArtifact: [artifactId: string];
+  resume: [];
 }>();
+
+function errorDetail(item: Extract<TimelineItem, { kind: "error" }>): string {
+  const message = item.message.trim();
+  if (!item.code || message.includes(item.code)) return message;
+  return `[${item.code}] ${message}`;
+}
 
 function formatTime(iso: string): string {
   try {
@@ -148,22 +164,45 @@ function formatRelativeTime(iso: string): string {
       </div>
     </template>
 
+    <template v-else-if="item.kind === 'process'">
+      <ProcessActivity
+        :item="item"
+        @toggle="emit('toggleProcess', $event)"
+        @toggle-tool="emit('toggleTool', $event)"
+        @toggle-thinking="emit('toggleThinking', $event)"
+      />
+    </template>
+
     <template v-else-if="item.kind === 'thinking'">
-      <button
-        type="button"
-        class="thinking"
-        data-testid="thinking-toggle"
-        :aria-expanded="item.expanded"
-        @click="emit('toggleThinking', item.id)"
-      >
-        {{ thinkingDone ? "已思考" : "思考中" }}
-        <span v-if="item.durationMs != null" class="dur">{{ formatDuration(item.durationMs) }}</span>
-      </button>
-      <p v-if="item.expanded && item.summary" class="thinking-body" data-testid="thinking-body">{{ item.summary }}</p>
+      <article class="thinking-card" data-testid="thinking-card">
+        <button
+          type="button"
+          class="thinking"
+          data-testid="thinking-toggle"
+          :aria-expanded="item.expanded"
+          @click="emit('toggleThinking', item.id)"
+        >
+          <NamedIcon
+            class="thinking-icon"
+            :name="thinkingDone ? 'check' : 'loader'"
+            :size="14"
+          />
+          <span class="thinking-label">{{ thinkingDone ? "已思考" : "思考中" }}</span>
+          <span v-if="item.durationMs != null" class="dur">{{ formatDuration(item.durationMs) }}</span>
+          <NamedIcon :name="item.expanded ? 'chevronDown' : 'chevronRight'" :size="14" />
+        </button>
+        <p v-if="item.expanded && item.summary" class="thinking-body" data-testid="thinking-body">{{ item.summary }}</p>
+      </article>
     </template>
 
     <template v-else-if="item.kind === 'tool'">
+      <AskCard
+        v-if="isAskTool(item.tool)"
+        :tool="item.tool"
+        @answer="(answer, complete) => emit('answerAsk', answer, complete)"
+      />
       <ToolCard
+        v-else
         :tool="item.tool"
         :expanded="item.expanded"
         @toggle="emit('toggleTool', item.id)"
@@ -183,10 +222,20 @@ function formatRelativeTime(iso: string): string {
     </template>
 
     <template v-else-if="item.kind === 'error'">
-      <div class="bubble error" role="alert" data-testid="error-item">
-        <code v-if="item.code" class="error-code">{{ item.code }}</code>
-        <p>{{ item.message }}</p>
-      </div>
+      <ErrorState
+        class="timeline-error"
+        data-testid="error-item"
+        :detail="errorDetail(item)"
+      >
+        <Button
+          v-if="canResume && item.retryable !== false"
+          variant="primary"
+          data-testid="resume-session"
+          @click="emit('resume')"
+        >
+          恢复会话
+        </Button>
+      </ErrorState>
     </template>
 
     <template v-else-if="item.kind === 'activity' && item.activityKind === 'changes'">
@@ -215,6 +264,14 @@ function formatRelativeTime(iso: string): string {
   padding: var(--space-2) var(--space-3);
   border-left: 2px solid transparent;
 }
+.timeline-item.kind-thinking,
+.timeline-item.kind-tool,
+.timeline-item.kind-process,
+.timeline-item.kind-activity,
+.timeline-item.kind-system {
+  padding-top: 2px;
+  padding-bottom: 2px;
+}
 .relative-time {
   display: block;
   margin-bottom: var(--space-1);
@@ -229,7 +286,7 @@ function formatRelativeTime(iso: string): string {
   max-width: min(72ch, 86%);
 }
 .prose.assistant {
-  max-width: 72ch;
+  max-width: min(78rem, 82%);
   padding: 0;
   background: transparent;
   border: 0;
@@ -264,15 +321,7 @@ function formatRelativeTime(iso: string): string {
 .pending-whisper {
   text-align: right;
 }
-.bubble.error {
-  border-color: var(--ctp-red);
-  color: var(--ctp-red);
-}
-.error-code {
-  display: block;
-  margin-bottom: var(--space-1);
-  font-family: var(--font-mono);
-}
+.timeline-error { width: 100%; }
 .bubble.unknown {
   border-style: dashed;
 }
@@ -336,18 +385,29 @@ function formatRelativeTime(iso: string): string {
 .status-line.error {
   color: var(--ctp-red);
 }
+.thinking-card { min-width: 0; padding: 2px 0; }
 .thinking {
-  min-height: 32px;
+  display: flex;
+  width: 100%;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: 28px;
   padding: 0;
   color: var(--ctp-overlay0);
   background: transparent;
   border: 0;
   cursor: pointer;
+  text-align: left;
 }
+.thinking-icon { flex-shrink: 0; }
+.thinking-label { color: var(--ctp-subtext0); font-weight: 500; }
+.dur { margin-left: auto; flex-shrink: 0; }
 .thinking-body {
-  margin: var(--space-1) 0 0;
+  margin: 0 0 0 1.4rem;
   color: var(--ctp-overlay1);
   font-size: var(--font-small);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .system-line,
 .change-whisper {

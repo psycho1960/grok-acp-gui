@@ -6,6 +6,22 @@ type FixtureWindow = Window & {
 };
 
 test.describe("GAG-007 Task Center fixture", () => {
+  test("group headers use compact rows instead of task-card height", async ({ page }) => {
+    await page.goto("/#task-center");
+
+    const waitingHeader = page.locator('[data-group-header="needs_attention"]');
+    const runningHeader = page.locator('[data-group-header="running"]');
+    await expect(waitingHeader).toBeVisible();
+    await expect(runningHeader).toBeVisible();
+
+    const waitingBox = await waitingHeader.boundingBox();
+    const runningBox = await runningHeader.boundingBox();
+    expect(waitingBox).not.toBeNull();
+    expect(runningBox).not.toBeNull();
+    expect(waitingBox!.height).toBeLessThanOrEqual(48);
+    expect(runningBox!.y - waitingBox!.y).toBeLessThan(190);
+  });
+
   test("loads task center via hash with seed tasks", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/#task-center");

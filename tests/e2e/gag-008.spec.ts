@@ -68,6 +68,46 @@ test.describe("GAG-008 conversation timeline", () => {
     expect(timelineBox!.height).toBeGreaterThan(composerBox!.height);
   });
 
+  test("long assistant prose uses a comfortable share of the timeline width", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await page.goto("/#conversation");
+    const timeline = page.getByTestId("conversation-virtual-list");
+    const messages = page.getByTestId("assistant-message");
+    await expect(timeline).toBeVisible({ timeout: 15_000 });
+    await expect(messages.first()).toBeVisible({ timeout: 15_000 });
+
+    const timelineBox = await timeline.boundingBox();
+    const widestMessage = await messages.evaluateAll((elements) =>
+      Math.max(...elements.map((element) => element.getBoundingClientRect().width)),
+    );
+    expect(timelineBox).not.toBeNull();
+    expect(widestMessage).toBeGreaterThanOrEqual(timelineBox!.width * 0.62);
+  });
+
+  test("processing indicator reserves space instead of covering the last process row", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await page.goto("/#conversation");
+    const processing = page.getByTestId("agent-processing").filter({ visible: true }).last();
+    const processRow = page.getByTestId("process-activity-toggle").last();
+    await expect(processRow).toBeVisible({ timeout: 15_000 });
+    await expect(processing).toBeVisible({ timeout: 15_000 });
+
+    const [processingBox, processBox] = await Promise.all([
+      processing.boundingBox(),
+      processRow.boundingBox(),
+    ]);
+    expect(processingBox).not.toBeNull();
+    expect(processBox).not.toBeNull();
+    const separated =
+      processingBox!.y >= processBox!.y + processBox!.height + 8 ||
+      processingBox!.y + processingBox!.height + 8 <= processBox!.y;
+    expect(separated).toBe(true);
+  });
+
   test("fixture loads timeline, composer, and can send", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto("/#conversation");
@@ -133,7 +173,13 @@ test.describe("GAG-008 conversation timeline", () => {
     await page.goto("/#conversation");
     const timeline = page.getByTestId("conversation-virtual-list");
     await expect(timeline).toBeVisible({ timeout: 15_000 });
-    const oneLine = page.locator(".tool-one-line").first();
+    const processToggle = page.getByTestId("process-activity-toggle").first();
+    await expect(processToggle).toBeVisible({ timeout: 15_000 });
+    await processToggle.click();
+    const oneLine = page
+      .getByTestId("process-activity-details")
+      .locator(".tool-one-line")
+      .first();
     await expect(oneLine).toBeVisible({ timeout: 15_000 });
 
     const dimensions = await oneLine.evaluate((summary) => {

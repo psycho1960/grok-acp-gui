@@ -38,6 +38,8 @@ pub enum AgentEvent {
     SessionReady(SessionReadyPayload),
     /// A streaming text delta from the assistant.
     AssistantDelta(AssistantDeltaPayload),
+    /// A credential-redacted, user-visible thought update from the agent.
+    Thinking(ThinkingPayload),
     /// The assistant message is complete.
     AssistantCompleted(AssistantCompletedPayload),
     /// A tool call has started.
@@ -69,6 +71,7 @@ impl AgentEvent {
             AgentEvent::UserMessage(_) => "user_message",
             AgentEvent::SessionReady(_) => "session_ready",
             AgentEvent::AssistantDelta(_) => "assistant_delta",
+            AgentEvent::Thinking(_) => "thinking",
             AgentEvent::AssistantCompleted(_) => "assistant_completed",
             AgentEvent::ToolStarted(_) => "tool_started",
             AgentEvent::ToolUpdated(_) => "tool_updated",
@@ -170,6 +173,13 @@ pub struct AssistantDeltaPayload {
     pub text: String,
 }
 
+/// Credential-redacted, user-visible text for an ACP thought phase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingPayload {
+    pub summary: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantCompletedPayload {
@@ -269,11 +279,13 @@ pub struct PermissionOperationDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanProposedPayload {
-    /// ACP request ID for this plan prompt.
+    /// Stable request ID for this plan prompt. Standard ACP/legacy requests
+    /// preserve the agent ID; known vendor extensions fall back to JSON-RPC id.
     pub request_id: String,
     /// Display-safe plan summary.
     pub summary: String,
-    /// Options presented by the agent.
+    /// Explicit plan actions. Agent-provided option IDs remain verbatim;
+    /// vendor extensions without option IDs use adapter-owned namespaced IDs.
     pub options: Vec<PermissionOptionDescriptor>,
 }
 

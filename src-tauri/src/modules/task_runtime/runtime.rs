@@ -946,7 +946,7 @@ impl<A: AgentRuntime + 'static> TaskRuntime for TaskRuntimeImpl<A> {
         if action == PlanOptionAction::Unknown {
             return Err(DomainError::new(
                 crate::domain::error::codes::PERMISSION_DENIED,
-                "Plan option has no explicit ACP action",
+                "Plan option has no explicit protocol action",
             ));
         }
         let binding = self

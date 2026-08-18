@@ -205,7 +205,7 @@ onBeforeUnmount(() =>
   position: absolute;
   top: calc(100% + var(--space-1));
   right: 0;
-  z-index: 20;
+  z-index: 40;
   display: grid;
   min-width: max(100%, 180px);
   max-width: min(320px, calc(100vw - 32px));

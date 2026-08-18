@@ -831,6 +831,13 @@ pub fn map_stored_event_to_bridge(
             event_types::MESSAGE_DELTA,
             serde_json::json!({ "role": "assistant", "text": field("text") }),
         ),
+        "thinking" => (
+            event_types::ACTIVITY_UPDATED,
+            serde_json::json!({
+                "kind": "thinking",
+                "detail": field("summary"),
+            }),
+        ),
         "assistant_completed" => (
             event_types::TASK_STATE,
             serde_json::json!({
@@ -1058,6 +1065,26 @@ mod tests {
             .payload
             .to_string()
             .contains("must-never-be-forwarded"));
+    }
+
+    #[test]
+    fn thinking_bridge_payload_replays_only_the_safe_summary() {
+        let stored = crate::domain::types::StoredEvent {
+            dedup_key: "session-thinking:4".into(),
+            session_id: crate::domain::types::SessionId::new("session-thinking"),
+            task_id: crate::domain::types::TaskId::new("task-thinking"),
+            sequence: 4,
+            event_type: "thinking".into(),
+            payload: serde_json::json!({ "summary": "正在分析下一步" }),
+            correlation_id: None,
+            persisted_at: crate::domain::types::utc_now(),
+            has_side_effects: false,
+        };
+
+        let event = map_stored_event_to_bridge(&stored).expect("bridge event");
+        assert_eq!(event.event_type, "activity.updated");
+        assert_eq!(event.payload["kind"], "thinking");
+        assert_eq!(event.payload["detail"], "正在分析下一步");
     }
 
     #[test]

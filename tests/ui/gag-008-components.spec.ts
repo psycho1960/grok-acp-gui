@@ -1,4 +1,5 @@
 import { createPinia, setActivePinia } from "pinia";
+import { h, nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { createFakeDesktopBridge } from "../../src/bridge/fake-bridge";
@@ -14,6 +15,13 @@ import {
 } from "../../src/features/conversation/fixtures";
 import { applyEvents, createEmptyConversationState } from "../../src/features/conversation/reducer";
 import { FIX_TASK } from "../../src/features/conversation/fixtures";
+import {
+  collapsedToolSummary,
+  displayToolSummary,
+  mergeToolCall,
+  normalizeToolCall,
+} from "../../src/features/conversation/tool-normalize";
+import { estimateTimelineItemHeight } from "../../src/features/conversation/timeline-density";
 import type { TimelineItem, ToolCallView } from "../../src/features/conversation/types";
 
 describe("GAG-008 components", () => {
@@ -61,7 +69,7 @@ describe("GAG-008 components", () => {
     expect(copied.endsWith(longTail)).toBe(true);
   });
 
-  it("ToolCard shows phase, duration, redaction badge", () => {
+  it("ToolCard explains when an explicitly sensitive value stays hidden", () => {
     const tool: ToolCallView = {
       toolCallId: "t1",
       title: "Shell",
@@ -75,8 +83,162 @@ describe("GAG-008 components", () => {
     };
     const w = mount(ToolCard, { props: { tool, expanded: true } });
     expect(w.get('[data-testid="tool-duration"]').text()).toContain("1.5s");
-    expect(w.text()).toContain("已脱敏");
+    expect(w.text()).toContain("敏感值已隐藏");
     expect(w.get('[data-testid="tool-details"]').exists()).toBe(true);
+  });
+
+  it("uses safe tool locations as visible input instead of blanket redaction", () => {
+    const tool = normalizeToolCall({
+      toolCallId: "read-1",
+      title: "Read",
+      kind: "read",
+      status: "completed",
+      inputRedacted: true,
+      locations: ["miniprogram/pages/landing/landing.js"],
+      resultSummary: "读取完成",
+      resultRedacted: false,
+    });
+
+    expect(tool).not.toBeNull();
+    expect(tool?.input.summary).toContain("miniprogram/pages/landing/landing.js");
+    expect(tool?.input.redacted).toBe(false);
+  });
+
+  it("does not label an absent tool input as sensitive", () => {
+    const tool = normalizeToolCall({
+      toolCallId: "edit-without-input",
+      title: "Edit",
+      kind: "edit",
+      status: "completed",
+      inputRedacted: true,
+      resultSummary: "修改完成",
+      resultRedacted: false,
+    });
+
+    expect(tool?.input.summary).toBe("参数未提供");
+    expect(tool?.input.redacted).toBe(false);
+    const w = mount(ToolCard, { props: { tool: tool!, expanded: true } });
+    expect(w.text()).not.toContain("敏感值已隐藏");
+  });
+
+  it("replaces an early redacted placeholder when a later tool update reveals safe locations", () => {
+    const started = normalizeToolCall({
+      toolCallId: "edit-1",
+      title: "Edit",
+      kind: "edit",
+      status: "running",
+      inputRedacted: true,
+      locations: ["C:\\workspace\\plan.md"],
+    });
+    const completed = normalizeToolCall({
+      toolCallId: "edit-1",
+      title: "Edit",
+      kind: "edit",
+      status: "completed",
+      resultSummary: "修改完成",
+      resultRedacted: false,
+    });
+
+    expect(started).not.toBeNull();
+    expect(completed).not.toBeNull();
+    const merged = mergeToolCall(started!, completed!);
+    expect(merged.input.summary).toContain("C:\\workspace\\plan.md");
+    expect(merged.input.redacted).toBe(false);
+  });
+
+  it("keeps the timeline pinned when a processing footer shrinks its viewport", async () => {
+    const observers: Array<{
+      callback: ResizeObserverCallback;
+      targets: Element[];
+    }> = [];
+    class MockResizeObserver {
+      readonly targets: Element[] = [];
+      constructor(readonly callback: ResizeObserverCallback) {
+        observers.push(this);
+      }
+      observe(target: Element): void {
+        this.targets.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
+
+    let clientHeight = 200;
+    const w = mount(TimelineVirtualList, {
+      props: {
+        items: generateManyEvents(30).map((event, index) => ({
+          id: `resize-${index}`,
+          kind: "system",
+          seq: index + 1,
+          sessionId: "session-resize",
+          timestamp: event.timestamp,
+          eventKey: `session-resize:${index + 1}`,
+          message: `row ${index + 1}`,
+        })) as TimelineItem[],
+        sessionKey: "resize-footer",
+      },
+      slots: { default: `<div style="height: 36px">row</div>` },
+      attachTo: document.body,
+    });
+
+    try {
+      const root = w.get('[data-testid="conversation-virtual-list"]').element as HTMLElement;
+      Object.defineProperty(root, "clientHeight", {
+        configurable: true,
+        get: () => clientHeight,
+      });
+      Object.defineProperty(root, "scrollHeight", {
+        configurable: true,
+        get: () => 1_000,
+      });
+      root.scrollTop = 800;
+
+      clientHeight = 120;
+      const viewportObserver = observers.find((observer) =>
+        observer.targets.includes(root),
+      );
+      expect(viewportObserver).toBeDefined();
+      viewportObserver!.callback(
+        [{ target: root } as ResizeObserverEntry],
+        viewportObserver as unknown as ResizeObserver,
+      );
+      await nextTick();
+
+      expect(root.scrollTop).toBe(880);
+    } finally {
+      w.unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("collapsed tool summary prefers a short path over raw JSON", () => {
+    expect(
+      collapsedToolSummary({
+        toolCallId: "t1",
+        title: "read_file",
+        kind: "read",
+        phase: "completed",
+        locations: ["D:\\codex\\grok acp gui\\docs\\02-UI-UX-DESIGN.md"],
+        input: {
+          summary: '{"path":"D:\\\\codex\\\\grok acp gui\\\\docs\\\\02-UI-UX-DESIGN.md","limit":100}',
+          redacted: false,
+        },
+        result: { summary: "ok", redacted: false },
+      }),
+    ).toBe("docs/02-UI-UX-DESIGN.md");
+  });
+
+  it("estimates thinking and tool rows as compact process lines", () => {
+    expect(estimateTimelineItemHeight({ kind: "thinking" })).toBe(36);
+    expect(estimateTimelineItemHeight({ kind: "tool" })).toBe(36);
+    expect(estimateTimelineItemHeight({ kind: "permission" })).toBeGreaterThan(100);
+  });
+
+  it("renders JSON tool output with actual line breaks", () => {
+    expect(displayToolSummary('{"content":"src\\nREADME.md"}')).toBe(
+      "content:\nsrc\nREADME.md",
+    );
   });
 
   it("Composer emits send on Enter and cancel on Escape", async () => {
@@ -135,6 +297,71 @@ describe("GAG-008 components", () => {
     w.unmount();
   });
 
+  it("releases a measured work row height after it is collapsed", async () => {
+    const observers: MockResizeObserver[] = [];
+    class MockResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {
+        observers.push(this);
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+      trigger(): void {
+        const entries = Array.from(
+          document.querySelectorAll<HTMLElement>(".virtual-row"),
+          (target) => ({ target } as ResizeObserverEntry),
+        );
+        this.callback(entries, this as unknown as ResizeObserver);
+      }
+    }
+
+    vi.stubGlobal("ResizeObserver", MockResizeObserver);
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      const naturalHeight = this.textContent?.includes("expanded") ? 300 : 36;
+      const minHeight = Number.parseFloat(this.style.minHeight || "0");
+      return { height: Math.max(naturalHeight, minHeight) } as DOMRect;
+    });
+
+    const item = {
+      id: "collapse-height",
+      kind: "thinking",
+      seq: 1,
+      sessionId: "session-collapse",
+      timestamp: "2026-08-05T00:00:00.000Z",
+      eventKey: "session-collapse:1",
+      summary: "details",
+      expanded: false,
+    } as TimelineItem;
+    const w = mount(TimelineVirtualList, {
+      props: { items: [item], sessionKey: "collapse-height" },
+      slots: {
+        default: ({ item: row }: { item: TimelineItem }) =>
+          h("div", row.kind === "thinking" && row.expanded ? "expanded" : "collapsed"),
+      },
+      attachTo: document.body,
+    });
+
+    try {
+      await nextTick();
+      observers.forEach((observer) => observer.trigger());
+      await nextTick();
+
+      await w.setProps({ items: [{ ...item, expanded: true } as TimelineItem] });
+      observers.forEach((observer) => observer.trigger());
+      await nextTick();
+
+      await w.setProps({ items: [{ ...item, expanded: false } as TimelineItem] });
+      observers.forEach((observer) => observer.trigger());
+      await nextTick();
+
+      expect(w.get(".virtual-row").attributes("style")).not.toContain("min-height: 300px");
+    } finally {
+      w.unmount();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("ConversationView mounts with snapshot fixtures", async () => {
     setActivePinia(createPinia());
     const bridge = createFakeDesktopBridge();
@@ -181,6 +408,39 @@ describe("GAG-008 components", () => {
     await Promise.resolve();
     expect(w.get('[data-testid="unread-count"]').text()).toBe("1");
     expect(root.scrollTop).toBe(0);
+    w.unmount();
+  });
+
+  it("counts repeated updates to one process activity as one unread row", async () => {
+    const item: TimelineItem = {
+      id: "process-thinking-1",
+      kind: "process",
+      seq: 1,
+      sessionId: "session-process-scroll",
+      timestamp: "2026-08-05T00:00:00.000Z",
+      eventKey: "session-process-scroll:1",
+      entries: [],
+      expanded: false,
+      phase: "running",
+      counts: { total: 1, thinking: 1, reads: 0, executes: 0, failed: 0 },
+    };
+    const w = mount(TimelineVirtualList, {
+      props: { items: [item], sessionKey: "process-unread" },
+      slots: { default: `<div>row</div>` },
+      attachTo: document.body,
+    });
+    const root = w.get('[data-testid="conversation-virtual-list"]').element as HTMLElement;
+    Object.defineProperty(root, "clientHeight", { value: 200, configurable: true });
+    Object.defineProperty(root, "scrollHeight", { value: 1000, configurable: true });
+    root.scrollTop = 0;
+    root.dispatchEvent(new Event("scroll"));
+
+    await w.setProps({ items: [{ ...item, seq: 2 }] });
+    await Promise.resolve();
+    await w.setProps({ items: [{ ...item, seq: 3 }] });
+    await Promise.resolve();
+
+    expect(w.get('[data-testid="unread-count"]').text()).toBe("1");
     w.unmount();
   });
 

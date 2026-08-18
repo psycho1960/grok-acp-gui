@@ -196,7 +196,11 @@ function iconStatus(status: StartupCheck["status"]): "running" | "waiting" | "su
   return status;
 }
 
-onMounted(() => void refresh());
+onMounted(() => {
+  // Startup readiness checks the runtime itself. Model selection belongs to
+  // task configuration and must not gate entry into the application.
+  void refresh();
+});
 onBeforeUnmount(clearLoginPoll);
 </script>
 

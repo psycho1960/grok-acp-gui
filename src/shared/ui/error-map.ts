@@ -25,10 +25,11 @@ const RULES: Rule[] = [
     suggestion: "确认 Grok CLI 已安装并已登录，然后重试。",
   },
   {
-    match: /not authenticated|unauthenticated|login required|未登录/i,
+    match:
+      /GROK_AUTH_REQUIRED|not authenticated|unauthenticated|authentication (?:is )?required|login required|grok login|未登录/i,
     title: "Grok 未登录",
     summary: "当前环境无法使用已登录的 Grok 身份。",
-    suggestion: "在终端完成 Grok 登录后，回到应用重新检测。",
+    suggestion: "在终端运行 `grok login` 完成登录，然后回到应用恢复会话。",
   },
   {
     match: /grok.*(not found|missing)|command not found|ENOENT/i,

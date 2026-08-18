@@ -41,6 +41,7 @@ import {
   toggleToolExpanded,
   updateApprovalDecision,
 } from "./reducer";
+import { foldProcessActivities } from "./process-activity";
 import type {
   ComposerCapabilities,
   ComposerAttachment,
@@ -88,9 +89,11 @@ export const useConversationStore = defineStore("conversation", () => {
   const lifecycleStatus = ref<string | null>(null);
   const cancelPending = ref(false);
   const bridgeOnline = ref(true);
+  const facadeReady = ref(false);
   const focusEventSeq = ref<number | null>(null);
   /** When true, explore read tools are folded. */
   const foldExplores = ref(true);
+  const expandedProcessIds = ref<Set<string>>(new Set());
   /** Runtime model capabilities (from bootstrap capability snapshot). */
   const models = ref<ModelInfo[]>([]);
   /** Runtime session modes (from bootstrap capability snapshot). */
@@ -116,6 +119,7 @@ export const useConversationStore = defineStore("conversation", () => {
 
   let facade: ConversationFacade | null = null;
   let unsubscribe: (() => void) | null = null;
+  let attachmentOwner: symbol | null = null;
   let disposed = false;
   let pendingDeltas: TypedDesktopEvent[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -126,7 +130,8 @@ export const useConversationStore = defineStore("conversation", () => {
   const items = computed<TimelineItem[]>(() => {
     const raw = timeline.value.items;
     const folded = foldExplores.value ? foldExploreTools(raw) : raw;
-    return folded.filter((item) => !isOffTimelineStatus(item));
+    const visible = folded.filter((item) => !isOffTimelineStatus(item));
+    return foldProcessActivities(visible, expandedProcessIds.value);
   });
 
   const status = computed(() => timeline.value.status);
@@ -310,7 +315,7 @@ export const useConversationStore = defineStore("conversation", () => {
     pendingDeltas = [];
     let next = timeline.value;
     for (const e of batch) {
-      next = applyEvent(next, e);
+      next = applyEvent(next, e, { acceptUnmatchedUserMessages: false });
     }
     commit(next);
   }
@@ -328,7 +333,11 @@ export const useConversationStore = defineStore("conversation", () => {
     if (pendingDeltas.length > 0) {
       flushDeltas();
     }
-    commit(applyEvent(timeline.value, event));
+    commit(
+      applyEvent(timeline.value, event, {
+        acceptUnmatchedUserMessages: false,
+      }),
+    );
   }
 
   function handleDesktopEvent(event: TypedDesktopEvent): void {
@@ -365,18 +374,25 @@ export const useConversationStore = defineStore("conversation", () => {
     scheduleDelta(event);
   }
 
-  async function attach(bridge: DesktopBridge): Promise<void> {
+  async function attach(
+    bridge: DesktopBridge,
+    owner: symbol = Symbol("conversation-view"),
+  ): Promise<void> {
+    attachmentOwner = owner;
     disposed = false;
     bootstrapSlashCommands.value = [];
     bootstrapModes.value = [];
     slashCommands.value = [];
-    facade = createConversationFacade(bridge);
+    const nextFacade = createConversationFacade(bridge);
+    facade = nextFacade;
+    facadeReady.value = true;
     if (unsubscribe) {
       unsubscribe();
       unsubscribe = null;
     }
     try {
-      unsubscribe = await facade.subscribe((evt) => {
+      const nextUnsubscribe = await nextFacade.subscribe((evt) => {
+        if (attachmentOwner !== owner) return;
         if (evt.kind === "bridge_error") {
           bridgeOnline.value = false;
           errorMessage.value = evt.message;
@@ -385,10 +401,16 @@ export const useConversationStore = defineStore("conversation", () => {
         }
         handleDesktopEvent(evt.event);
       });
+      if (attachmentOwner !== owner) {
+        nextUnsubscribe();
+        return;
+      }
+      unsubscribe = nextUnsubscribe;
       // Load runtime capabilities (models, modes, slash commands). Failures
       // only degrade to empty lists; the conversation itself stays usable.
       try {
-        const snapshot = await facade.bootstrap();
+        const snapshot = await nextFacade.bootstrap();
+        if (attachmentOwner !== owner) return;
         models.value = Array.isArray(snapshot.capabilities?.models)
           ? snapshot.capabilities.models
           : [];
@@ -411,15 +433,20 @@ export const useConversationStore = defineStore("conversation", () => {
       } catch {
         // non-fatal
       }
-      bridgeOnline.value = true;
+      if (attachmentOwner === owner) bridgeOnline.value = true;
     } catch (error) {
+      if (attachmentOwner !== owner) return;
+      facade = null;
+      facadeReady.value = false;
       bridgeOnline.value = false;
       errorMessage.value = error instanceof Error ? error.message : "订阅失败";
       loadState.value = "stale";
     }
   }
 
-  function detach(): void {
+  function detach(owner?: symbol): void {
+    if (owner && attachmentOwner !== owner) return;
+    attachmentOwner = null;
     disposed = true;
     openVersion += 1;
     if (flushTimer) {
@@ -432,6 +459,7 @@ export const useConversationStore = defineStore("conversation", () => {
       unsubscribe = null;
     }
     facade = null;
+    facadeReady.value = false;
     selectedMode.value = null;
     workspaceStrategy.value = null;
     workspaceAvailable.value = null;
@@ -652,6 +680,7 @@ export const useConversationStore = defineStore("conversation", () => {
 
   function setDraft(text: string): void {
     draft.value = text;
+    sendError.value = null;
     saveDraft(timeline.value.taskId, text);
   }
 
@@ -826,10 +855,19 @@ export const useConversationStore = defineStore("conversation", () => {
     mode: string | null,
     linkedStrategy: WorkspaceStrategy | null = workspaceStrategyForMode(mode),
   ): Promise<boolean> {
-    return configureStableSettings(
+    const previousMode = selectedMode.value;
+    const previousStrategy = workspaceStrategy.value;
+    selectedMode.value = mode;
+    if (linkedStrategy) workspaceStrategy.value = linkedStrategy;
+    const ok = await configureStableSettings(
       linkedStrategy ? { mode, workspaceStrategy: linkedStrategy } : { mode },
       "模式切换失败",
     );
+    if (!ok) {
+      selectedMode.value = previousMode;
+      workspaceStrategy.value = previousStrategy;
+    }
+    return ok;
   }
 
   /** Persist an explicit user workspace-policy override. */
@@ -1074,6 +1112,31 @@ export const useConversationStore = defineStore("conversation", () => {
     return true;
   }
 
+  /** Reply to a visible Ask card. Running turns use the existing guarded
+   * interrupt-then-send path so the answer cannot sit forever in the queue. */
+  async function answerAgentQuestion(answer: string): Promise<boolean> {
+    const text = answer.trim();
+    if (!text || !timeline.value.taskId) return false;
+    if (composerCapabilities.value.canSend) {
+      const preservedDraft = draft.value;
+      const preservedAttachments = attachments.value.map((item) => ({ ...item }));
+      draft.value = text;
+      attachments.value = [];
+      const sent = await sendMessage();
+      draft.value = preservedDraft;
+      attachments.value = preservedAttachments;
+      if (timeline.value.taskId) saveDraft(timeline.value.taskId, preservedDraft);
+      return sent;
+    }
+    const item: QueuedFollowUp = {
+      id: `ask-${Date.now()}-${queuedFollowUps.value.length}`,
+      text,
+      attachments: [],
+    };
+    queuedFollowUps.value = [...queuedFollowUps.value, item];
+    return sendFollowUpNow(item.id);
+  }
+
   watch(
     () => [composerCapabilities.value.canSend, timeline.value.status] as const,
     () => {
@@ -1224,6 +1287,13 @@ export const useConversationStore = defineStore("conversation", () => {
     commit(toggleThinkingExpanded(timeline.value, itemId));
   }
 
+  function toggleProcess(itemId: string): void {
+    const next = new Set(expandedProcessIds.value);
+    if (next.has(itemId)) next.delete(itemId);
+    else next.add(itemId);
+    expandedProcessIds.value = next;
+  }
+
   function setFocusEventSeq(seq: number | null): void {
     focusEventSeq.value = seq;
   }
@@ -1260,6 +1330,7 @@ export const useConversationStore = defineStore("conversation", () => {
     artifactRevision,
     cancelPending,
     bridgeOnline,
+    facadeReady,
     focusEventSeq,
     foldExplores,
     models,
@@ -1272,6 +1343,7 @@ export const useConversationStore = defineStore("conversation", () => {
     hasArtifacts,
     workspaceAttention,
     railNeeded,
+    lifecycleStatus,
     selectedModel,
     selectedReasoning,
     settingsPending,
@@ -1295,12 +1367,14 @@ export const useConversationStore = defineStore("conversation", () => {
     editFollowUp,
     deleteFollowUp,
     sendFollowUpNow,
+    answerAgentQuestion,
     cancelTurn,
     resumeSession,
     resolvePermission,
     resolvePlan,
     toggleTool,
     toggleThinking,
+    toggleProcess,
     setFocusEventSeq,
     injectEventForTest,
     flushForTest,

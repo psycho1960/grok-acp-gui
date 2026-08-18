@@ -5,6 +5,8 @@ const props = withDefaults(
   defineProps<{
     items: readonly T[];
     itemHeight: number;
+    /** Per-item height. Falls back to itemHeight for fixed-height lists. */
+    getItemHeight?: (item: T, index: number) => number;
     /** Extra rows rendered above/below the viewport. */
     overscan?: number;
     ariaLabel?: string;
@@ -15,6 +17,7 @@ const props = withDefaults(
     overscan: 6,
     ariaLabel: "任务列表",
     getKey: undefined,
+    getItemHeight: undefined,
   },
 );
 
@@ -22,30 +25,59 @@ const root = ref<HTMLElement | null>(null);
 const scrollTop = ref(0);
 const viewportHeight = ref(400);
 
-const totalHeight = computed(() => props.items.length * props.itemHeight);
+const rows = computed(() => {
+  let top = 0;
+  return props.items.map((item, index) => {
+    const candidate = props.getItemHeight?.(item, index) ?? props.itemHeight;
+    const height = Number.isFinite(candidate) && candidate > 0 ? candidate : props.itemHeight;
+    const row = {
+      item,
+      index,
+      key: props.getKey ? props.getKey(item, index) : index,
+      top,
+      height,
+      bottom: top + height,
+    };
+    top = row.bottom;
+    return row;
+  });
+});
+
+const totalHeight = computed(() => rows.value[rows.value.length - 1]?.bottom ?? 0);
+
+function firstRowEndingAfter(offset: number): number {
+  let low = 0;
+  let high = rows.value.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rows.value[middle].bottom <= offset) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function firstRowStartingAtOrAfter(offset: number): number {
+  let low = 0;
+  let high = rows.value.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rows.value[middle].top < offset) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
 
 const range = computed(() => {
-  const start = Math.max(
-    0,
-    Math.floor(scrollTop.value / props.itemHeight) - props.overscan,
-  );
-  const visible = Math.ceil(viewportHeight.value / props.itemHeight) + props.overscan * 2;
-  const end = Math.min(props.items.length, start + visible);
+  const visibleStart = firstRowEndingAfter(scrollTop.value);
+  const visibleEnd = firstRowStartingAtOrAfter(scrollTop.value + viewportHeight.value);
+  const start = Math.max(0, visibleStart - props.overscan);
+  const end = Math.min(rows.value.length, visibleEnd + props.overscan);
   return { start, end };
 });
 
 const windowItems = computed(() => {
   const { start, end } = range.value;
-  return props.items.slice(start, end).map((item, offset) => {
-    const index = start + offset;
-    const key = props.getKey ? props.getKey(item, index) : index;
-    return {
-      item,
-      index,
-      key,
-      top: index * props.itemHeight,
-    };
-  });
+  return rows.value.slice(start, end);
 });
 
 function onScroll(): void {
@@ -68,7 +100,7 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => props.items.length,
+  totalHeight,
   () => {
     if (root.value && scrollTop.value > totalHeight.value) {
       root.value.scrollTop = Math.max(0, totalHeight.value - viewportHeight.value);
@@ -109,7 +141,7 @@ defineExpose({
         :aria-posinset="row.index + 1"
         :aria-setsize="items.length"
         :style="{
-          height: `${itemHeight}px`,
+          height: `${row.height}px`,
           transform: `translateY(${row.top}px)`,
         }"
       >

@@ -13,6 +13,25 @@ async function openConversationFixture(page: Page): Promise<void> {
   await waitForConversationIdle(page);
 }
 
+test("locked header controls do not create horizontal scrolling at compact desktop width", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1024, height: 700 });
+  await page.goto("/#conversation");
+  await expect(page.getByTestId("conversation-view")).toBeVisible({
+    timeout: 15_000,
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        clientWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+      })),
+    )
+    .toEqual({ clientWidth: 1024, scrollWidth: 1024 });
+});
+
 test("mode selector shows Chinese labels, switches mode, echoes it, and survives reopen", async ({
   page,
 }) => {
@@ -49,9 +68,14 @@ test("mode selector shows Chinese labels, switches mode, echoes it, and survives
   await expect(modeTooltip).toBeVisible();
   const helpBox = await modeHelp.boundingBox();
   const tooltipBox = await modeTooltip.boundingBox();
+  const workspaceBox = await page
+    .getByTestId("conversation-workspace-select")
+    .boundingBox();
   expect(helpBox).not.toBeNull();
   expect(tooltipBox).not.toBeNull();
+  expect(workspaceBox).not.toBeNull();
   expect(tooltipBox!.y).toBeGreaterThanOrEqual(helpBox!.y + helpBox!.height);
+  expect(helpBox!.x + helpBox!.width).toBeLessThanOrEqual(workspaceBox!.x - 4);
   // The fixture snapshot restores the default selection.
   await expect(modeTrigger).toHaveAttribute("data-selected-value", "agent");
 
