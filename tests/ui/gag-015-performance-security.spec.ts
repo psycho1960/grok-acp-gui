@@ -89,6 +89,24 @@ describe("GAG-015 performance and active-content gates", () => {
     expect(state.cursor.lastSeq).toBe(10_000);
   });
 
+  it("keeps 50k timeline event replay within the long-session budget", () => {
+    const started = performance.now();
+    const state = applyEvents(
+      createEmptyConversationState(FIX_TASK),
+      generateManyEvents(50_000),
+    );
+    const durationMs = performance.now() - started;
+    console.info(JSON.stringify({
+      metric: "gag015.timeline-50000",
+      sampleCount: 1,
+      durationMs,
+      thresholdMs: 10_000,
+      finalSequence: state.cursor.lastSeq,
+    }));
+    expect(durationMs).toBeLessThan(10_000);
+    expect(state.cursor.lastSeq).toBe(50_000);
+  });
+
   it("orders a reversed 100-delta burst without losing or crossing sequence", () => {
     const burst = Array.from({ length: 99 }, (_, index) => 100 - index)
       .map((seq) => fixtureAssistantDelta(seq, `[${seq}]`));

@@ -29,6 +29,7 @@ import {
 } from "./mode-workspace";
 import {
   applyEvent,
+  applyEvents,
   applySnapshot,
   appendUserMessage,
   createEmptyConversationState,
@@ -313,11 +314,11 @@ export const useConversationStore = defineStore("conversation", () => {
     if (pendingDeltas.length === 0) return;
     const batch = pendingDeltas;
     pendingDeltas = [];
-    let next = timeline.value;
-    for (const e of batch) {
-      next = applyEvent(next, e, { acceptUnmatchedUserMessages: false });
-    }
-    commit(next);
+    commit(
+      applyEvents(timeline.value, batch, {
+        acceptUnmatchedUserMessages: false,
+      }),
+    );
   }
 
   function scheduleDelta(event: TypedDesktopEvent): void {
