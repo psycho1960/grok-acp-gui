@@ -31,6 +31,19 @@ function itemId(kind: string, seq: number, extra = ""): string {
 const VISUAL_CONTEXT_MARKER =
   '<attachment_visual_context source="gpt-5.6-luna" trust="untrusted">';
 
+// Batch replay owns a private items array. Cache positions for that array only;
+// WeakMap prevents completed conversations from being retained by the index.
+const itemIndexCache = new WeakMap<TimelineItem[], Map<string, number>>();
+
+function itemIndexFor(items: TimelineItem[]): Map<string, number> {
+  const cached = itemIndexCache.get(items);
+  if (cached) return cached;
+  const index = new Map<string, number>();
+  items.forEach((item, position) => index.set(item.id, position));
+  itemIndexCache.set(items, index);
+  return index;
+}
+
 /**
  * The main runtime receives Luna OCR in a private prompt suffix. Some ACP
  * servers echo that composed prompt as a user_message_chunk; only the text the
@@ -114,8 +127,26 @@ function stopActiveTools(state: ConversationState): ConversationState {
 function upsertItem(
   state: ConversationState,
   item: TimelineItem,
+  reuseItems = false,
 ): ConversationState {
-  const idx = state.items.findIndex((i) => i.id === item.id);
+  if (reuseItems) {
+    const index = itemIndexFor(state.items);
+    const idx = index.get(item.id);
+    if (idx == null) {
+      index.set(item.id, state.items.length);
+      state.items.push(item);
+    } else {
+      state.items[idx] = item;
+    }
+    return { ...state, items: state.items };
+  }
+  let idx = -1;
+  for (let i = state.items.length - 1; i >= 0; i -= 1) {
+    if (state.items[i]?.id === item.id) {
+      idx = i;
+      break;
+    }
+  }
   if (idx < 0) {
     return { ...state, items: [...state.items, item] };
   }
@@ -124,11 +155,32 @@ function upsertItem(
   return { ...state, items };
 }
 
+function findItemById(
+  state: ConversationState,
+  id: string,
+  reuseItems = false,
+): TimelineItem | undefined {
+  if (reuseItems) {
+    const position = itemIndexFor(state.items).get(id);
+    return position == null ? undefined : state.items[position];
+  }
+  for (let i = state.items.length - 1; i >= 0; i -= 1) {
+    if (state.items[i]?.id === id) return state.items[i];
+  }
+  return undefined;
+}
+
 function replaceItem(
   state: ConversationState,
   id: string,
   next: TimelineItem,
+  reuseItems = false,
 ): ConversationState {
+  if (reuseItems) {
+    const position = itemIndexFor(state.items).get(id);
+    if (position != null) state.items[position] = next;
+    return { ...state, items: state.items };
+  }
   return {
     ...state,
     items: state.items.map((i) => (i.id === id ? next : i)),
@@ -157,10 +209,13 @@ function markSeen(
   state: ConversationState,
   sessionId: SessionId,
   seq: number,
+  reuseCollections = false,
 ): ConversationState {
   const key = eventKey(sessionId, seq);
   if (state.seenKeys.has(key)) return state;
-  const seenKeys = new Set(state.seenKeys);
+  const seenKeys = reuseCollections
+    ? state.seenKeys
+    : new Set(state.seenKeys);
   seenKeys.add(key);
   const lastSeq = Math.max(state.cursor.lastSeq, seq);
   // Gap detection: seq should be lastSeq+1 for continuous stream after snapshot
@@ -187,8 +242,14 @@ function applyMessageDelta(
   state: ConversationState,
   event: Extract<TypedDesktopEvent, { type: "message.delta" }>,
   allowHistoricalUserMessage = false,
+  reuseCollections = false,
 ): ConversationState {
-  let next = markSeen(state, event.sessionId, event.seq);
+  let next = markSeen(
+    state,
+    event.sessionId,
+    event.seq,
+    reuseCollections,
+  );
   const { role, text, toolCall, completed, fullText } = event.payload;
   const hasTextChunk = typeof text === "string" && text.length > 0;
   const hasVisibleText = hasTextChunk && text.trim().length > 0;
@@ -207,30 +268,39 @@ function applyMessageDelta(
     next = completeThinking(next, event.timestamp);
     if (finalText.length > 0) {
       const existing = next.streamingAssistantId
-        ? next.items.find((item) => item.id === next.streamingAssistantId)
+        ? findItemById(next, next.streamingAssistantId, reuseCollections)
         : undefined;
       if (existing?.kind === "assistant") {
-        next = replaceItem(next, existing.id, {
-          ...existing,
-          seq: event.seq,
-          timestamp: event.timestamp,
-          text: finalText,
-          streaming: false,
-          frozen: true,
-        });
+        next = replaceItem(
+          next,
+          existing.id,
+          {
+            ...existing,
+            seq: event.seq,
+            timestamp: event.timestamp,
+            text: finalText,
+            streaming: false,
+            frozen: true,
+          },
+          reuseCollections,
+        );
       } else {
         const id = itemId("assistant", event.seq);
-        next = upsertItem(next, {
-          id,
-          kind: "assistant",
-          seq: event.seq,
-          sessionId: event.sessionId,
-          timestamp: event.timestamp,
-          eventKey: eventKey(event.sessionId, event.seq),
-          text: finalText,
-          streaming: false,
-          frozen: true,
-        });
+        next = upsertItem(
+          next,
+          {
+            id,
+            kind: "assistant",
+            seq: event.seq,
+            sessionId: event.sessionId,
+            timestamp: event.timestamp,
+            eventKey: eventKey(event.sessionId, event.seq),
+            text: finalText,
+            streaming: false,
+            frozen: true,
+          },
+          reuseCollections,
+        );
       }
     }
     next = stopActiveTools(next);
@@ -270,8 +340,8 @@ function applyMessageDelta(
       errorMessage: undefined,
     };
     return optimistic
-      ? replaceItem(next, optimistic.id, confirmed)
-      : upsertItem(next, confirmed);
+      ? replaceItem(next, optimistic.id, confirmed, reuseCollections)
+      : upsertItem(next, confirmed, reuseCollections);
   }
 
   if (toolCall != null || hasVisibleText) {
@@ -291,12 +361,12 @@ function applyMessageDelta(
         eventType: "message.delta.toolCall",
         safeSummary: "无法解析的工具事件",
       };
-      return upsertItem(next, unknown);
+      return upsertItem(next, unknown, reuseCollections);
     }
 
     const existingId = next.toolIndex.get(normalized.toolCallId);
     if (existingId) {
-      const existing = next.items.find((i) => i.id === existingId);
+      const existing = findItemById(next, existingId, reuseCollections);
       if (existing && existing.kind === "tool") {
         const merged = mergeToolCall(existing.tool, normalized);
         const toolItem: ToolItem = {
@@ -305,7 +375,7 @@ function applyMessageDelta(
           timestamp: event.timestamp,
           tool: merged,
         };
-        return replaceItem(next, existingId, toolItem);
+        return replaceItem(next, existingId, toolItem, reuseCollections);
       }
     }
 
@@ -320,16 +390,20 @@ function applyMessageDelta(
       tool: normalized,
       expanded: false,
     };
-    const toolIndex = new Map(next.toolIndex);
+    const toolIndex = reuseCollections
+      ? next.toolIndex
+      : new Map(next.toolIndex);
     toolIndex.set(normalized.toolCallId, id);
     next = { ...next, toolIndex };
-    return upsertItem(next, toolItem);
+    return upsertItem(next, toolItem, reuseCollections);
   }
 
   if (hasTextChunk) {
     if (next.streamingAssistantId) {
-      const existing = next.items.find(
-        (i) => i.id === next.streamingAssistantId,
+      const existing = findItemById(
+        next,
+        next.streamingAssistantId,
+        reuseCollections,
       );
       if (existing && existing.kind === "assistant" && !existing.frozen) {
         const updated: AssistantMessageItem = {
@@ -340,7 +414,7 @@ function applyMessageDelta(
           streaming: true,
           frozen: false,
         };
-        return replaceItem(next, existing.id, updated);
+        return replaceItem(next, existing.id, updated, reuseCollections);
       }
     }
 
@@ -362,7 +436,7 @@ function applyMessageDelta(
       frozen: false,
     };
     next = { ...next, streamingAssistantId: id };
-    return upsertItem(next, assistant);
+    return upsertItem(next, assistant, reuseCollections);
   }
 
   return next;
@@ -371,8 +445,9 @@ function applyMessageDelta(
 function applyActivity(
   state: ConversationState,
   event: Extract<TypedDesktopEvent, { type: "activity.updated" }>,
+  reuseCollections = false,
 ): ConversationState {
-  let next = markSeen(state, event.sessionId, event.seq);
+  let next = markSeen(state, event.sessionId, event.seq, reuseCollections);
   const { kind, detail, code, retryable } = event.payload;
 
   if (kind === "thinking" || kind === "thought") {
@@ -385,7 +460,7 @@ function applyActivity(
         seq: event.seq,
         timestamp: event.timestamp,
         summary: `${active.summary}${detail || ""}`,
-      });
+      }, reuseCollections);
     }
     const id = itemId("thinking", event.seq);
     const thinking = {
@@ -398,7 +473,7 @@ function applyActivity(
       summary: detail || "",
       expanded: false,
     };
-    return upsertItem(next, thinking);
+    return upsertItem(next, thinking, reuseCollections);
   }
 
   if (kind === "error" || kind === "failed") {
@@ -416,7 +491,7 @@ function applyActivity(
     };
     next = freezeStreamingAssistant(next);
     next = { ...next, status: "error" };
-    return upsertItem(next, err);
+    return upsertItem(next, err, reuseCollections);
   }
 
   const activity: ActivityItem = {
@@ -429,14 +504,15 @@ function applyActivity(
     activityKind: kind,
     detail,
   };
-  return upsertItem(next, activity);
+  return upsertItem(next, activity, reuseCollections);
 }
 
 function applyTaskState(
   state: ConversationState,
   event: Extract<TypedDesktopEvent, { type: "task.state" }>,
+  reuseCollections = false,
 ): ConversationState {
-  let next = markSeen(state, event.sessionId, event.seq);
+  let next = markSeen(state, event.sessionId, event.seq, reuseCollections);
   next = projectTaskState(next, event);
 
   // Terminal interrupt → system line
@@ -450,7 +526,7 @@ function applyTaskState(
       eventKey: eventKey(event.sessionId, event.seq),
       message: "任务已中断",
     };
-    next = upsertItem(next, sys);
+    next = upsertItem(next, sys, reuseCollections);
   }
 
   const detail = event.payload.detail;
@@ -478,7 +554,7 @@ function applyTaskState(
       eventKey: eventKey(event.sessionId, event.seq),
       message: "已停止",
     };
-    next = upsertItem(next, stopped);
+    next = upsertItem(next, stopped, reuseCollections);
   }
 
   return next;
@@ -509,8 +585,9 @@ function projectTaskState(
 function applyPermission(
   state: ConversationState,
   event: Extract<TypedDesktopEvent, { type: "permission.requested" }>,
+  reuseCollections = false,
 ): ConversationState {
-  let next = markSeen(state, event.sessionId, event.seq);
+  let next = markSeen(state, event.sessionId, event.seq, reuseCollections);
   next = {
     ...next,
     status: "waiting_permission",
@@ -547,14 +624,15 @@ function applyPermission(
       decisionState: "pending",
     },
   };
-  return upsertItem(next, item);
+  return upsertItem(next, item, reuseCollections);
 }
 
 function applyPlan(
   state: ConversationState,
   event: Extract<TypedDesktopEvent, { type: "plan.updated" }>,
+  reuseCollections = false,
 ): ConversationState {
-  let next = markSeen(state, event.sessionId, event.seq);
+  let next = markSeen(state, event.sessionId, event.seq, reuseCollections);
   const detail = event.payload.detail;
   let detailSummary = "Plan 已更新";
   if (typeof detail === "string") detailSummary = detail;
@@ -608,7 +686,7 @@ function applyPlan(
       decisionState: "pending",
     },
   };
-  return upsertItem(next, item);
+  return upsertItem(next, item, reuseCollections);
 }
 
 export function updateApprovalDecision(
@@ -650,8 +728,9 @@ export function updateApprovalDecision(
 function applyArtifact(
   state: ConversationState,
   event: Extract<TypedDesktopEvent, { type: "artifact.available" }>,
+  reuseCollections = false,
 ): ConversationState {
-  const next = markSeen(state, event.sessionId, event.seq);
+  const next = markSeen(state, event.sessionId, event.seq, reuseCollections);
   const p = event.payload;
   const item: ArtifactItem = {
     id: itemId("artifact", event.seq, p.artifactId),
@@ -667,14 +746,15 @@ function applyArtifact(
       state: p.state ?? "ready",
     },
   };
-  return upsertItem(next, item);
+  return upsertItem(next, item, reuseCollections);
 }
 
 function applyChanges(
   state: ConversationState,
   event: Extract<TypedDesktopEvent, { type: "changes.updated" }>,
+  reuseCollections = false,
 ): ConversationState {
-  const next = markSeen(state, event.sessionId, event.seq);
+  const next = markSeen(state, event.sessionId, event.seq, reuseCollections);
   const files = event.payload.files;
   const count = Array.isArray(files) ? files.length : 0;
   const activity: ActivityItem = {
@@ -687,14 +767,15 @@ function applyChanges(
     activityKind: "changes",
     detail: count > 0 ? `${count} 个文件变更` : "工作区变更已更新",
   };
-  return upsertItem(next, activity);
+  return upsertItem(next, activity, reuseCollections);
 }
 
 function applyUnknownSessionEvent(
   state: ConversationState,
   event: TypedDesktopEvent & { sessionId: SessionId; seq: number },
+  reuseCollections = false,
 ): ConversationState {
-  const next = markSeen(state, event.sessionId, event.seq);
+  const next = markSeen(state, event.sessionId, event.seq, reuseCollections);
   const item: UnknownItem = {
     id: itemId("unknown", event.seq),
     kind: "unknown",
@@ -705,13 +786,14 @@ function applyUnknownSessionEvent(
     eventType: event.type,
     safeSummary: `未知事件：${event.type}`,
   };
-  return upsertItem(next, item);
+  return upsertItem(next, item, reuseCollections);
 }
 
 function applySequencedEvent(
   state: ConversationState,
   event: TypedDesktopEvent,
   allowHistoricalUserMessage = false,
+  reuseCollections = false,
 ): ConversationState {
   if (!("sessionId" in event) || event.sessionId == null || event.seq == null) {
     return state;
@@ -726,30 +808,36 @@ function applySequencedEvent(
 
   switch (event.type) {
     case "message.delta":
-      return applyMessageDelta(next, event, allowHistoricalUserMessage);
+      return applyMessageDelta(
+        next,
+        event,
+        allowHistoricalUserMessage,
+        reuseCollections,
+      );
     case "activity.updated":
-      return applyActivity(next, event);
+      return applyActivity(next, event, reuseCollections);
     case "task.state":
-      return applyTaskState(next, event);
+      return applyTaskState(next, event, reuseCollections);
     case "permission.requested":
-      return applyPermission(next, event);
+      return applyPermission(next, event, reuseCollections);
     case "plan.updated":
-      return applyPlan(next, event);
+      return applyPlan(next, event, reuseCollections);
     case "artifact.available":
-      return applyArtifact(next, event);
+      return applyArtifact(next, event, reuseCollections);
     case "changes.updated":
-      return applyChanges(next, event);
+      return applyChanges(next, event, reuseCollections);
     case "session.capabilities.updated":
     case "session.commands.updated":
       // Capability metadata — advance the sequence cursor but render nothing.
-      return markSeen(next, sessionId, seq);
+      return markSeen(next, sessionId, seq, reuseCollections);
     case "task.snapshot":
       // Full task list snapshots are handled at store layer; ignore here.
-      return markSeen(next, sessionId, seq);
+      return markSeen(next, sessionId, seq, reuseCollections);
     default:
       return applyUnknownSessionEvent(
         next,
         event as TypedDesktopEvent & { sessionId: SessionId; seq: number },
+        reuseCollections,
       );
   }
 }
@@ -758,13 +846,17 @@ function applySequencedEvent(
  * Apply a single DesktopEvent. Session events are rendered only in strict seq
  * order; future events are buffered and exact duplicates are ignored.
  */
-export function applyEvent(
+function applyEventInternal(
   state: ConversationState,
   event: TypedDesktopEvent,
-  options: { acceptUnmatchedUserMessages?: boolean } = {},
+  options: {
+    acceptUnmatchedUserMessages?: boolean;
+    reuseCollections?: boolean;
+  } = {},
 ): ConversationState {
   const acceptUnmatchedUserMessages =
     options.acceptUnmatchedUserMessages ?? true;
+  const reuseCollections = options.reuseCollections ?? false;
   // Non-session diagnostics — only surface as system if we have an open session
   if (event.type === "diagnostic.notice") {
     if (!state.sessionId) return state;
@@ -777,7 +869,7 @@ export function applyEvent(
       eventKey: `diag:${event.timestamp}`,
       message: event.payload.message,
     };
-    return upsertItem(state, item);
+    return upsertItem(state, item, reuseCollections);
   }
 
   if (event.type === "resource.warning") {
@@ -791,7 +883,7 @@ export function applyEvent(
       eventKey: `res:${event.timestamp}`,
       message: event.payload.message,
     };
-    return upsertItem(state, item);
+    return upsertItem(state, item, reuseCollections);
   }
 
   if (event.type === "runtime.updated") {
@@ -846,7 +938,9 @@ export function applyEvent(
   };
   const expected = bound.cursor.lastSeq + 1;
   if (event.seq > expected) {
-    const pendingEvents = new Map(bound.pendingEvents);
+    const pendingEvents = reuseCollections
+      ? bound.pendingEvents
+      : new Map(bound.pendingEvents);
     pendingEvents.set(event.seq, event);
     const waitingForSnapshot = {
       ...bound,
@@ -881,8 +975,11 @@ export function applyEvent(
     bound,
     event,
     acceptUnmatchedUserMessages,
+    reuseCollections,
   );
-  const pendingEvents = new Map(next.pendingEvents);
+  const pendingEvents = reuseCollections
+    ? next.pendingEvents
+    : new Map(next.pendingEvents);
   let queued = pendingEvents.get(next.cursor.lastSeq + 1);
   while (queued) {
     pendingEvents.delete(next.cursor.lastSeq + 1);
@@ -890,6 +987,7 @@ export function applyEvent(
       { ...next, pendingEvents },
       queued,
       acceptUnmatchedUserMessages,
+      reuseCollections,
     );
     queued = pendingEvents.get(next.cursor.lastSeq + 1);
   }
@@ -903,12 +1001,39 @@ export function applyEvent(
   };
 }
 
+export function applyEvent(
+  state: ConversationState,
+  event: TypedDesktopEvent,
+  options: { acceptUnmatchedUserMessages?: boolean } = {},
+): ConversationState {
+  return applyEventInternal(state, event, options);
+}
+
 /** Apply many events in order (still enforces dedup / gap rules). */
 export function applyEvents(
   state: ConversationState,
   events: TypedDesktopEvent[],
+  options: { acceptUnmatchedUserMessages?: boolean } = {},
 ): ConversationState {
-  return events.reduce((s, e) => applyEvent(s, e), state);
+  if (events.length === 0) return state;
+  // Preserve reducer immutability at the public boundary, then let the private
+  // batch reuse its containers instead of copying growing arrays/maps per event.
+  const transient: ConversationState = {
+    ...state,
+    items: state.items.slice(),
+    seenKeys: new Set(state.seenKeys),
+    toolIndex: new Map(state.toolIndex),
+    pendingEvents: new Map(state.pendingEvents),
+  };
+  return events.reduce(
+    (next, event) =>
+      applyEventInternal(next, event, {
+        acceptUnmatchedUserMessages:
+          options.acceptUnmatchedUserMessages ?? true,
+        reuseCollections: true,
+      }),
+    transient,
+  );
 }
 
 /**
@@ -993,7 +1118,7 @@ export function applySnapshot(
     ) {
       return state;
     }
-    return applySequencedEvent(state, event, true);
+    return applySequencedEvent(state, event, true, true);
   }, next);
   next = freezeStreamingAssistant(next);
   next = {

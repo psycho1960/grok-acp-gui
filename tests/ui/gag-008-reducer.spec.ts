@@ -73,6 +73,39 @@ describe("GAG-008 conversation reducer", () => {
     expect(state.cursor.lastSeq).toBe(1);
   });
 
+  it("keeps the input state immutable while reusing private batch containers", () => {
+    const input = createEmptyConversationState(FIX_TASK);
+    const inputItems = input.items;
+    const inputSeenKeys = input.seenKeys;
+    const inputToolIndex = input.toolIndex;
+    const inputPendingEvents = input.pendingEvents;
+
+    const state = applyEvents(input, [
+      fixtureAssistantDelta(1, "A"),
+      fixtureToolDelta(2, {
+        toolCallId: "batch-tool",
+        title: "读取文件",
+        kind: "read",
+        status: "completed",
+      }),
+      fixtureAssistantDelta(3, "B"),
+    ]);
+
+    expect(input.items).toBe(inputItems);
+    expect(input.items).toHaveLength(0);
+    expect(input.seenKeys).toBe(inputSeenKeys);
+    expect(input.seenKeys.size).toBe(0);
+    expect(input.toolIndex).toBe(inputToolIndex);
+    expect(input.toolIndex.size).toBe(0);
+    expect(input.pendingEvents).toBe(inputPendingEvents);
+    expect(input.pendingEvents.size).toBe(0);
+    expect(state.items).not.toBe(inputItems);
+    expect(state.seenKeys).not.toBe(inputSeenKeys);
+    expect(state.toolIndex).not.toBe(inputToolIndex);
+    expect(state.pendingEvents).not.toBe(inputPendingEvents);
+    expect(state.cursor.lastSeq).toBe(3);
+  });
+
   it("does not create a blank assistant message from whitespace-only deltas", () => {
     const state = applyEvents(createEmptyConversationState(FIX_TASK), [
       fixtureAssistantDelta(1, "\n\n"),
